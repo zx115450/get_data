@@ -25,17 +25,68 @@ load_dotenv()
 _SERVER_HOST = os.getenv("SERVER_HOST", "127.0.0.1").strip() or "127.0.0.1"
 _SERVER_PORT = int(os.getenv("SERVER_PORT") or "8000")
 BASE = f"http://{_SERVER_HOST}:{_SERVER_PORT}"
-
-import os
-from dotenv import load_dotenv
-
-load_dotenv()
-
-_SERVER_HOST = os.getenv("SERVER_HOST", "127.0.0.1").strip() or "127.0.0.1"
-_SERVER_PORT = int(os.getenv("SERVER_PORT") or "8000")
-BASE = f"http://{_SERVER_HOST}:{_SERVER_PORT}"
 PROBLEM_TYPES = ["自动", "array", "tree", "graph", "string", "number_theory"]
 LANGS = ["python", "cpp"]
+
+
+def _pids_listening_on_port(port: int) -> set[int]:
+    """查出正在监听指定端口的进程 PID 集合。"""
+    pids: set[int] = set()
+    if os.name == "nt":
+        try:
+            out = subprocess.check_output(["netstat", "-ano"], text=True, errors="ignore")
+        except Exception:
+            return pids
+        for line in out.splitlines():
+            if "LISTENING" not in line.upper():
+                continue
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            # TCP 127.0.0.1:8000  0.0.0.0:0  LISTENING  12345
+            local = parts[1]
+            if not (local.endswith(f":{port}") or local.endswith(f"]:{port}")):
+                continue
+            try:
+                pid = int(parts[-1])
+            except ValueError:
+                continue
+            if pid > 0:
+                pids.add(pid)
+        return pids
+
+    # macOS / Linux: lsof
+    try:
+        out = subprocess.check_output(
+            ["lsof", "-ti", f"TCP:{port}", "-sTCP:LISTEN"],
+            text=True, errors="ignore",
+        )
+        for line in out.splitlines():
+            line = line.strip()
+            if line.isdigit():
+                pids.add(int(line))
+    except Exception:
+        pass
+    return pids
+
+
+def _kill_pids(pids: set[int]) -> list[int]:
+    """强制结束给定 PID，返回实际尝试杀掉的列表。"""
+    killed: list[int] = []
+    for pid in sorted(pids):
+        try:
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    capture_output=True, text=True, timeout=10,
+                )
+            else:
+                import signal
+                os.kill(pid, signal.SIGKILL)
+            killed.append(pid)
+        except Exception:
+            continue
+    return killed
 
 # 与后端 runner 阶段文案对齐，用于顶部阶段条
 STAGES = [
@@ -238,7 +289,8 @@ class App:
         ttk.Label(srv, text="后端服务器：", foreground="#666").pack(side="left")
         self.btn_start_srv = ttk.Button(srv, text="启动服务器", command=self.on_start_server)
         self.btn_start_srv.pack(side="left", padx=4)
-        self.btn_kill_srv = ttk.Button(srv, text="杀死服务器", command=self.on_kill_server, state="disabled")
+        # 始终可点：按端口强杀，不依赖本次 GUI 是否启动过
+        self.btn_kill_srv = ttk.Button(srv, text="杀死服务器", command=self.on_kill_server)
         self.btn_kill_srv.pack(side="left", padx=4)
         self.server_pid_var = tk.StringVar(value="未启动")
         ttk.Label(srv, textvariable=self.server_pid_var, foreground="#666").pack(side="left", padx=8)
@@ -713,13 +765,28 @@ class App:
     # ---- 服务器控制 ----
     def on_start_server(self):
         """启动后端 FastAPI 服务器。"""
-        if self.server_proc is not None:
+        # 端口已被占用时先清掉，避免旧进程继续跑旧代码
+        occupied = _pids_listening_on_port(_SERVER_PORT)
+        if occupied:
+            killed = _kill_pids(occupied)
+            self._append_log(
+                f"启动前清理端口 {_SERVER_PORT}，已结束 PID: {killed or list(occupied)}"
+            )
+            self.server_proc = None
+
+        if self.server_proc is not None and self.server_proc.poll() is None:
             messagebox.showwarning("提示", "服务器已在运行")
             return
 
         try:
             # 使用当前 Python 解释器启动 uvicorn
-            cmd = [sys.executable, "-m", "uvicorn", "server.app:app", "--host", _SERVER_HOST, "--port", str(_SERVER_PORT)]
+            # --no-access-log：关闭 GET /jobs 轮询刷屏；--log-level warning：少打 INFO
+            cmd = [
+                sys.executable, "-m", "uvicorn", "server.app:app",
+                "--host", _SERVER_HOST, "--port", str(_SERVER_PORT),
+                "--no-access-log",
+                "--log-level", "warning",
+            ]
             self.server_proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -729,10 +796,9 @@ class App:
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
             )
             pid = self.server_proc.pid
-            self.server_pid_var.set(f"PID={pid}")
+            self.server_pid_var.set(f"端口 {_SERVER_PORT} | PID={pid}")
             self.btn_start_srv.config(state="disabled")
-            self.btn_kill_srv.config(state="normal")
-            self._append_log(f"服务器已启动: PID={pid}")
+            self._append_log(f"服务器已启动: port={_SERVER_PORT} PID={pid}")
 
             # 后台线程读取服务器输出到日志
             threading.Thread(
@@ -743,6 +809,7 @@ class App:
         except Exception as e:
             messagebox.showerror("启动服务器失败", str(e))
             self.server_proc = None
+            self.btn_start_srv.config(state="normal")
 
     def _server_log_reader(self, proc: subprocess.Popen):
         """读取服务器 stdout/stderr 并追加到日志区。"""
@@ -753,43 +820,46 @@ class App:
             pass
 
     def on_kill_server(self):
-        """杀死正在运行的后端服务器进程。"""
-        if self.server_proc is None:
-            messagebox.showwarning("提示", "服务器未运行")
+        """按 SERVER_PORT 强制结束占用该端口的进程（不依赖本次是否由 GUI 启动）。"""
+        pids = set(_pids_listening_on_port(_SERVER_PORT))
+        # 顺带结束 GUI 记住的子进程（若仍在）
+        if self.server_proc is not None and self.server_proc.poll() is None:
+            try:
+                pids.add(self.server_proc.pid)
+            except Exception:
+                pass
+
+        if not pids:
+            self.server_proc = None
+            self.server_pid_var.set("未启动")
+            self.btn_start_srv.config(state="normal")
+            self._append_log(f"端口 {_SERVER_PORT} 上没有监听进程")
+            messagebox.showinfo("提示", f"端口 {_SERVER_PORT} 上没有服务器在运行")
             return
 
-        pid = self.server_proc.pid
         try:
-            if os.name == "nt":
-                self.server_proc.terminate()
-                try:
-                    self.server_proc.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    self.server_proc.kill()
-                    self.server_proc.wait(timeout=3)
+            killed = _kill_pids(pids)
+            # 再扫一次，确认清空
+            left = _pids_listening_on_port(_SERVER_PORT)
+            if left:
+                _kill_pids(left)
+                left = _pids_listening_on_port(_SERVER_PORT)
+            if left:
+                messagebox.showwarning(
+                    "未完全清理",
+                    f"仍有进程占用端口 {_SERVER_PORT}: {sorted(left)}\n请手动 taskkill /F /PID …",
+                )
+                self._append_log(f"杀端口未净: 残留 PID {sorted(left)}")
             else:
-                # Unix: 先 SIGTERM 整个进程组，再 kill
-                import signal
-                try:
-                    os.killpg(os.getpgid(pid), signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                try:
-                    self.server_proc.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    try:
-                        os.killpg(os.getpgid(pid), signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    self.server_proc.wait(timeout=3)
+                self._append_log(
+                    f"已按端口 {_SERVER_PORT} 结束进程: {sorted(killed) or sorted(pids)}"
+                )
         except Exception as e:
             messagebox.showerror("杀死服务器失败", str(e))
         finally:
             self.server_proc = None
             self.server_pid_var.set("未启动")
             self.btn_start_srv.config(state="normal")
-            self.btn_kill_srv.config(state="disabled")
-            self._append_log(f"服务器已关闭: PID={pid}")
 
     def on_download_checker(self):
         if not self.job_id:

@@ -62,8 +62,12 @@ def _compile_err(label: str, rc: int, out: str, err: str) -> str:
 
 
 def _looks_like_omitted_stub(content: str) -> bool:
-    """历史压缩摘要 / 残缺片段，不能当真正源码写入。"""
-    if not content or len(content.strip()) < 80:
+    """历史压缩摘要 / 残缺片段，不能当真正源码写入。
+
+    不再按长度拦截（短但完整的 validator/gen 易误判）；
+    仅拒绝空内容，或带有对话压缩 stub 标记的文本。
+    """
+    if not content or not content.strip():
         return True
     markers = (
         "已写入",
@@ -138,7 +142,7 @@ def write_gen(content: str) -> str:
     """把生成器 C++ 源码写到 work_dir/gen.cpp，拷 testlib.h，编译成 gen(.exe)。"""
     if _looks_like_omitted_stub(content):
         return (
-            "ERROR: content 太短或像是历史摘要，不是完整 gen.cpp。"
+            "ERROR: content 像是历史摘要，不是完整 gen.cpp。"
             "请重新输出完整 C++ 源码（#include \"testlib.h\" + registerGen）。"
             "若需查看上一版，先 read_file(\"gen.cpp\")。"
         )
@@ -159,7 +163,7 @@ def write_validate(content: str) -> str:
     """把校验器 C++ 源码写到 work_dir/validator.cpp，拷 testlib.h，编译成 validator(.exe)。"""
     if _looks_like_omitted_stub(content):
         return (
-            "ERROR: content 太短或像是历史摘要，不是完整 validator.cpp。"
+            "ERROR: content 像是历史摘要，不是完整 validator.cpp。"
             "请重新输出完整 C++ 源码（#include \"testlib.h\" + registerValidation）。"
             "若需查看上一版，先 read_file(\"validator.cpp\")。"
         )
@@ -183,7 +187,7 @@ def write_checker(content: str) -> str:
     """把 special judge 的 C++ 源码写到 work_dir/checker.cpp，拷 testlib.h，编译成 checker(.exe)。"""
     if _looks_like_omitted_stub(content):
         return (
-            "ERROR: content 太短或像是历史摘要，不是完整 checker.cpp。"
+            "ERROR: content 像是历史摘要，不是完整 checker.cpp。"
             "请重新输出完整 C++ 源码（#include \"testlib.h\" + registerTestlibCmd）。"
             "若需查看上一版，先 read_file(\"checker.cpp\")。"
         )
