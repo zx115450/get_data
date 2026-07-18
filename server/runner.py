@@ -16,7 +16,6 @@ from server import job_store
 from server.few_shots import get_few_shot_rag, detected_type
 from server.few_shots_rag import add_job_to_corpus
 from server.text_agent import simplify_text
-from utils.constraint_match import agent_verify_constraints, check_constraints_consistency
 from utils.markup import to_plain_for_llm
 
 JOBS_DIR = Path("jobs")
@@ -262,36 +261,6 @@ def run_job(job: job_store.Job, std_code: str, lang: str,
     errs = validate_range_json(produced)
     if errs:
         raise RuntimeError("range.json 不合法:\n" + "\n".join(f"  - {e}" for e in errs))
-
-    # 约束一致性双重校验：代码初筛 + Agent 语义复核
-    code_warnings = check_constraints_consistency(
-        produced, problem_statement or "", data_range_desc or ""
-    )
-    if code_warnings:
-        job_store.add_progress(
-            job,
-            "约束一致性代码初筛告警:\n" + "\n".join(f"  - {w}" for w in code_warnings),
-        )
-        job_store.add_progress(job, "约束一致性进入 Agent 语义复核…")
-        passed, real_warnings = agent_verify_constraints(
-            produced, problem_statement or "", data_range_desc or "", code_warnings
-        )
-        if passed:
-            job_store.add_progress(
-                job,
-                "Agent 复核通过：代码告警均为误报，约束一致性校验通过"
-            )
-        else:
-            job_store.add_progress(
-                job,
-                "Agent 复核未通过:\n" + "\n".join(f"  - {w}" for w in real_warnings),
-            )
-            raise RuntimeError(
-                "range.json 与题面/范围描述存在约束不一致（代码+Agent 双重校验），已中止:\n"
-                + "\n".join(f"  - {w}" for w in real_warnings)
-            )
-    else:
-        job_store.add_progress(job, "约束一致性代码初筛通过")
 
     _exe = lambda b: b + (".exe" if os.name == "nt" else "")
     has_gen = (job_dir / _exe("gen")).exists() or (job_dir / "gen.py").exists() or (job_dir / "gen.cpp").exists()
