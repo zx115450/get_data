@@ -1,0 +1,71 @@
+【参考范例：一道数组题的标准写法（C++ testlib）】
+题面：给定 n 和 n 个整数 a1..an，输出它们的和。
+输入格式：第 1 行 n；第 2 行 n 个整数空格分隔。
+输出格式：一个整数。
+数据范围：n in [1,1e5]，ai in [-1e9,1e9]，默认 15 组，覆盖 n=1、n=max、全相等、降序；其余组按 index 在 [1,1e5] 上均匀分层（既有小也有大）。
+
+range.json:
+{
+  "count": 15,
+  "constraints": {"n": [1, 100000], "ai": [-1000000000, 1000000000]},
+  "edge_cases": ["edge_n1", "edge_nmax", "all_equal", "descending"]
+}
+
+gen.cpp:
+#include "testlib.h"
+using namespace std;
+// 把 [lo,hi] 按 --index/--count 切成 cnt 段，第 idx 组落在第 idx 段内，保证规模均匀
+int pickSized(int lo, int hi) {
+    int idx = opt<int>("index", 0);
+    int cnt = opt<int>("count", 15);
+    if (cnt <= 1) return rnd.next(lo, hi);
+    if (idx < 0) idx = 0;
+    if (idx >= cnt) idx = cnt - 1;
+    long long span = (long long)hi - lo;
+    long long a = lo + span * idx / cnt;
+    long long b = lo + span * (idx + 1) / cnt;
+    if (b < a) b = a;
+    if (a > hi) a = hi;
+    if (b > hi) b = hi;
+    return rnd.next((int)a, (int)b);
+}
+int main(int argc, char* argv[]) {
+    registerGen(argc, argv, 1);
+    int seed = opt<int>("seed");
+    string typ = opt<string>("type", "random");
+    int N_MIN = 1, N_MAX = 100000;
+    long long A_MIN = -1000000000LL, A_MAX = 1000000000LL;
+    int n;
+    if (typ == "edge_n1") n = 1;
+    else if (typ == "edge_nmax") n = N_MAX;
+    else n = pickSized(N_MIN, N_MAX);
+    vector<long long> a(n);
+    if (typ == "all_equal") {
+        long long v = rnd.next(A_MIN, A_MAX);
+        for (int i = 0; i < n; i++) a[i] = v;
+    } else if (typ == "descending") {
+        for (int i = 0; i < n; i++) a[i] = rnd.next(A_MIN, A_MAX);
+        sort(a.begin(), a.end(), greater<long long>());
+    } else {
+        for (int i = 0; i < n; i++) a[i] = rnd.next(A_MIN, A_MAX);
+    }
+    printf("%d\n", n);
+    for (int i = 0; i < n; i++) printf("%lld%c", a[i], i + 1 < n ? ' ' : '\n');
+    return 0;
+}
+
+validator.cpp:
+#include "testlib.h"
+using namespace std;
+int main(int argc, char* argv[]) {
+    registerValidation();
+    int n = inf.readInt(1, 100000, "n");
+    inf.readEoln();
+    for (int i = 0; i < n; i++) {
+        inf.readLong(-1000000000LL, 1000000000LL, "ai");
+        if (i + 1 < n) inf.readSpace();
+    }
+    inf.readEoln();
+    inf.readEof();
+    return 0;
+}

@@ -1,0 +1,54 @@
+【参考范例：一道字符串题的标准写法（C++ testlib）】
+题面：给定长度为 n 的小写字母字符串 s 和模式串 p，输出 p 在 s 中作为子串出现的次数。
+输入格式：第 1 行 n；第 2 行 s；第 3 行 p。
+输出格式：一个整数。
+数据范围：n in [1,1000]，p 长度 in [1,n]，15 组，覆盖全相同、模式在首/尾、无匹配、长连续段。
+
+range.json:
+{
+  "count": 15,
+  "constraints": {"n": [1, 1000]},
+  "edge_cases": ["all_same", "pattern_at_start", "pattern_at_end", "no_match", "long_run"]
+}
+
+gen.cpp:
+#include "testlib.h"
+using namespace std;
+int main(int argc, char* argv[]) {
+    registerGen(argc, argv, 1);
+    int seed = opt<int>("seed");
+    string typ = opt<string>("type", "random");
+    int n = rnd.next(1, 50);
+    string s, p;
+    if (typ == "all_same" || typ == "long_run") {
+        char c = 'a' + rnd.next(0, 25);
+        s = string(n, c);
+    } else {
+        s = "";
+        for (int i = 0; i < n; i++) s += char('a' + rnd.next(0, 25));
+    }
+    int plen = rnd.next(1, max(1, n));
+    if (typ == "pattern_at_start") p = s.substr(0, plen);
+    else if (typ == "pattern_at_end") p = s.substr(n - plen, plen);
+    else if (typ == "no_match") {
+        do { p = ""; for (int i = 0; i < plen; i++) p += char('a' + rnd.next(0, 25)); } while (s.find(p) != string::npos);
+    } else p = s.substr(0, plen);
+    printf("%d\n", n);
+    printf("%s\n", s.c_str());
+    printf("%s\n", p.c_str());
+    return 0;
+}
+
+validator.cpp:
+#include "testlib.h"
+using namespace std;
+int main(int argc, char* argv[]) {
+    registerValidation();
+    int n = inf.readInt(1, 1000, "n"); inf.readEoln();
+    string s = inf.readToken("[a-z]+", "s"); inf.readEoln();
+    string p = inf.readToken("[a-z]+", "p"); inf.readEoln();
+    ensuref((int)s.size() == n, "|s|=%d != n=%d", (int)s.size(), n);
+    ensuref((int)p.size() >= 1 && (int)p.size() <= n, "p len out of range");
+    inf.readEof();
+    return 0;
+}

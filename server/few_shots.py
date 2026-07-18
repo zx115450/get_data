@@ -1,0 +1,598 @@
+"""按题型的 few-shot 样板库。
+
+每个样板是一段「题面 + range.json + gen.py + validate.py」的完整范例，
+runner 会按 problem_type 选中并拼到给 Agent 的 task 里，让模型照着模仿。
+
+样板要求：正确、能跑、校验严格，且与目标题「同构但不同」。
+
+detect_problem_type(): 当前端没传 problem_type 时，按题面/数据范围关键词自动判题型。
+get_few_shot(): 统一入口，按显式指定或自动检测返回样板字符串（可能为空）。
+"""
+
+
+# C++ testlib 版样板从 few_shots_cpp 导入（当前默认用 C++ testlib）
+from server.few_shots_cpp import (
+    CPP_ARRAY_EXAMPLE,
+    CPP_TREE_EXAMPLE,
+    CPP_GRAPH_EXAMPLE,
+    CPP_STRING_EXAMPLE,
+    CPP_NUMBER_THEORY_EXAMPLE,
+    CPP_MULTI_TEST_EXAMPLE,
+)
+
+# 阶段一 RAG 召回入口（可选，失败时自动回退到关键词模板）
+from server.few_shots_rag import retrieve_few_shots, format_rag_few_shots
+
+
+# ---- 题型关键词（用于自动判型）----
+# 顺序无关，按命中关键词数量打分；都没有时默认 array（最通用）。
+# 关键词尽量选各题型独有的，避免「边/节点」这种树图共用的泛词主导。
+_TYPE_KEYWORDS = {
+    "tree": ["树", "tree", "直径", "父节点", "lca", "无根", "有根", "二叉树",
+             "dfs 树", "树形 dp", "子树", "depth", "forest"],
+    "graph": ["图", "graph", "连通块", "最短路", "最短路径", "环", "mst",
+              "二分图", "网络流", "邻接", "割点", "桥", "dijkstra", "bfs 图"],
+    "string": ["字符串", "string", "子串", "子序列", "模式", "回文",
+               "kmp", "trie", "后缀", "hash 串", "匹配"],
+    "number_theory": ["gcd", "lcm", "素数", "质数", "同余", "数论", "约数",
+                      "整除", "欧拉", "费马", "逆元", "模意义"],
+    "array": ["数组", "序列", "求和", "区间", "排序", "前缀和",
+              "最大子段", "逆序对", "差分", "双指针"],
+    "multi_test": ["多测", "多组", "测试组数", "t 组", "T 组", "sum n",
+                   "multi test", "multiple test"],
+}
+
+# 标程源码中用于辅助判型的关键词。比题面关键词更侧重算法/数据结构痕迹。
+_STD_CODE_KEYWORDS = {
+    "tree": [
+        "tree", "dfs", "lca", "diameter", "subtree", "parent", "children",
+        "ancestor", "depth", "height", "rooted", "binary tree", "fenwick",
+    ],
+    "graph": [
+        "graph", "adj", "adjacency", "bfs", "dfs", "dijkstra", "floyd",
+        "kruskal", "prim", "mst", "topological", "union", "dsu", "scc",
+        "tarjan", "bridge", "cut vertex", "dag", "bipartite", "flow",
+    ],
+    "string": [
+        "string", "substr", "substring", "kmp", "trie", "suffix", "prefix",
+        "palindrome", "hash", "rolling hash", "z-function", "manacher",
+    ],
+    "number_theory": [
+        "gcd", "lcm", "prime", "sieve", "mod", "inverse", "phi", "factor",
+        "divisor", "exgcd", "powmod", "fast pow", "combinatorics", "nCr",
+    ],
+    "array": [
+        "array", "sort", "prefix", "segment tree", "fenwick", "binary search",
+        "two pointers", "sliding window", "dp", "max subarray", "inversion",
+    ],
+    "multi_test": [
+        "t--", "while(t--)", "while (t--)", "for(int t", "for (int t",
+        "read(t)", "cin >> t", "scanf(\"%d\", &t)", "sum n", "sumn",
+    ],
+}
+
+
+def _score_by_keywords(text: str, keyword_dict: dict) -> dict:
+    """按 keyword_dict 给各类别打分。"""
+    text = (text or "").lower()
+    scores = {typ: 0 for typ in keyword_dict}
+    for typ, kws in keyword_dict.items():
+        for kw in kws:
+            scores[typ] += text.count(kw.lower())
+    return scores
+
+
+def detect_problem_type(
+    problem_statement: str,
+    data_range_desc: str = "",
+    std_code: str = "",
+) -> str:
+    """综合题面、范围描述、标程源码给题型打分，返回得分最高的；全无命中默认 array。"""
+    stmt_scores = _score_by_keywords(problem_statement + " " + data_range_desc, _TYPE_KEYWORDS)
+    code_scores = _score_by_keywords(std_code, _STD_CODE_KEYWORDS)
+
+    # 合并：题面权重 1，标程权重 1。可在后续按效果调整。
+    scores = {typ: stmt_scores.get(typ, 0) + code_scores.get(typ, 0)
+              for typ in set(stmt_scores) | set(code_scores)}
+    best = max(scores, key=scores.get)
+    return best if scores[best] > 0 else "array"
+
+
+# 6 个固定模板（来自 few_shots_cpp，默认使用 C++ testlib 版本）
+FEW_SHOTS = {
+    "array": CPP_ARRAY_EXAMPLE,
+    "tree": CPP_TREE_EXAMPLE,
+    "graph": CPP_GRAPH_EXAMPLE,
+    "string": CPP_STRING_EXAMPLE,
+    "number_theory": CPP_NUMBER_THEORY_EXAMPLE,
+    "multi_test": CPP_MULTI_TEST_EXAMPLE,
+}
+
+
+def get_few_shot(
+    problem_type: str,
+    problem_statement: str = "",
+    data_range_desc: str = "",
+    std_code: str = "",
+) -> str:
+    """统一取样板：显式指定优先，否则自动判型；找不到返回空串。"""
+    typ = problem_type or detect_problem_type(problem_statement, data_range_desc, std_code)
+    return FEW_SHOTS.get(typ, "")
+
+
+def detected_type(
+    problem_type: str,
+    problem_statement: str = "",
+    data_range_desc: str = "",
+    std_code: str = "",
+) -> str:
+    """返回最终生效的题型名（用于日志展示）。"""
+    return problem_type or detect_problem_type(problem_statement, data_range_desc, std_code)
+
+
+# ---- 数组 / 序列题（求和类）----
+ARRAY_EXAMPLE = """【参考范例：一道数组题的标准写法】
+题面：给定 n 和 n 个整数 a1..an，输出它们的和。
+输入格式：第 1 行 n；第 2 行 n 个整数空格分隔。
+输出格式：一个整数。
+数据范围：n∈[1,1e5]，ai∈[-1e9,1e9]，20 组，覆盖 n=1、n=max、全相等、降序。
+
+range.json:
+{
+  "count": 20,
+  "constraints": {"n": [1, 100000], "ai": [-1000000000, 1000000000]},
+  "edge_cases": ["edge_n1", "edge_nmax", "all_equal", "descending"]
+}
+
+gen.py:
+import argparse, random, sys
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--seed", type=int, required=True)
+    ap.add_argument("--type", default="random")
+    a = ap.parse_args()
+    rng = random.Random(a.seed)
+    N_MIN, N_MAX = 1, 100000
+    A_MIN, A_MAX = -1000000000, 1000000000
+    if a.type == "edge_n1":
+        n = 1
+    elif a.type == "edge_nmax":
+        n = N_MAX
+    else:
+        n = rng.randint(N_MIN, min(100, N_MAX))
+    if a.type == "all_equal":
+        v = rng.randint(A_MIN, A_MAX); vals = [v] * n
+    elif a.type == "descending":
+        vals = sorted([rng.randint(A_MIN, A_MAX) for _ in range(n)], reverse=True)
+    else:
+        vals = [rng.randint(A_MIN, A_MAX) for _ in range(n)]
+    print(n)
+    print(" ".join(map(str, vals)))
+
+if __name__ == "__main__":
+    main()
+
+validate.py:
+import sys
+
+def main():
+    data = sys.stdin.read().strip().split()
+    if not data:
+        print("empty input", file=sys.stderr); sys.exit(1)
+    try:
+        n = int(data[0])
+    except ValueError:
+        print("n not int", file=sys.stderr); sys.exit(1)
+    if not (1 <= n <= 100000):
+        print(f"n out of range: {n}", file=sys.stderr); sys.exit(1)
+    if len(data) != 1 + n:
+        print(f"expected {n} numbers, got {len(data)-1}", file=sys.stderr); sys.exit(1)
+    for x in data[1:]:
+        try:
+            v = int(x)
+        except ValueError:
+            print(f"not int: {x}", file=sys.stderr); sys.exit(1)
+        if not (-1000000000 <= v <= 1000000000):
+            print(f"ai out of range: {v}", file=sys.stderr); sys.exit(1)
+    sys.exit(0)
+
+if __name__ == "__main__":
+    main()
+"""
+
+# ---- 树题（求直径类）----
+TREE_EXAMPLE = """【参考范例：一道树题的标准写法】
+题面：给定一棵 n 个节点的无权无根树，求树的直径（最长简单路径的边数）。
+输入格式：第 1 行 n；接下来 n-1 行每行两个整数 u v 表示一条边（节点编号 1..n）。
+输出格式：一个整数。
+数据范围：n∈[2,1e5]，20 组，覆盖链、菊花、随机树、平衡二叉树、n=2。
+
+range.json:
+{
+  "count": 20,
+  "constraints": {"n": [2, 100000]},
+  "edge_cases": ["chain", "star", "random_tree", "balanced_binary", "edge_n2"]
+}
+
+gen.py:
+import argparse, random, sys
+
+def build(n, typ, rng):
+    if n == 1:
+        return []
+    if typ == "chain":
+        return [(i, i + 1) for i in range(1, n)]
+    if typ == "star":
+        return [(1, i) for i in range(2, n + 1)]
+    if typ == "balanced_binary":
+        return [(i // 2, i) for i in range(2, n + 1)]
+    # random_tree: 节点 i 连到 1..i-1 中的随机一个，保证连通无环
+    return [(rng.randint(1, i - 1), i) for i in range(2, n + 1)]
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--seed", type=int, required=True)
+    ap.add_argument("--type", default="random_tree")
+    a = ap.parse_args()
+    rng = random.Random(a.seed)
+    N_MIN, N_MAX = 2, 100000
+    if a.type == "edge_n2":
+        n = 2
+    elif a.type == "chain" or a.type == "star" or a.type == "balanced_binary":
+        n = rng.randint(N_MIN, min(1000, N_MAX))
+    else:
+        n = rng.randint(N_MIN, min(1000, N_MAX))
+    edges = build(n, a.type, rng)
+    print(n)
+    for u, v in edges:
+        print(u, v)
+
+if __name__ == "__main__":
+    main()
+
+validate.py:
+import sys
+
+def main():
+    data = sys.stdin.read().strip().split()
+    if not data:
+        print("empty input", file=sys.stderr); sys.exit(1)
+    idx = 0
+    try:
+        n = int(data[idx]); idx += 1
+    except ValueError:
+        print("n not int", file=sys.stderr); sys.exit(1)
+    if not (2 <= n <= 100000):
+        print(f"n out of range: {n}", file=sys.stderr); sys.exit(1)
+    if len(data) - idx != 2 * (n - 1):
+        print(f"expected {n-1} edges, got {(len(data)-idx)//2}", file=sys.stderr); sys.exit(1)
+    edges = []
+    seen = set()
+    for _ in range(n - 1):
+        u = int(data[idx]); v = int(data[idx + 1]); idx += 2
+        if not (1 <= u <= n) or not (1 <= v <= n):
+            print(f"node out of range: {u} {v}", file=sys.stderr); sys.exit(1)
+        if u == v:
+            print(f"self loop: {u}", file=sys.stderr); sys.exit(1)
+        key = (min(u, v), max(u, v))
+        if key in seen:
+            print(f"duplicate edge: {u} {v}", file=sys.stderr); sys.exit(1)
+        seen.add(key)
+        edges.append((u, v))
+    # 并查集查连通 + 无环
+    parent = list(range(n + 1))
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]; x = parent[x]
+        return x
+    for u, v in edges:
+        ru, rv = find(u), find(v)
+        if ru == rv:
+            print(f"cycle at edge {u} {v}", file=sys.stderr); sys.exit(1)
+        parent[ru] = rv
+    root = find(1)
+    for i in range(2, n + 1):
+        if find(i) != root:
+            print("not connected", file=sys.stderr); sys.exit(1)
+    sys.exit(0)
+
+if __name__ == "__main__":
+    main()
+"""
+
+# ---- 图题（连通性类）----
+GRAPH_EXAMPLE = """【参考范例：一道图题的标准写法】
+题面：给定 n 个点 m 条边的无向图（无自环无重边），判断是否连通。
+输入格式：第 1 行 n m；接下来 m 行每行 u v。
+输出格式：YES 或 NO。
+数据范围：n∈[1,1000]，m∈[0,n*(n-1)/2]，15 组，覆盖连通树、不连通、完全图、链、菊花、随机稀疏。
+
+range.json:
+{
+  "count": 15,
+  "constraints": {"n": [1, 1000], "m": [0, 499500]},
+  "edge_cases": ["connected_tree", "disconnected", "complete", "path", "star", "random_sparse"]
+}
+
+gen.py:
+import argparse, random, sys
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--seed", type=int, required=True)
+    ap.add_argument("--type", default="random_sparse")
+    a = ap.parse_args()
+    rng = random.Random(a.seed)
+    N_MIN, N_MAX = 1, 1000
+    n = rng.randint(max(2, N_MIN), min(50, N_MAX))
+    edges = []
+    if a.type == "connected_tree":
+        for i in range(2, n + 1):
+            edges.append((rng.randint(1, i - 1), i))
+    elif a.type == "disconnected":
+        mid = n // 2 or 1
+        for i in range(2, mid + 1):
+            edges.append((rng.randint(1, i - 1), i))
+        for i in range(mid + 2, n + 1):
+            edges.append((rng.randint(mid + 1, i - 1) if i > mid + 1 else mid + 1, i))
+    elif a.type == "complete":
+        for u in range(1, n + 1):
+            for v in range(u + 1, n + 1):
+                edges.append((u, v))
+    elif a.type == "path":
+        for i in range(1, n):
+            edges.append((i, i + 1))
+    elif a.type == "star":
+        for i in range(2, n + 1):
+            edges.append((1, i))
+    else:  # random_sparse
+        pool = [(u, v) for u in range(1, n + 1) for v in range(u + 1, n + 1)]
+        rng.shuffle(pool)
+        m = rng.randint(0, min(len(pool), n))
+        edges = pool[:m]
+    print(n, len(edges))
+    for u, v in edges:
+        print(u, v)
+
+if __name__ == "__main__":
+    main()
+
+validate.py:
+import sys
+
+def main():
+    data = sys.stdin.read().strip().split()
+    if not data:
+        print("empty input", file=sys.stderr); sys.exit(1)
+    idx = 0
+    n = int(data[idx]); m = int(data[idx + 1]); idx += 2
+    if not (1 <= n <= 1000):
+        print(f"n out of range: {n}", file=sys.stderr); sys.exit(1)
+    if not (0 <= m <= 499500):
+        print(f"m out of range: {m}", file=sys.stderr); sys.exit(1)
+    if len(data) - idx != 2 * m:
+        print(f"expected {m} edges, got {(len(data)-idx)//2}", file=sys.stderr); sys.exit(1)
+    seen = set()
+    for _ in range(m):
+        u = int(data[idx]); v = int(data[idx + 1]); idx += 2
+        if not (1 <= u <= n) or not (1 <= v <= n):
+            print(f"node out of range: {u} {v}", file=sys.stderr); sys.exit(1)
+        if u == v:
+            print(f"self loop: {u}", file=sys.stderr); sys.exit(1)
+        key = (min(u, v), max(u, v))
+        if key in seen:
+            print(f"duplicate edge: {u} {v}", file=sys.stderr); sys.exit(1)
+        seen.add(key)
+    sys.exit(0)
+
+if __name__ == "__main__":
+    main()
+"""
+
+# ---- 字符串题（模式匹配类）----
+STRING_EXAMPLE = """【参考范例：一道字符串题的标准写法】
+题面：给定长度为 n 的小写字母字符串 s 和模式串 p，输出 p 在 s 中作为子串出现的次数。
+输入格式：第 1 行 n；第 2 行 s；第 3 行 p。
+输出格式：一个整数。
+数据范围：n∈[1,1000]，p 长度∈[1,n]，15 组，覆盖全相同、模式在首/尾、无匹配、长连续段。
+
+range.json:
+{
+  "count": 15,
+  "constraints": {"n": [1, 1000]},
+  "edge_cases": ["all_same", "pattern_at_start", "pattern_at_end", "no_match", "long_run"]
+}
+
+gen.py:
+import argparse, random, string, sys
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--seed", type=int, required=True)
+    ap.add_argument("--type", default="random")
+    a = ap.parse_args()
+    rng = random.Random(a.seed)
+    letters = string.ascii_lowercase
+    N_MIN, N_MAX = 1, 1000
+    n = rng.randint(N_MIN, min(50, N_MAX))
+    if a.type == "all_same":
+        c = rng.choice(letters); s = c * n
+    elif a.type == "long_run":
+        c = rng.choice(letters); s = c * n
+    else:
+        s = "".join(rng.choice(letters) for _ in range(n))
+    p_len = rng.randint(1, max(1, n))
+    if a.type == "pattern_at_start":
+        p = s[:p_len]
+    elif a.type == "pattern_at_end":
+        p = s[n - p_len:]
+    elif a.type == "no_match":
+        p = "".join(rng.choice(letters) for _ in range(p_len))
+        while p in s:
+            p = "".join(rng.choice(letters) for _ in range(p_len))
+    else:
+        p = s[:p_len] if n > 0 else "a"
+    print(n)
+    print(s)
+    print(p)
+
+if __name__ == "__main__":
+    main()
+
+validate.py:
+import sys
+
+def main():
+    lines = sys.stdin.read().split("\\n")
+    if len(lines) < 3:
+        print("need 3 lines", file=sys.stderr); sys.exit(1)
+    try:
+        n = int(lines[0].strip())
+    except ValueError:
+        print("n not int", file=sys.stderr); sys.exit(1)
+    if not (1 <= n <= 1000):
+        print(f"n out of range: {n}", file=sys.stderr); sys.exit(1)
+    s = lines[1].rstrip("\\n")
+    p = lines[2].rstrip("\\n")
+    if len(s) != n:
+        print(f"|s|={len(s)} != n={n}", file=sys.stderr); sys.exit(1)
+    if not (1 <= len(p) <= n):
+        print(f"p len out of range: {len(p)}", file=sys.stderr); sys.exit(1)
+    for ch in s + p:
+        if not ("a" <= ch <= "z"):
+            print(f"non-lowercase: {ch!r}", file=sys.stderr); sys.exit(1)
+    sys.exit(0)
+
+if __name__ == "__main__":
+    main()
+"""
+
+# ---- 数论题（GCD 类）----
+NUMBER_THEORY_EXAMPLE = """【参考范例：一道数论题的标准写法】
+题面：给定 n 个正整数，输出它们的最大公约数。
+输入格式：第 1 行 n；第 2 行 n 个正整数空格分隔。
+输出格式：一个整数。
+数据范围：n∈[1,1e5]，ai∈[1,1e9]，15 组，覆盖 n=1、全相等、全素数、含两两互素、全偶。
+
+range.json:
+{
+  "count": 15,
+  "constraints": {"n": [1, 100000], "ai": [1, 1000000000]},
+  "edge_cases": ["edge_n1", "all_equal", "all_prime", "coprime_pair", "all_even"]
+}
+
+gen.py:
+import argparse, random, sys
+
+def is_prime(x):
+    if x < 2: return False
+    i = 2
+    while i * i <= x:
+        if x % i == 0: return False
+        i += 1
+    return True
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--seed", type=int, required=True)
+    ap.add_argument("--type", default="random")
+    a = ap.parse_args()
+    rng = random.Random(a.seed)
+    N_MIN, N_MAX = 1, 100000
+    A_MIN, A_MAX = 1, 1000000000
+    if a.type == "edge_n1":
+        n = 1
+    else:
+        n = rng.randint(N_MIN, min(100, N_MAX))
+    if a.type == "all_equal":
+        v = rng.randint(A_MIN, A_MAX); vals = [v] * n
+    elif a.type == "all_prime":
+        primes = [x for x in range(2, 200) if is_prime(x)]
+        vals = [rng.choice(primes) for _ in range(n)]
+    elif a.type == "coprime_pair":
+        # 选互不相同的素数保证两两互素
+        primes = [x for x in range(2, 500) if is_prime(x)]
+        rng.shuffle(primes)
+        vals = primes[:n]
+    elif a.type == "all_even":
+        vals = [rng.randint(A_MIN // 2, A_MAX // 2) * 2 for _ in range(n)]
+    else:
+        vals = [rng.randint(A_MIN, A_MAX) for _ in range(n)]
+    print(n)
+    print(" ".join(map(str, vals)))
+
+if __name__ == "__main__":
+    main()
+
+validate.py:
+import sys
+
+def main():
+    data = sys.stdin.read().strip().split()
+    if not data:
+        print("empty input", file=sys.stderr); sys.exit(1)
+    try:
+        n = int(data[0])
+    except ValueError:
+        print("n not int", file=sys.stderr); sys.exit(1)
+    if not (1 <= n <= 100000):
+        print(f"n out of range: {n}", file=sys.stderr); sys.exit(1)
+    if len(data) != 1 + n:
+        print(f"expected {n} numbers, got {len(data)-1}", file=sys.stderr); sys.exit(1)
+    for x in data[1:]:
+        try:
+            v = int(x)
+        except ValueError:
+            print(f"not int: {x}", file=sys.stderr); sys.exit(1)
+        if not (1 <= v <= 1000000000):
+            print(f"ai out of range: {v}", file=sys.stderr); sys.exit(1)
+    sys.exit(0)
+
+if __name__ == "__main__":
+    main()
+"""
+
+def detected_type(
+    problem_type: str,
+    problem_statement: str = "",
+    data_range_desc: str = "",
+    std_code: str = "",
+) -> str:
+    """返回最终生效的题型名（用于日志展示）。"""
+    return problem_type or detect_problem_type(problem_statement, data_range_desc, std_code)
+
+
+def get_few_shot_rag(
+    problem_type: str = "",
+    problem_statement: str = "",
+    data_range_desc: str = "",
+    std_code: str = "",
+    top_k: int = 2,
+    use_fallback: bool = True,
+) -> tuple[str, str]:
+    """RAG 召回 few-shot 模板，并返回 (模板字符串, 召回信息摘要)。
+
+    若 RAG 调用失败或返回空：
+      - use_fallback=True 时，回退到原有关键词模板匹配
+      - use_fallback=False 时，返回空字符串
+    """
+    try:
+        examples = retrieve_few_shots(problem_statement, data_range_desc, std_code, top_k=top_k)
+    except Exception as e:
+        if not use_fallback:
+            return "", f"RAG 召回失败: {e}"
+        fallback = get_few_shot(problem_type, problem_statement, data_range_desc, std_code)
+        return fallback, f"RAG 失败，已回退 keyword 模板: {type(e).__name__}: {e}"
+
+    if not examples:
+        if not use_fallback:
+            return "", "RAG 未召回任何模板"
+        fallback = get_few_shot(problem_type, problem_statement, data_range_desc, std_code)
+        return fallback, "RAG 未召回模板，已回退 keyword 匹配"
+
+    rag_block = format_rag_few_shots(examples)
+    summary = f"RAG 召回 {len(examples)} 个模板: " + ", ".join(
+        f"{ex['key']}({ex['score']})" for ex in examples
+    )
+    return rag_block, summary

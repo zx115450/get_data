@@ -1,0 +1,80 @@
+【参考范例：一道树题的标准写法（C++ testlib）】
+题面：给定一棵 n 个节点的无权无根树，求树的直径（最长简单路径的边数）。
+输入格式：第 1 行 n；接下来 n-1 行每行两个整数 u v 表示一条边（节点编号 1..n）。
+输出格式：一个整数。
+数据范围：n in [2,1e5]，默认 15 组，覆盖链、菊花、随机树、平衡二叉树、n=2；其余组 n 按 index 在 [2,1e5] 分层。
+
+range.json:
+{
+  "count": 15,
+  "constraints": {"n": [2, 100000]},
+  "edge_cases": ["chain", "star", "random_tree", "balanced_binary", "edge_n2"]
+}
+
+gen.cpp:
+#include "testlib.h"
+using namespace std;
+int pickSized(int lo, int hi) {
+    int idx = opt<int>("index", 0);
+    int cnt = opt<int>("count", 15);
+    if (cnt <= 1) return rnd.next(lo, hi);
+    if (idx < 0) idx = 0;
+    if (idx >= cnt) idx = cnt - 1;
+    long long span = (long long)hi - lo;
+    long long a = lo + span * idx / cnt;
+    long long b = lo + span * (idx + 1) / cnt;
+    if (b < a) b = a;
+    if (a > hi) a = hi;
+    if (b > hi) b = hi;
+    return rnd.next((int)a, (int)b);
+}
+vector<pair<int,int>> build(int n, string typ) {
+    vector<pair<int,int>> e;
+    if (n == 1) return e;
+    if (typ == "chain") { for (int i = 1; i < n; i++) e.push_back({i, i + 1}); return e; }
+    if (typ == "star") { for (int i = 2; i <= n; i++) e.push_back({1, i}); return e; }
+    if (typ == "balanced_binary") { for (int i = 2; i <= n; i++) e.push_back({i / 2, i}); return e; }
+    for (int i = 2; i <= n; i++) e.push_back({rnd.next(1, i - 1), i});
+    return e;
+}
+int main(int argc, char* argv[]) {
+    registerGen(argc, argv, 1);
+    int seed = opt<int>("seed");
+    string typ = opt<string>("type", "random_tree");
+    int N_MIN = 2, N_MAX = 100000;
+    int n;
+    if (typ == "edge_n2") n = 2;
+    else n = pickSized(N_MIN, N_MAX);
+    auto e = build(n, typ);
+    printf("%d\n", n);
+    for (auto p : e) printf("%d %d\n", p.first, p.second);
+    return 0;
+}
+
+validator.cpp:
+#include "testlib.h"
+using namespace std;
+const int MAXN = 100005;
+int par[MAXN];
+int find(int x) { return par[x] == x ? x : par[x] = find(par[x]); }
+int main(int argc, char* argv[]) {
+    registerValidation();
+    int n = inf.readInt(2, 100000, "n");
+    inf.readEoln();
+    for (int i = 1; i <= n; i++) par[i] = i;
+    set<pair<int,int>> es;
+    for (int i = 0; i < n - 1; i++) {
+        int u = inf.readInt(1, n, "u"); inf.readSpace();
+        int v = inf.readInt(1, n, "v"); inf.readEoln();
+        ensuref(u != v, "self loop at %d", u);
+        auto key = make_pair(min(u, v), max(u, v));
+        ensuref(es.insert(key).second, "duplicate edge %d %d", u, v);
+        int ru = find(u), rv = find(v);
+        ensuref(ru != rv, "cycle at %d %d", u, v);
+        par[ru] = rv;
+    }
+    int root = find(1);
+    for (int i = 2; i <= n; i++) ensuref(find(i) == root, "not connected");
+    inf.readEof();
+    return 0;
+}

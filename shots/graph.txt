@@ -1,0 +1,59 @@
+【参考范例：一道图题的标准写法（C++ testlib）】
+题面：给定 n 个点 m 条边的无向图（无自环无重边），判断是否连通。
+输入格式：第 1 行 n m；接下来 m 行每行 u v。
+输出格式：YES 或 NO。
+数据范围：n in [1,1000]，m in [0,n*(n-1)/2]，15 组，覆盖连通树、不连通、完全图、链、菊花、随机稀疏。
+
+range.json:
+{
+  "count": 15,
+  "constraints": {"n": [1, 1000], "m": [0, 499500]},
+  "edge_cases": ["connected_tree", "disconnected", "complete", "path", "star", "random_sparse"]
+}
+
+gen.cpp:
+#include "testlib.h"
+using namespace std;
+int main(int argc, char* argv[]) {
+    registerGen(argc, argv, 1);
+    int seed = opt<int>("seed");
+    string typ = opt<string>("type", "random_sparse");
+    int n = rnd.next(2, 50);
+    vector<pair<int,int>> edges;
+    if (typ == "connected_tree") { for (int i = 2; i <= n; i++) edges.push_back({rnd.next(1, i - 1), i}); }
+    else if (typ == "disconnected") {
+        int mid = n / 2 ? n / 2 : 1;
+        for (int i = 2; i <= mid; i++) edges.push_back({rnd.next(1, i - 1), i});
+        for (int i = mid + 2; i <= n; i++) edges.push_back({rnd.next(mid + 1, i - 1), i});
+    } else if (typ == "complete") { for (int u = 1; u <= n; u++) for (int v = u + 1; v <= n; v++) edges.push_back({u, v}); }
+    else if (typ == "path") { for (int i = 1; i < n; i++) edges.push_back({i, i + 1}); }
+    else if (typ == "star") { for (int i = 2; i <= n; i++) edges.push_back({1, i}); }
+    else {
+        vector<pair<int,int>> pool;
+        for (int u = 1; u <= n; u++) for (int v = u + 1; v <= n; v++) pool.push_back({u, v});
+        for (int i = (int)pool.size() - 1; i > 0; i--) { int j = rnd.next(0, i); swap(pool[i], pool[j]); }
+        int m = rnd.next(0, min((int)pool.size(), n));
+        edges.assign(pool.begin(), pool.begin() + m);
+    }
+    printf("%d %d\n", n, (int)edges.size());
+    for (auto e : edges) printf("%d %d\n", e.first, e.second);
+    return 0;
+}
+
+validator.cpp:
+#include "testlib.h"
+using namespace std;
+int main(int argc, char* argv[]) {
+    registerValidation();
+    int n = inf.readInt(1, 1000, "n"); inf.readSpace();
+    int m = inf.readInt(0, 499500, "m"); inf.readEoln();
+    set<pair<int,int>> es;
+    for (int i = 0; i < m; i++) {
+        int u = inf.readInt(1, n, "u"); inf.readSpace();
+        int v = inf.readInt(1, n, "v"); inf.readEoln();
+        ensuref(u != v, "self loop %d", u);
+        ensuref(es.insert(make_pair(min(u, v), max(u, v))).second, "duplicate edge %d %d", u, v);
+    }
+    inf.readEof();
+    return 0;
+}

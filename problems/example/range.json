@@ -1,0 +1,11 @@
+{
+  "count": 30,
+  "constraints": {
+    "n": [1, 100000],
+    "ai": [-1000000000, 1000000000]
+  },
+  "edge_cases": ["edge_n1", "edge_nmax", "all_equal", "descending"],
+  "time_limit_ms": 1000,
+  "memory_limit_mb": 256,
+  "std_cmd": "python problems/example/std.py"
+}
