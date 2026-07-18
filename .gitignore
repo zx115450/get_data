@@ -1,4 +1,4 @@
-# 本地虚拟环境
+﻿# 本地虚拟环境
 .venv/
 env/
 venv/
@@ -12,11 +12,10 @@ __pycache__/
 *$py.class
 *.pyo
 
-# 运行时生成
+# 运行时生成（不要忽略源码目录 sandbox/）
 jobs/
 .cache/
 out/
-sandbox/
 
 # IDE
 .idea/

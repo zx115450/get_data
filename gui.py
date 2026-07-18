@@ -13,9 +13,11 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+import urllib.parse
+import urllib.request
+from pathlib import Path
 from tkinter import ttk, scrolledtext, filedialog, messagebox
 
-import urllib.request
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -160,6 +162,75 @@ class App:
         self.edge_list.pack(fill="both", expand=True, padx=4, pady=4)
 
         self.range_data = None  # 当前方案 dict；None 表示未提供
+
+        # 5) RAG 语料运营
+        tab_rag = ttk.Frame(nb)
+        nb.add(tab_rag, text="5. RAG 语料")
+        tip_rag = ttk.Frame(tab_rag)
+        tip_rag.pack(fill="x", padx=4, pady=4)
+        ttk.Label(
+            tip_rag,
+            text="查看 / 禁用 / 删除范例；可合并 data/ 下别人贡献的 *.json",
+            foreground="#666",
+        ).pack(side="left")
+        ttk.Button(tip_rag, text="刷新列表", command=self.on_rag_refresh).pack(side="right", padx=2)
+
+        filt = ttk.Frame(tab_rag)
+        filt.pack(fill="x", padx=4, pady=2)
+        ttk.Label(filt, text="来源：").pack(side="left")
+        self.rag_source = tk.StringVar(value="全部")
+        ttk.OptionMenu(filt, self.rag_source, "全部", "全部", "job", "template").pack(side="left", padx=4)
+        ttk.Label(filt, text="题型：").pack(side="left", padx=(8, 0))
+        self.rag_ptype = tk.StringVar(value="全部")
+        ttk.OptionMenu(
+            filt, self.rag_ptype, "全部",
+            "全部", "array", "tree", "graph", "string", "number_theory", "multi_test",
+        ).pack(side="left", padx=4)
+        self.rag_show_disabled = tk.BooleanVar(value=True)
+        ttk.Checkbutton(filt, text="显示已禁用", variable=self.rag_show_disabled).pack(side="left", padx=8)
+
+        rag_body = ttk.Frame(tab_rag)
+        rag_body.pack(fill="both", expand=True, padx=4, pady=4)
+
+        left = ttk.Frame(rag_body)
+        left.pack(side="left", fill="both", expand=True)
+        cols_rag = ("key", "source", "type", "rate", "disabled", "time")
+        self.rag_tree = ttk.Treeview(left, columns=cols_rag, show="headings", height=10)
+        self.rag_tree.heading("key", text="key")
+        self.rag_tree.heading("source", text="来源")
+        self.rag_tree.heading("type", text="题型")
+        self.rag_tree.heading("rate", text="成功率")
+        self.rag_tree.heading("disabled", text="禁用")
+        self.rag_tree.heading("time", text="入库时间")
+        self.rag_tree.column("key", width=110)
+        self.rag_tree.column("source", width=70)
+        self.rag_tree.column("type", width=90)
+        self.rag_tree.column("rate", width=70)
+        self.rag_tree.column("disabled", width=50)
+        self.rag_tree.column("time", width=140)
+        self.rag_tree.pack(side="left", fill="both", expand=True)
+        rag_scroll = ttk.Scrollbar(left, orient="vertical", command=self.rag_tree.yview)
+        rag_scroll.pack(side="right", fill="y")
+        self.rag_tree.configure(yscrollcommand=rag_scroll.set)
+        self.rag_tree.bind("<<TreeviewSelect>>", lambda _e: self.on_rag_select())
+
+        right = ttk.Frame(rag_body, width=280)
+        right.pack(side="right", fill="both", padx=(6, 0))
+        ttk.Label(right, text="摘要 / 内容预览", font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        self.rag_preview = scrolledtext.ScrolledText(right, height=12, font=("Consolas", 9), wrap="word")
+        self.rag_preview.pack(fill="both", expand=True, pady=4)
+        self.rag_preview.configure(state="disabled")
+
+        rag_ops = ttk.Frame(tab_rag)
+        rag_ops.pack(fill="x", padx=4, pady=4)
+        ttk.Button(rag_ops, text="查看详情", command=self.on_rag_view).pack(side="left", padx=2)
+        ttk.Button(rag_ops, text="禁用/启用", command=self.on_rag_toggle_disable).pack(side="left", padx=2)
+        ttk.Button(rag_ops, text="删除", command=self.on_rag_delete).pack(side="left", padx=2)
+        ttk.Separator(rag_ops, orient="vertical").pack(side="left", fill="y", padx=8)
+        ttk.Button(rag_ops, text="合并 data/*.json…", command=self.on_rag_merge).pack(side="left", padx=2)
+        ttk.Button(rag_ops, text="从文件导入…", command=self.on_rag_import_file).pack(side="left", padx=2)
+        self.rag_status = tk.StringVar(value="请先启动服务器，再点「刷新列表」")
+        ttk.Label(rag_ops, textvariable=self.rag_status, foreground="#666").pack(side="left", padx=12)
 
         # ---- 服务器控制栏 ----
         srv = ttk.Frame(root)
@@ -739,6 +810,271 @@ class App:
                 self.root_after(lambda: self.status.set(f"已保存 checker: {path}"))
             except Exception as e:
                 self.root_after(lambda: messagebox.showerror("下载 checker 失败", str(e)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    # ---- RAG 语料运营 ----
+    def _rag_selected_key(self) -> str:
+        sel = self.rag_tree.selection()
+        if not sel:
+            return ""
+        return self.rag_tree.item(sel[0], "values")[0]
+
+    def _rag_get_json(self, path: str, timeout: int = 30):
+        r = urllib.request.urlopen(f"{BASE}{path}", timeout=timeout)
+        return json.loads(r.read())
+
+    def _rag_post_json(self, path: str, body: dict, timeout: int = 120):
+        data = json.dumps(body).encode()
+        req = urllib.request.Request(
+            f"{BASE}{path}", data=data,
+            headers={"Content-Type": "application/json"},
+        )
+        r = urllib.request.urlopen(req, timeout=timeout)
+        return json.loads(r.read())
+
+    def _rag_delete(self, path: str, timeout: int = 30):
+        req = urllib.request.Request(f"{BASE}{path}", method="DELETE")
+        r = urllib.request.urlopen(req, timeout=timeout)
+        return json.loads(r.read())
+
+    def on_rag_refresh(self):
+        def work():
+            try:
+                src = self.rag_source.get()
+                ptype = self.rag_ptype.get()
+                qs = []
+                if src and src != "全部":
+                    qs.append(f"source={src}")
+                if ptype and ptype != "全部":
+                    qs.append(f"problem_type={ptype}")
+                qs.append(f"include_disabled={'true' if self.rag_show_disabled.get() else 'false'}")
+                q = "?" + "&".join(qs)
+                data = self._rag_get_json(f"/rag/corpus{q}")
+                items = data.get("items") or []
+
+                def fill():
+                    self.rag_tree.delete(*self.rag_tree.get_children())
+                    for it in items:
+                        rate = it.get("valid_rate")
+                        rate_s = f"{rate:.3f}" if isinstance(rate, (int, float)) else "-"
+                        self.rag_tree.insert("", "end", values=(
+                            it.get("key", ""),
+                            it.get("source", ""),
+                            it.get("problem_type") or "-",
+                            rate_s,
+                            "是" if it.get("disabled") else "否",
+                            (it.get("created_at") or "-")[:19],
+                        ))
+                    model = data.get("model") or "?"
+                    self.rag_status.set(f"共 {data.get('total', len(items))} 条 | model={model}")
+
+                self.root_after(fill)
+            except Exception as e:
+                self.root_after(lambda: self.rag_status.set(f"刷新失败: {e}"))
+                self.root_after(lambda: messagebox.showerror("RAG 刷新失败", str(e)))
+
+        self.rag_status.set("加载中…")
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_rag_select(self):
+        key = self._rag_selected_key()
+        if not key:
+            return
+
+        def work():
+            try:
+                it = self._rag_get_json(f"/rag/corpus/{urllib.parse.quote(key)}")
+                preview = (it.get("text") or it.get("text_preview") or "")[:1500]
+                content_head = (it.get("content") or "")[:2000]
+                text = (
+                    f"key: {it.get('key')}\n"
+                    f"source: {it.get('source')} | type: {it.get('problem_type') or '-'}\n"
+                    f"valid_rate: {it.get('valid_rate')} | disabled: {it.get('disabled')}\n"
+                    f"created_at: {it.get('created_at') or '-'}\n\n"
+                    f"--- text ---\n{preview}\n\n"
+                    f"--- content (截断) ---\n{content_head}"
+                )
+
+                def show():
+                    self.rag_preview.configure(state="normal")
+                    self.rag_preview.delete("1.0", "end")
+                    self.rag_preview.insert("1.0", text)
+                    self.rag_preview.configure(state="disabled")
+
+                self.root_after(show)
+            except Exception as e:
+                self.root_after(lambda: self.rag_status.set(f"预览失败: {e}"))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_rag_view(self):
+        key = self._rag_selected_key()
+        if not key:
+            messagebox.showinfo("提示", "请先选中一条语料")
+            return
+        self.on_rag_select()
+
+        def work():
+            try:
+                it = self._rag_get_json(f"/rag/corpus/{urllib.parse.quote(key)}")
+                content = it.get("content") or ""
+
+                def popup():
+                    win = tk.Toplevel(self.root)
+                    win.title(f"语料详情 — {key}")
+                    win.geometry("720x520")
+                    box = scrolledtext.ScrolledText(win, font=("Consolas", 9), wrap="word")
+                    box.pack(fill="both", expand=True, padx=8, pady=8)
+                    box.insert("1.0", content)
+                    box.configure(state="disabled")
+
+                self.root_after(popup)
+            except Exception as e:
+                self.root_after(lambda: messagebox.showerror("查看失败", str(e)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_rag_toggle_disable(self):
+        key = self._rag_selected_key()
+        if not key:
+            messagebox.showinfo("提示", "请先选中一条语料")
+            return
+        sel = self.rag_tree.selection()[0]
+        cur_disabled = self.rag_tree.item(sel, "values")[4] == "是"
+        new_disabled = not cur_disabled
+        action = "禁用" if new_disabled else "启用"
+        if not messagebox.askyesno("确认", f"确定{action}「{key}」？\n禁用后召回时会跳过。"):
+            return
+
+        def work():
+            try:
+                self._rag_post_json(
+                    f"/rag/corpus/{urllib.parse.quote(key)}/disable",
+                    {"disabled": new_disabled},
+                )
+                self.root_after(lambda: self.rag_status.set(f"已{action}: {key}"))
+                self.root_after(self.on_rag_refresh)
+            except Exception as e:
+                self.root_after(lambda: messagebox.showerror(f"{action}失败", str(e)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_rag_delete(self):
+        key = self._rag_selected_key()
+        if not key:
+            messagebox.showinfo("提示", "请先选中一条语料")
+            return
+        if not messagebox.askyesno("确认删除", f"永久删除语料「{key}」？此操作不可撤销。"):
+            return
+
+        def work():
+            try:
+                self._rag_delete(f"/rag/corpus/{urllib.parse.quote(key)}")
+                self.root_after(lambda: self.rag_status.set(f"已删除: {key}"))
+                self.root_after(self.on_rag_refresh)
+            except Exception as e:
+                self.root_after(lambda: messagebox.showerror("删除失败", str(e)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_rag_merge(self):
+        """列出 data/*.json 供选择合并。"""
+        def work():
+            try:
+                data = self._rag_get_json("/rag/data-files")
+                files = data.get("files") or []
+                if not files:
+                    self.root_after(lambda: messagebox.showinfo("提示", "data/ 下没有可合并的 *.json"))
+                    return
+
+                def choose():
+                    win = tk.Toplevel(self.root)
+                    win.title("合并 data/*.json")
+                    win.geometry("480x320")
+                    ttk.Label(win, text="选择要合并进当前语料库的文件（跳过同 key / 高相似）：").pack(
+                        anchor="w", padx=8, pady=6
+                    )
+                    lb = tk.Listbox(win, font=("Consolas", 10))
+                    lb.pack(fill="both", expand=True, padx=8, pady=4)
+                    for f in files:
+                        mark = " [种子]" if f.get("is_seed") else ""
+                        lb.insert("end", f"{f['name']}  ({f['size']} bytes){mark}")
+
+                    def do_merge():
+                        idxs = lb.curselection()
+                        if not idxs:
+                            messagebox.showinfo("提示", "请选一个文件")
+                            return
+                        name = files[idxs[0]]["name"]
+                        if files[idxs[0]].get("is_seed"):
+                            if not messagebox.askyesno(
+                                "确认",
+                                "这是当前种子文件 few_shots_rag_corpus.json，合并通常无新条目。仍继续？",
+                            ):
+                                return
+                        win.destroy()
+
+                        def run():
+                            try:
+                                self.rag_status.set(f"合并中: {name} …")
+                                st = self._rag_post_json(
+                                    "/rag/corpus/merge",
+                                    {"path": name, "skip_disabled": True},
+                                    timeout=300,
+                                )
+                                msg = (
+                                    f"合并完成：新增 {st.get('added', 0)}，"
+                                    f"跳过同key {st.get('skipped_key', 0)}，"
+                                    f"跳过重复 {st.get('skipped_dup', 0)}，"
+                                    f"跳过禁用 {st.get('skipped_disabled', 0)}，"
+                                    f"无效 {st.get('skipped_invalid', 0)}"
+                                )
+                                self.root_after(lambda: self.rag_status.set(msg))
+                                self.root_after(lambda: messagebox.showinfo("合并结果", msg))
+                                self.root_after(self.on_rag_refresh)
+                            except Exception as e:
+                                self.root_after(lambda: messagebox.showerror("合并失败", str(e)))
+
+                        threading.Thread(target=run, daemon=True).start()
+
+                    ttk.Button(win, text="合并选中文件", command=do_merge).pack(pady=8)
+
+                self.root_after(choose)
+            except Exception as e:
+                self.root_after(lambda: messagebox.showerror("列出文件失败", str(e)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_rag_import_file(self):
+        """从任意本地 JSON 文件导入（读入后 POST corpus 对象）。"""
+        path = filedialog.askopenfilename(
+            title="选择语料 JSON",
+            filetypes=[("JSON", "*.json"), ("全部", "*.*")],
+        )
+        if not path:
+            return
+
+        def work():
+            try:
+                raw = Path(path).read_text(encoding="utf-8")
+                corpus = json.loads(raw)
+                self.rag_status.set(f"导入中: {path} …")
+                st = self._rag_post_json(
+                    "/rag/corpus/merge",
+                    {"corpus": corpus, "skip_disabled": True},
+                    timeout=300,
+                )
+                msg = (
+                    f"导入完成：新增 {st.get('added', 0)}，"
+                    f"跳过同key {st.get('skipped_key', 0)}，"
+                    f"跳过重复 {st.get('skipped_dup', 0)}"
+                )
+                self.root_after(lambda: self.rag_status.set(msg))
+                self.root_after(lambda: messagebox.showinfo("导入结果", msg))
+                self.root_after(self.on_rag_refresh)
+            except Exception as e:
+                self.root_after(lambda: messagebox.showerror("导入失败", str(e)))
 
         threading.Thread(target=work, daemon=True).start()
 

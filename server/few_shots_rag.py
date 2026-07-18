@@ -19,6 +19,7 @@ import json
 import math
 import os
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 from agent.llm import embed_text
@@ -59,6 +60,42 @@ _SOURCE_JOB = "job"
 
 def _default_embedding_model() -> str:
     return os.getenv("LLM_EMBEDDING_MODEL", "text-embedding-3-small")
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _normalize_item(item: dict) -> dict:
+    """补齐运营元数据字段（兼容旧语料）。"""
+    item.setdefault("disabled", False)
+    item.setdefault("problem_type", "")
+    item.setdefault("valid_rate", None)
+    item.setdefault("created_at", "")
+    item.setdefault("source", _SOURCE_TEMPLATE)
+    # 旧模板条目：用 key 回填题型
+    if not item.get("problem_type") and item.get("source") == _SOURCE_TEMPLATE:
+        item["problem_type"] = item.get("key") or ""
+    return item
+
+
+def _item_summary(item: dict, include_content: bool = False) -> dict:
+    """返回给前端的条目摘要（不含 embedding）。"""
+    _normalize_item(item)
+    out = {
+        "key": item.get("key", ""),
+        "source": item.get("source", _SOURCE_TEMPLATE),
+        "disabled": bool(item.get("disabled")),
+        "problem_type": item.get("problem_type") or "",
+        "valid_rate": item.get("valid_rate"),
+        "created_at": item.get("created_at") or "",
+        "text_preview": (item.get("text") or "")[:200],
+        "has_embedding": bool(item.get("embedding")),
+    }
+    if include_content:
+        out["text"] = item.get("text") or ""
+        out["content"] = item.get("content") or ""
+    return out
 
 
 def _extract_summary_from_template(text: str) -> str:
@@ -149,15 +186,20 @@ def _save_corpus(data: dict, sync_seed: bool = True) -> None:
 
 def _init_template_corpus() -> dict:
     """用 6 个固定模板初始化语料库（无 embedding）。"""
+    now = _now_iso()
     items = []
     for key, content in _TEMPLATE_CONTENT.items():
-        items.append({
+        items.append(_normalize_item({
             "key": key,
             "source": _SOURCE_TEMPLATE,
             "text": _extract_summary_from_template(content),
             "content": content,
             "embedding": None,
-        })
+            "problem_type": key,
+            "valid_rate": 1.0,
+            "created_at": now,
+            "disabled": False,
+        }))
     return {"model": _default_embedding_model(), "items": items}
 
 
@@ -285,6 +327,9 @@ def retrieve_few_shots(
 
     scored = []
     for item in items:
+        _normalize_item(item)
+        if item.get("disabled"):
+            continue
         vec = item.get("embedding")
         if not vec:
             continue
@@ -294,6 +339,7 @@ def retrieve_few_shots(
             "source": item.get("source", _SOURCE_TEMPLATE),
             "score": round(score, 4),
             "content": item["content"],
+            "problem_type": item.get("problem_type") or "",
         })
 
     scored.sort(key=lambda x: x["score"], reverse=True)
@@ -358,10 +404,16 @@ def _is_duplicate(
     corpus: dict,
     threshold: float = 0.95,
 ) -> tuple[bool, str | None]:
-    """检查新文本是否与语料库中已有项重复。返回 (是否重复, 最相似的已有项 key)"""
+    """检查新文本是否与语料库中已有项重复。返回 (是否重复, 最相似的已有项 key)
+
+    已禁用条目不参与去重，避免挡住重新入库。
+    """
     best_key: str | None = None
     best_score = 0.0
     for item in corpus.get("items", []):
+        _normalize_item(item)
+        if item.get("disabled"):
+            continue
         existing_vec = item.get("embedding")
         if not existing_vec:
             continue
@@ -378,6 +430,7 @@ def add_job_to_corpus(
     job_dir: str | Path,
     stats: dict | None = None,
     dedup_threshold: float = 0.95,
+    problem_type: str = "",
 ) -> dict | None:
     """把一次成功生成后的 job 目录加入 RAG 语料库。
 
@@ -393,6 +446,8 @@ def add_job_to_corpus(
       - range.json 必须有 constraints
 
     去重：与已有语料项 embedding 余弦相似度超过 dedup_threshold 则跳过。
+
+    入库元数据：problem_type / valid_rate / created_at / disabled=False
 
     返回加入的 item；若读取失败、已存在、质量不过关或重复则返回 None。
     """
@@ -446,18 +501,30 @@ def add_job_to_corpus(
     except Exception:
         return None
 
-    # 去重
+    # 去重（跳过已禁用项，避免禁用范例挡住新入库）
     is_dup, dup_key = _is_duplicate(text, embedding, corpus, dedup_threshold)
     if is_dup:
         return None
 
-    new_item = {
+    valid_rate = None
+    if stats is not None:
+        valid_rate = stats.get("valid_rate")
+        if valid_rate is None:
+            count = stats.get("count") or 0
+            ok = stats.get("ok") or 0
+            valid_rate = (ok / count) if count else None
+
+    new_item = _normalize_item({
         "key": job_id,
         "source": _SOURCE_JOB,
         "text": text,
         "content": content,
         "embedding": embedding,
-    }
+        "problem_type": problem_type or "",
+        "valid_rate": valid_rate,
+        "created_at": _now_iso(),
+        "disabled": False,
+    })
     corpus.setdefault("items", []).append(new_item)
     corpus["model"] = _default_embedding_model()
     _save_corpus(corpus)
@@ -467,3 +534,184 @@ def add_job_to_corpus(
 def refresh_corpus_cache() -> None:
     """强制重新计算并缓存所有语料项 embedding（含模板 + 已入库历史任务）。"""
     _build_corpus_embeddings(force_refresh=True)
+
+
+# ---- 语料运营：列表 / 详情 / 禁用 / 删除 / 合并 ----
+
+def list_corpus_items(
+    source: str = "",
+    problem_type: str = "",
+    include_disabled: bool = True,
+) -> dict:
+    """列出语料摘要，可按 source / problem_type 筛选。"""
+    corpus = _load_corpus()
+    items = []
+    for item in corpus.get("items", []):
+        _normalize_item(item)
+        if source and item.get("source") != source:
+            continue
+        if problem_type and (item.get("problem_type") or "") != problem_type:
+            continue
+        if not include_disabled and item.get("disabled"):
+            continue
+        items.append(_item_summary(item))
+    # job 在前按时间倒序，模板按 key
+    items.sort(key=lambda x: (
+        0 if x["source"] == _SOURCE_JOB else 1,
+        x.get("created_at") or "",
+        x.get("key") or "",
+    ), reverse=True)
+    return {
+        "model": corpus.get("model") or _default_embedding_model(),
+        "total": len(items),
+        "items": items,
+    }
+
+
+def get_corpus_item(key: str) -> dict | None:
+    """获取单条完整内容（不含 embedding）。"""
+    corpus = _load_corpus()
+    for item in corpus.get("items", []):
+        if item.get("key") == key:
+            return _item_summary(item, include_content=True)
+    return None
+
+
+def set_corpus_item_disabled(key: str, disabled: bool) -> dict | None:
+    """启用/禁用一条语料；禁用后召回时跳过。"""
+    corpus = _load_corpus()
+    for item in corpus.get("items", []):
+        if item.get("key") == key:
+            item["disabled"] = bool(disabled)
+            _normalize_item(item)
+            _save_corpus(corpus)
+            return _item_summary(item)
+    return None
+
+
+def delete_corpus_item(key: str) -> bool:
+    """从语料库删除一条（模板与 job 均可删）。"""
+    corpus = _load_corpus()
+    items = corpus.get("items", [])
+    new_items = [it for it in items if it.get("key") != key]
+    if len(new_items) == len(items):
+        return False
+    corpus["items"] = new_items
+    _save_corpus(corpus)
+    return True
+
+
+def merge_corpus_from_data(
+    incoming: dict,
+    dedup_threshold: float = 0.95,
+    skip_disabled: bool = True,
+) -> dict:
+    """合并外部语料 JSON（别人贡献的 data/*.json）。
+
+    策略：
+      - 同 key 已存在 → 跳过
+      - embedding 缺失 → 稍后按需补算（合并时若有 text 则尝试 embedding）
+      - 与已有未禁用项相似度过高 → 跳过
+      - 默认不导入对方已禁用的条目
+
+    返回统计：added / skipped_key / skipped_dup / skipped_disabled / skipped_invalid
+    """
+    if not isinstance(incoming, dict) or not isinstance(incoming.get("items"), list):
+        raise ValueError("无效语料文件：需要含 items 数组的 JSON 对象")
+
+    try:
+        corpus = _build_corpus_embeddings()
+    except Exception:
+        corpus = _load_corpus()
+
+    existing_keys = {item.get("key") for item in corpus.get("items", [])}
+    stats = {
+        "added": 0,
+        "skipped_key": 0,
+        "skipped_dup": 0,
+        "skipped_disabled": 0,
+        "skipped_invalid": 0,
+        "added_keys": [],
+    }
+
+    for raw in incoming["items"]:
+        if not isinstance(raw, dict):
+            stats["skipped_invalid"] += 1
+            continue
+        key = (raw.get("key") or "").strip()
+        text = (raw.get("text") or "").strip()
+        content = (raw.get("content") or "").strip()
+        if not key or not content:
+            stats["skipped_invalid"] += 1
+            continue
+        if skip_disabled and raw.get("disabled"):
+            stats["skipped_disabled"] += 1
+            continue
+        if key in existing_keys:
+            stats["skipped_key"] += 1
+            continue
+
+        item = _normalize_item({
+            "key": key,
+            "source": raw.get("source") or _SOURCE_JOB,
+            "text": text or _extract_summary_from_template(content),
+            "content": content,
+            "embedding": raw.get("embedding"),
+            "problem_type": raw.get("problem_type") or "",
+            "valid_rate": raw.get("valid_rate"),
+            "created_at": raw.get("created_at") or _now_iso(),
+            "disabled": bool(raw.get("disabled", False)),
+        })
+
+        # embedding 维度/模型可能不兼容：无向量或模型不同时重算
+        need_embed = not item.get("embedding")
+        if incoming.get("model") and incoming.get("model") != corpus.get("model"):
+            need_embed = True
+            item["embedding"] = None
+
+        if need_embed:
+            try:
+                item["embedding"] = embed_text(item["text"])
+            except Exception:
+                stats["skipped_invalid"] += 1
+                continue
+
+        is_dup, _ = _is_duplicate(item["text"], item["embedding"], corpus, dedup_threshold)
+        if is_dup:
+            stats["skipped_dup"] += 1
+            continue
+
+        corpus.setdefault("items", []).append(item)
+        existing_keys.add(key)
+        stats["added"] += 1
+        stats["added_keys"].append(key)
+
+    if stats["added"]:
+        corpus["model"] = _default_embedding_model()
+        _save_corpus(corpus)
+    return stats
+
+
+def merge_corpus_from_file(path: str | Path, **kwargs) -> dict:
+    """从本地 JSON 文件合并语料。"""
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"文件不存在: {path}")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return merge_corpus_from_data(data, **kwargs)
+
+
+def list_data_corpus_files() -> list[dict]:
+    """列出 data/ 下可供合并的 *.json 文件。"""
+    data_dir = _ROOT / "data"
+    if not data_dir.is_dir():
+        return []
+    out = []
+    for p in sorted(data_dir.glob("*.json")):
+        out.append({
+            "name": p.name,
+            "path": str(p),
+            "size": p.stat().st_size,
+            "is_seed": p.resolve() == _SEED_FILE.resolve(),
+        })
+    return out

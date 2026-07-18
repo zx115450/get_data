@@ -1031,7 +1031,11 @@
         -0.03789716213941574,
         0.043784480541944504,
         0.008640903979539871
-      ]
+      ],
+      "disabled": false,
+      "problem_type": "array",
+      "valid_rate": null,
+      "created_at": ""
     },
     {
       "key": "tree",

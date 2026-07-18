@@ -22,6 +22,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from server import job_store, runner
 from server.few_shots import FEW_SHOTS
+from server.few_shots_rag import (
+    delete_corpus_item,
+    get_corpus_item,
+    list_corpus_items,
+    list_data_corpus_files,
+    merge_corpus_from_data,
+    merge_corpus_from_file,
+    set_corpus_item_disabled,
+)
 from server.range_agent import propose_range_json
 from server.text_agent import beautify_text, simplify_text
 
@@ -51,6 +60,18 @@ class JobRequest(BaseModel):
     problem_type: str = ""
     range_json: Optional[dict[str, Any]] = None  # 若提供则跳过 Agent 写 range
     special_judge: bool = False  # 是否生成 special judge / checker.zip
+
+
+class CorpusDisableRequest(BaseModel):
+    disabled: bool = True
+
+
+class CorpusMergeRequest(BaseModel):
+    """合并别人贡献的语料。path 与 items/model 二选一。"""
+    path: str = ""                          # data/ 下文件名或绝对路径
+    corpus: Optional[dict[str, Any]] = None  # 直接传 JSON 对象
+    dedup_threshold: float = 0.95
+    skip_disabled: bool = True
 
 
 @app.get("/")
@@ -172,6 +193,83 @@ def download_checker(jid: str):
     if not p.exists():
         raise HTTPException(404, "checker zip 文件不存在")
     return FileResponse(p, media_type="application/zip", filename="checker.zip")
+
+
+# ---- RAG 语料运营 ----
+
+@app.get("/rag/corpus")
+def api_list_corpus(source: str = "", problem_type: str = "", include_disabled: bool = True):
+    """列出语料条目摘要。"""
+    return list_corpus_items(
+        source=source,
+        problem_type=problem_type,
+        include_disabled=include_disabled,
+    )
+
+
+@app.get("/rag/corpus/{key}")
+def api_get_corpus_item(key: str):
+    item = get_corpus_item(key)
+    if not item:
+        raise HTTPException(404, f"语料不存在: {key}")
+    return item
+
+
+@app.post("/rag/corpus/{key}/disable")
+def api_disable_corpus_item(key: str, req: CorpusDisableRequest):
+    item = set_corpus_item_disabled(key, req.disabled)
+    if not item:
+        raise HTTPException(404, f"语料不存在: {key}")
+    return item
+
+
+@app.delete("/rag/corpus/{key}")
+def api_delete_corpus_item(key: str):
+    if not delete_corpus_item(key):
+        raise HTTPException(404, f"语料不存在: {key}")
+    return {"ok": True, "deleted": key}
+
+
+@app.get("/rag/data-files")
+def api_list_data_files():
+    """列出 data/ 下可合并的 *.json。"""
+    return {"files": list_data_corpus_files()}
+
+
+@app.post("/rag/corpus/merge")
+def api_merge_corpus(req: CorpusMergeRequest):
+    """合并外部语料（path 指向 data/*.json，或直接传 corpus 对象）。"""
+    try:
+        if req.corpus is not None:
+            stats = merge_corpus_from_data(
+                req.corpus,
+                dedup_threshold=req.dedup_threshold,
+                skip_disabled=req.skip_disabled,
+            )
+        elif (req.path or "").strip():
+            path = Path(req.path.strip())
+            if not path.is_absolute():
+                # 相对路径限制在项目 data/ 下，避免任意读盘
+                root = Path(__file__).resolve().parent.parent
+                path = (root / "data" / path.name).resolve()
+                if path.parent != (root / "data").resolve():
+                    raise HTTPException(400, "只允许合并 data/ 目录下的 JSON")
+            stats = merge_corpus_from_file(
+                path,
+                dedup_threshold=req.dedup_threshold,
+                skip_disabled=req.skip_disabled,
+            )
+        else:
+            raise HTTPException(400, "请提供 path 或 corpus")
+    except HTTPException:
+        raise
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except Exception as e:
+        raise HTTPException(500, f"{type(e).__name__}: {e}") from e
+    return stats
 
 
 if __name__ == "__main__":

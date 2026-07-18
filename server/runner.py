@@ -334,9 +334,14 @@ def run_job(job: job_store.Job, std_code: str, lang: str,
 
     # 5.5) 把成功任务加入 RAG 语料库（非致命）
     try:
-        added = add_job_to_corpus(job_dir, stats=stats)
+        added = add_job_to_corpus(job_dir, stats=stats, problem_type=eff_type)
         if added:
-            job_store.add_progress(job, f"RAG 语料库已更新: {added['key']}")
+            rate = added.get("valid_rate")
+            rate_s = f", valid_rate={rate:.4f}" if isinstance(rate, (int, float)) else ""
+            job_store.add_progress(
+                job,
+                f"RAG 语料库已更新: {added['key']} (type={added.get('problem_type') or eff_type}{rate_s})",
+            )
         else:
             job_store.add_progress(
                 job,
