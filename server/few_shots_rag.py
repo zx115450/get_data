@@ -5,8 +5,13 @@
   2. 历史任务：每次成功生成后，把 job 目录中的题面、range.json、gen.cpp
      加入语料，embedding 后持久化
 
+持久化位置：
+  - data/few_shots_rag_corpus.json  —— 可随仓库分享的种子语料
+  - .cache/few_shots_rag_corpus.json —— 本地运行副本（gitignore）
+
 检索方式：把用户题面/范围/标程片段也做 embedding，按余弦相似度召回 Top-K。
-embedding 默认调用 OpenAI 兼容接口（agent.llm.embed_text），结果缓存到磁盘。
+embedding 默认调用 OpenAI 兼容接口（agent.llm.embed_text）。
+若对方使用的 embedding 模型与语料中记录的不一致，会自动清空向量并重算。
 """
 from __future__ import annotations
 
@@ -37,8 +42,14 @@ _TEMPLATE_CONTENT: dict[str, str] = {
     "multi_test": CPP_MULTI_TEST_EXAMPLE,
 }
 
-# 缓存目录（项目根下 .cache，不提交到 git）
-_CACHE_DIR = Path(".cache")
+# 项目根目录
+_ROOT = Path(__file__).resolve().parent.parent
+
+# 可随仓库分享的种子语料（别人 clone/下载后直接可用）
+_SEED_FILE = _ROOT / "data" / "few_shots_rag_corpus.json"
+
+# 本地运行副本（.cache 仍 gitignore；首次从 seed 复制）
+_CACHE_DIR = _ROOT / ".cache"
 _CORPUS_FILE = _CACHE_DIR / "few_shots_rag_corpus.json"
 
 # 语料项类型
@@ -95,23 +106,45 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (math.sqrt(na) * math.sqrt(nb))
 
 
-def _load_corpus() -> dict:
-    """加载语料库（含 embedding）。若不存在则初始化。"""
-    if not _CORPUS_FILE.exists():
-        return _init_template_corpus()
+def _read_corpus_file(path: Path) -> dict | None:
+    """读取语料 JSON；失败或空 items 返回 None。"""
+    if not path.exists():
+        return None
     try:
-        data = json.loads(_CORPUS_FILE.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
         if not data.get("items"):
-            return _init_template_corpus()
+            return None
         return data
     except Exception:
-        return _init_template_corpus()
+        return None
 
 
-def _save_corpus(data: dict) -> None:
-    """保存语料库到磁盘。"""
+def _load_corpus() -> dict:
+    """加载语料库（含 embedding）。
+
+    优先级：本地 .cache → 仓库内 data/ 种子 → 仅用 6 个固定模板初始化。
+    """
+    data = _read_corpus_file(_CORPUS_FILE)
+    if data is not None:
+        return data
+
+    data = _read_corpus_file(_SEED_FILE)
+    if data is not None:
+        # 首次把种子复制到本地 cache，后续读写走 cache
+        _save_corpus(data, sync_seed=False)
+        return data
+
+    return _init_template_corpus()
+
+
+def _save_corpus(data: dict, sync_seed: bool = True) -> None:
+    """保存语料库到本地 .cache；默认同步到 data/ 以便随项目分享。"""
+    payload = json.dumps(data, ensure_ascii=False, indent=2)
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    _CORPUS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    _CORPUS_FILE.write_text(payload, encoding="utf-8")
+    if sync_seed:
+        _SEED_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _SEED_FILE.write_text(payload, encoding="utf-8")
 
 
 def _init_template_corpus() -> dict:

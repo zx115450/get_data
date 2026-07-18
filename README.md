@@ -237,16 +237,21 @@ python gui.py
 
 请打包/分享这些：
 
-- `agent/`、`server/`、`pipeline/`、`utils/`
+- `agent/`、`server/`、`pipeline/`、`utils/`、`data/`
 - `gui.py`、`requirements.txt`、`.env.example`、`.gitignore`、`README.md`
+
+其中 **`data/few_shots_rag_corpus.json`** 是 RAG few-shot 语料（含历史优质范例与向量）。  
+别人拿到后首次运行会自动加载，有助于提高生成准确性。你本地成功出题后，语料会同步写回这个文件，记得一并提交/打包。
 
 **不要分享：**
 
 - `.env`（含你的密钥）
 - `.venv/`（对方自己装）
-- `jobs/`、`.cache/`（本地运行垃圾）
+- `jobs/`、`.cache/`（本地运行副本；种子在 `data/` 里已够用）
 
 对方按本文「二、安装」和「三、配置」操作即可。
+
+> 提示：若对方 `.env` 里的 `LLM_EMBEDDING_MODEL` 与语料生成时不一致，程序会自动按新模型重算向量，不影响使用（首次可能多花一点 embedding 费用）。
 
 ---
 
