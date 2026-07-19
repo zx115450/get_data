@@ -163,9 +163,9 @@ class App:
         ttk.Label(tip_output, text="输出格式、答案判定规则；Special Judge 时尤其重要",
                   foreground="#666").pack(side="left")
         ttk.Button(tip_output, text="美化",
-                   command=lambda: self.open_rewrite("beautify", "statement", self.output_desc)).pack(side="right", padx=2)
+                   command=lambda: self.open_rewrite("beautify", "output", self.output_desc)).pack(side="right", padx=2)
         ttk.Button(tip_output, text="简化",
-                   command=lambda: self.open_rewrite("simplify", "statement", self.output_desc)).pack(side="right", padx=2)
+                   command=lambda: self.open_rewrite("simplify", "output", self.output_desc)).pack(side="right", padx=2)
         self.output_desc = scrolledtext.ScrolledText(tab_output, height=12, font=("Consolas", 10), wrap="word")
         self.output_desc.pack(fill="both", expand=True, padx=4, pady=(0, 4))
 
@@ -348,6 +348,8 @@ class App:
         title = "简化题面/范围" if mode == "simplify" else "美化题面/范围"
         if kind == "range":
             title = title.replace("题面/范围", "输入描述")
+        elif kind == "output":
+            title = title.replace("题面/范围", "输出描述")
         else:
             title = title.replace("题面/范围", "题面")
 

@@ -164,6 +164,7 @@ CPP_GRAPH_EXAMPLE = r"""
 【参考范例：一道图题的标准写法（C++ testlib）】
 题面：给定 n 个点 m 条边的无向图（无自环无重边），判断是否连通。
 说明：本例默认无自环无重边。若目标题允许自环/重边，请去掉 gen 中 u<v 的池子限制以及 validator 中 u!=v 和重复边检查，按题面为准。
+注意：random_sparse 分支用 unordered_set 随机采样，是「从 N 个候选选 K 个不重复」的标准写法；严禁枚举所有 n*(n-1)/2 条边再 shuffle（n=2e5 时必爆）。
 输入格式：第 1 行 n m；接下来 m 行每行 u v。
 输出格式：YES 或 NO。
 数据范围：n in [1,1000]，m in [0,n*(n-1)/2]，15 组，覆盖连通树、不连通、完全图、链、菊花、随机稀疏。
@@ -209,11 +210,19 @@ int main(int argc, char* argv[]) {
     else if (typ == "path") { for (int i = 1; i < n; i++) edges.push_back({i, i + 1}); }
     else if (typ == "star") { for (int i = 2; i <= n; i++) edges.push_back({1, i}); }
     else {
-        vector<pair<int,int>> pool;
-        for (int u = 1; u <= n; u++) for (int v = u + 1; v <= n; v++) pool.push_back({u, v});
-        for (int i = (int)pool.size() - 1; i > 0; i--) { int j = rnd.next(0, i); swap(pool[i], pool[j]); }
-        int m = rnd.next(0, min((int)pool.size(), max(1, n)));
-        edges.assign(pool.begin(), pool.begin() + m);
+        // random_sparse: 用 unordered_set 随机采样 m 条不重复边，O(m) 而非 O(n^2)。
+        // 关键写法：n 很大时不要枚举所有 n*(n-1)/2 条边再 shuffle，会爆内存/时间。
+        int m = rnd.next(0, max(1, n));
+        unordered_set<long long> used;
+        used.reserve(m * 2);
+        while ((int)edges.size() < m) {
+            int u = rnd.next(1, n);
+            int v = rnd.next(1, n);
+            if (u == v) continue;
+            long long key = (long long)min(u, v) * (n + 1) + max(u, v);
+            if (!used.insert(key).second) continue;
+            edges.push_back({u, v});
+        }
     }
     printf("%d %d\n", n, (int)edges.size());
     for (auto e : edges) printf("%d %d\n", e.first, e.second);

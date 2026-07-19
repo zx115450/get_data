@@ -205,15 +205,26 @@ def write_checker(content: str) -> str:
 
 
 def run_gen(seed: int, type: str = "random", index: int = -1, count: int = 15) -> str:
-    """跑编译好的 gen 二进制：`./gen --seed N --type T [--index i --count C]`，返回 stdout。"""
+    """跑编译好的 gen 二进制：`./gen --seed N --type T [--index i --count C]`，返回 stdout。
+
+    超时硬上限 5 秒。超时直接判定 gen 算法不达标（通常是 O(n^2) 枚举），
+    返回明确的 TIMEOUT 错误，提示 Agent 重写 gen.cpp。
+    """
     if index < 0:
         index = seed
     rc, out, err = safe_run(
         f"{_exe('gen')} --seed {seed} --type {type} --index {index} --count {count}",
-        timeout=10,
+        timeout=5,
         cwd=str(WORK_DIR),
     )
     if rc != 0:
+        if rc == 124:
+            return (
+                f"ERROR gen TIMEOUT after 5s type={type} seed={seed}: "
+                f"gen 算法太慢（很可能用了 O(n^2) 枚举/预建大池子）。"
+                f"请 read_file(\"gen.cpp\") 找到对应分支，改用 unordered_set 随机采样，"
+                f"重新 write_gen，再继续自检。不要重试同一段代码。"
+            )
         return f"ERROR gen rc={rc}: {(err or '').strip()}"
     return out if out else f"ERROR gen: empty output (stderr={(err or '').strip()})"
 

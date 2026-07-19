@@ -15,6 +15,7 @@ from sandbox.run import safe_run
 from server import job_store
 from server.few_shots import get_few_shot_rag, detected_type
 from server.few_shots_rag import add_job_to_corpus
+from server.struct_hints import scan_structural_hints
 from server.text_agent import simplify_text
 from utils.markup import to_plain_for_llm
 
@@ -186,6 +187,12 @@ def run_job(job: job_store.Job, std_code: str, lang: str,
             f"再用 run_std 的输出作为 ans 文件、跑 checker 验证 checker 能正确通过标程答案。"
         )
 
+    # 扫题面关键词，命中特殊结构约束（哈密顿/欧拉/DAG/连通/二分图等）时追加针对性提醒。
+    # 这种约束往往是标程算法的隐含假设，生成器不保证就会导致「格式合法但语义错误」。
+    struct_hint_block = scan_structural_hints(stmt_plain) or scan_structural_hints(problem_statement or "")
+    if struct_hint_block:
+        job_store.add_progress(job, "检测到题面特殊结构约束，已注入针对性提醒")
+
     preset = None
     if range_json and isinstance(range_json, dict) and range_json.get("constraints"):
         preset = normalize_range_json(dict(range_json))
@@ -200,11 +207,22 @@ def run_job(job: job_store.Job, std_code: str, lang: str,
             f"【跳过写 range】使用 GUI 已给方案: count={preset.get('count')} "
             f"edge_cases={preset.get('edge_cases')}",
         )
+        # 若预设方案里带了 special_constraints，单独提示一次，确保写 gen 的 Agent 不会忽略
+        sp_note = ""
+        sp = preset.get("special_constraints") or []
+        if sp:
+            sp_note = (
+                f"\n\n【range.json 已标注的特殊结构约束 — gen/validator 必须显式保证】\n"
+                + "\n".join(f"- {c}" for c in sp)
+                + "\n每条约束都要在 gen.cpp 的某个 --type 分支里真正实现，"
+                "并在 validator.cpp 用 ensuref 校验。不要只写 random 分支。\n"
+            )
         range_block = (
             f"\n\n【已给定 range.json — 禁止再调用 write_range，不要修改它】\n"
             f"```json\n{json.dumps(preset, ensure_ascii=False, indent=2)}\n```\n"
             f"请直接写 gen.cpp / validator.cpp，--type 必须覆盖 edge_cases 中每一个名字；"
             f"对每种 edge_type 做 run_gen→run_validate→run_std 三连自检，全过后 finish。"
+            f"{sp_note}"
         )
         task = (
             f"请为下面的算法题生成测试数据（range 已给定）。\n\n"
@@ -214,6 +232,7 @@ def run_job(job: job_store.Job, std_code: str, lang: str,
             f"{original_ref_block}"
             f"{std_block}"
             f"{range_block}"
+            f"{struct_hint_block}"
             f"{few_shot_block}"
             f"{special_judge_block}"
         )
@@ -231,6 +250,7 @@ def run_job(job: job_store.Job, std_code: str, lang: str,
             f"若有多测 T 且 sum n 有上限：必须同时覆盖「大T+小n」和「小T+大n」，禁止先抽大 n 再令 T=S/n（会把 T 压成 1~2）。"
             f"按契约：先 write_range，再写 gen.cpp/validator.cpp，"
             f"对每种 edge_type 做 run_gen→run_validate→run_std 三连自检，全过后调 finish。"
+            f"{struct_hint_block}"
             f"{few_shot_block}"
             f"{special_judge_block}"
         )
@@ -238,6 +258,18 @@ def run_job(job: job_store.Job, std_code: str, lang: str,
 
     summary = agent_run(task, max_steps=40, verbose=False, on_event=on_event)
     job_store.add_progress(job, f"Agent 结束: {summary}")
+
+    # 把 Agent 的进度日志落盘，方便事后排查（服务器重启后内存进度会丢）。
+    # 尤其是当 Agent 没产出 gen/validator 时，这份日志是定位根因的唯一线索。
+    try:
+        with job.lock:
+            log_lines = list(job.progress)
+        (job_dir / "agent_log.txt").write_text(
+            "\n".join(log_lines) + "\n",
+            encoding="utf-8",
+        )
+    except Exception as e:
+        job_store.add_progress(job, f"agent_log.txt 写盘失败（非致命）: {type(e).__name__}: {e}")
 
     # 3) 校验产物
     job_store.add_progress(job, "【阶段 3/5】校验产物 (range.json / gen / validator)")
@@ -262,11 +294,36 @@ def run_job(job: job_store.Job, std_code: str, lang: str,
     if errs:
         raise RuntimeError("range.json 不合法:\n" + "\n".join(f"  - {e}" for e in errs))
 
+    # range.json 里若带 special_constraints（range_agent 提取的特殊结构约束清单），
+    # 显式记一条进度，方便用户在 GUI 看到题目被识别出了哪些约束。
+    sp_constraints = produced.get("special_constraints") or []
+    if sp_constraints:
+        job_store.add_progress(
+            job,
+            f"题目特殊结构约束: {sp_constraints}",
+        )
+
     _exe = lambda b: b + (".exe" if os.name == "nt" else "")
     has_gen = (job_dir / _exe("gen")).exists() or (job_dir / "gen.py").exists() or (job_dir / "gen.cpp").exists()
     has_val = (job_dir / _exe("validator")).exists() or (job_dir / "validate.py").exists() or (job_dir / "validator.cpp").exists()
     if not has_gen or not has_val:
-        raise RuntimeError("Agent 没有产出 gen / validator（gen.cpp 或编译后的二进制）")
+        # 报错时带上 Agent summary 和最后几条进度，方便定位根因。
+        # 常见根因：LLM 没调工具就返回文本（被当成 finish）、预算用尽、write_gen 编译失败循环。
+        with job.lock:
+            tail = list(job.progress)[-8:]
+        missing = []
+        if not has_gen:
+            missing.append("gen")
+        if not has_val:
+            missing.append("validator")
+        raise RuntimeError(
+            f"Agent 没有产出 {' / '.join(missing)}。\n"
+            f"Agent summary: {summary!r}\n"
+            f"最后几条进度:\n" + "\n".join(f"  {t}" for t in tail)
+            + "\n常见原因：LLM 未调工具就返回文本（被当成 finish）、"
+            f"40 步预算用尽、或 write_gen/write_validate 编译失败循环。"
+            f"完整日志见 {job_dir / 'agent_log.txt'}。"
+        )
     if special_judge:
         has_checker = (job_dir / _exe("checker")).exists() or (job_dir / "checker.cpp").exists()
         if not has_checker:

@@ -49,7 +49,11 @@ def validate_range_json(rj) -> list:
       - count: 正整数
       - constraints: dict（各变量 -> [min, max]）
       - edge_cases: 字符串列表（每个是 gen.py --type 能接受的取值）
-    可选字段：std_cmd（后端会强制注入）、time_limit_ms、memory_limit_mb
+    可选字段：
+      - std_cmd（后端会强制注入）
+      - time_limit_ms、memory_limit_mb
+      - special_constraints: 字符串列表，题面里提取出的特殊结构约束
+        （如 "图是 DAG"、"图必须存在哈密顿路径"）。缺省视为 []。
     """
     errs = []
     if not isinstance(rj, dict):
@@ -74,6 +78,17 @@ def validate_range_json(rj) -> list:
         errs.append("缺少 edge_cases（边界类型列表，可为空数组 []）")
     elif not isinstance(ec, list) or not all(isinstance(e, str) and e for e in ec):
         errs.append("edge_cases 必须是字符串数组（每个非空）")
+
+    # special_constraints 是 range_agent 提取的特殊结构约束清单，可选字段。
+    # 只校验类型（字符串数组），不校验内容是否与题面一致（那是 LLM 的责任）。
+    sc = rj.get("special_constraints")
+    if sc is not None and not isinstance(sc, list):
+        errs.append(f"special_constraints 必须是字符串数组或 null，当前为 {type(sc).__name__}")
+    elif isinstance(sc, list):
+        for s in sc:
+            if not isinstance(s, str) or not s.strip():
+                errs.append(f"special_constraints 每条必须是非空字符串，当前含 {s!r}")
+                break
 
     # 'random' 由系统自动补，Agent 若写进 edge_cases 会在 normalize 时剥掉，这里不报错
 
@@ -126,7 +141,10 @@ def generate(range_json: dict, work_dir: str, out_dir: str, verbose: bool = True
     std_cmd = range_json["std_cmd"]
     count = range_json["count"]
     edge_cases = range_json.get("edge_cases", [])
-    time_limit_s = max(range_json.get("time_limit_ms", 1000) / 1000, 1)
+    # gen 单独硬限 5s：超过即视为算法不达标（O(n^2) 枚举等），直接判该组失败，
+    # 不让慢生成器拖垮整批；validate/std 仍按 range.json 的 time_limit_ms。
+    gen_timeout_s = 5
+    other_timeout_s = max(range_json.get("time_limit_ms", 1000) / 1000, 1)
 
     ok = 0
     bad = 0
@@ -144,24 +162,30 @@ def generate(range_json: dict, work_dir: str, out_dir: str, verbose: bool = True
                 seed = i + attempt * count
                 rc, inp, err = safe_run(
                     f"{gen_cmd} --seed {seed} --type {try_typ} --index {i} --count {count}",
-                    timeout=time_limit_s,
+                    timeout=gen_timeout_s,
                     cwd=str(work),
                 )
                 if rc != 0:
-                    last_error = f"gen FAILED type={try_typ}: {err.strip()}"
+                    if rc == 124:
+                        last_error = (
+                            f"gen TIMEOUT after {gen_timeout_s}s type={try_typ}: "
+                            f"算法太慢（疑似 O(n^2) 枚举/预建大池子），需重写 gen.cpp"
+                        )
+                    else:
+                        last_error = f"gen FAILED type={try_typ}: {err.strip()}"
                     if verbose:
                         print(f"[{i+1}/{count}] attempt {attempt+1}/{max_retries+1} {last_error}")
                     continue
                 inp = inp.rstrip("\n") + "\n"
 
-                rc, _, err = safe_run(validator_cmd, stdin=inp, timeout=time_limit_s, cwd=str(work))
+                rc, _, err = safe_run(validator_cmd, stdin=inp, timeout=other_timeout_s, cwd=str(work))
                 if rc != 0:
                     last_error = f"validate FAILED type={try_typ}: {err.strip()}"
                     if verbose:
                         print(f"[{i+1}/{count}] attempt {attempt+1}/{max_retries+1} {last_error}")
                     continue
 
-                rc, ans, err = safe_run(std_cmd, stdin=inp, timeout=time_limit_s)
+                rc, ans, err = safe_run(std_cmd, stdin=inp, timeout=other_timeout_s)
                 if rc != 0:
                     last_error = f"std FAILED type={try_typ}: {err.strip()}"
                     if verbose:

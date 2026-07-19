@@ -69,6 +69,22 @@ gen.cpp 必须满足（testlib 写法）：
   - 只向 stdout 打印测例（printf/cout），调试信息走 stderr（fprintf(stderr,...)）
   - 禁止 std::shuffle(..., rnd)；打乱用 for+swap+rnd.next(0,i)
   - 未声明的标识符不要用（不要写 clock()/clamp 等除非自己实现或正确头文件）
+【性能硬约束 — 极重要】
+gen 单次执行必须在 5 秒内输出完毕（含 n、m 取到上界 2e5/4e5 的边界组）。超时会被系统直接 kill，
+并把 "gen TIMEOUT after 5s" 报回给你，你必须据此重写 gen.cpp。
+为满足 5s 限制，必须遵守：
+  - 严禁「枚举所有可能的对象再 shuffle/取前 k 个」式写法。例如：
+      * 错误：vector<pair<int,int>> pool; for i for j pool.push_back({i,j});  // n*(n-1)/2 条边，n=2e5 时 ~2e10 条，必爆
+      * 错误：把所有字符串/区间/数对都生成到一个 vector 里再随机
+  - 需要「从 N 个候选中选 K 个不重复」时（N 可能很大，K≤几e5）：
+      * 用 unordered_set<long long> 记录已选，循环随机采样 + 去重，直到选够 K 个；
+      * 编码：key = (long long)a * N + b（a<b）；查询/插入均摊 O(1)；
+      * 当 K 接近 N 时才退化，但题目里 K 一般远小于 N（如 m << n*(n-1)/2）。
+  - 需要「随机生成一条链/树/图」时：直接按拓扑序或父节点随机连边，O(n) 或 O(n+m)，不要预建边池。
+  - 输出大文件时用 printf / 快速 cout（已开 ios::sync_with_stdio(false) 也行），不要用 endl 刷缓冲。
+  - 内存：不要申请超过 ~几百 MB 的 vector；n=2e5 时 O(n) 或 O(n+m) 是安全的，O(n^2) 一定不安全。
+  - 自检时如果某 edge_type 第一次 run_gen 就 TIMEOUT，立刻 read_file("gen.cpp") 找到对应分支，
+    用随机采样替换枚举，重新 write_gen，再继续自检。不要靠「重试同一段代码」碰运气。
 validator.cpp 必须满足（testlib 写法）：
   - #include "testlib.h"，main 里第一行 registerValidation()
   - 用 inf.readInt(l, r) / inf.readSpace() / inf.readEoln() / inf.readEof() 严格逐 token 读取
@@ -112,8 +128,39 @@ def run(task: str, max_steps: int = 30, verbose: bool = True, system_prompt: str
         {"role": "user", "content": task},
     ]
 
+    # LLM 偶尔会只返回文本不调工具（如「解释一下思路」）。此时不直接 finish，
+    # 而是发一条 nudge 提醒它调工具。连续 nudge 太多次仍不改，才放弃。
+    max_nudges = 3
+    nudge_count = 0
+
     for step in range(1, max_steps + 1):
         actions = llm.chat(messages, schemas)
+
+        # LLM 没调任何工具：发 nudge 提醒它调工具，而不是直接 finish。
+        # 这避免了「LLM 解释思路 → Agent 立刻终止 → 没产出 gen」的常见失败模式。
+        if not actions:
+            nudge_count += 1
+            if nudge_count > max_nudges:
+                if verbose:
+                    print(f"[step {step}] LLM 连续 {max_nudges} 次不调工具，放弃")
+                if on_event:
+                    on_event(step, "give_up", {"reason": "LLM 连续多次不调工具"}, "")
+                return "预算用尽（LLM 连续多次不调工具）"
+            nudge_msg = (
+                "你上一条回复没有调用任何工具。任务还没完成——"
+                "请直接调用工具（write_range / write_gen / write_validate 等）来执行，"
+                "不要只输出文字解释。如果是想看已有文件，调 read_file；"
+                "如果任务已完成，调 finish。"
+            )
+            messages.append({"role": "user", "content": nudge_msg})
+            if verbose:
+                print(f"[step {step}] nudge #{nudge_count}（LLM 没调工具）")
+            if on_event:
+                on_event(step, "nudge", {"count": nudge_count}, nudge_msg[:120])
+            continue
+
+        # LLM 调了工具，重置 nudge 计数
+        nudge_count = 0
 
         # 如果一轮里出现 write_gen / write_validate / write_checker，并行编译以节省时间
         results = [None] * len(actions)

@@ -177,8 +177,10 @@ def chat(messages: list[dict], tool_schemas: list[dict]) -> list[Action]:
     messages.append(assistant_msg)
 
     if not msg.tool_calls:
-        # 模型没调工具，当作 finish（把文本作为 summary）
-        return [Action(name="finish", args={"summary": msg.content or ""}, raw_content=msg.content or "")]
+        # 模型没调工具，只返回了文本。不再直接当成 finish——
+        # 否则 LLM 偶尔「解释一下思路」就会让 Agent 立刻终止，连 gen 都没写。
+        # 返回空列表，由 core.py 的循环决定是 nudge 还是 finish。
+        return []
 
     actions: list[Action] = []
     for tc in msg.tool_calls:
