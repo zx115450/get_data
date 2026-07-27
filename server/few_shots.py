@@ -18,6 +18,13 @@ from server.few_shots_cpp import (
     CPP_STRING_EXAMPLE,
     CPP_NUMBER_THEORY_EXAMPLE,
     CPP_MULTI_TEST_EXAMPLE,
+    CPP_GEOMETRY_EXAMPLE,
+    CPP_DP_EXAMPLE,
+    CPP_MATRIX_EXAMPLE,
+    CPP_RANGE_QUERY_EXAMPLE,
+    CPP_WEIGHTED_TREE_EXAMPLE,
+    CPP_WEIGHTED_GRAPH_EXAMPLE,
+    CPP_INTERACTIVE_EXAMPLE,
 )
 
 # 阶段一 RAG 召回入口（可选，失败时自动回退到关键词模板）
@@ -38,8 +45,16 @@ _TYPE_KEYWORDS = {
                       "整除", "欧拉", "费马", "逆元", "模意义"],
     "array": ["数组", "序列", "求和", "区间", "排序", "前缀和",
               "最大子段", "逆序对", "差分", "双指针"],
+    "geometry": ["几何", "凸包", "多边形", "坐标", "平面", "点集",
+                 "convex", "polygon", "geometry", "交点", "面积", "最近点对"],
     "multi_test": ["多测", "多组", "测试组数", "t 组", "T 组", "sum n",
                    "multi test", "multiple test"],
+    "dp": ["动态规划", "dp", "背包", "knapsack", "最长公共", "lis", "lcs", "状态压缩"],
+    "matrix": ["矩阵", "matrix", "二维数组", "网格", "grid", "行列"],
+    "range_query": ["区间", "线段树", "树状数组", "rmq", "前缀和询问", "range query", "查询次数"],
+    "weighted_tree": ["边权", "带权树", "点权", "树上路径权"],
+    "weighted_graph": ["带权图", "边权图", "最短路", "dij", "spfa", "floyd"],
+    "interactive": ["交互", "interactive", "询问", "query", "交互库"],
 }
 
 # 标程源码中用于辅助判型的关键词。比题面关键词更侧重算法/数据结构痕迹。
@@ -65,10 +80,20 @@ _STD_CODE_KEYWORDS = {
         "array", "sort", "prefix", "segment tree", "fenwick", "binary search",
         "two pointers", "sliding window", "dp", "max subarray", "inversion",
     ],
+    "geometry": [
+        "convex", "hull", "polygon", "geometry", "cross", "dot", "point",
+        "segment", "area", "closest", "graham", "andrew", "rotating calipers",
+    ],
     "multi_test": [
         "t--", "while(t--)", "while (t--)", "for(int t", "for (int t",
         "read(t)", "cin >> t", "scanf(\"%d\", &t)", "sum n", "sumn",
     ],
+    "dp": ["dp", "knapsack", "lis", "lcs", "memo", "dfs(i", "f[i]"],
+    "matrix": ["matrix", "grid", "a[i][j]", "vector<vector"],
+    "range_query": ["segment tree", "fenwick", "query", "l r", "range"],
+    "weighted_tree": ["edge weight", "w[u]", "tree weight"],
+    "weighted_graph": ["dijkstra", "spfa", "floyd", "edge.w", "weight"],
+    "interactive": ["interactive", "query", "ask", "cout.flush", "fflush"],
 }
 
 
@@ -98,14 +123,21 @@ def detect_problem_type(
     return best if scores[best] > 0 else "array"
 
 
-# 6 个固定模板（来自 few_shots_cpp，默认使用 C++ testlib 版本）
+# 固定模板（来自 few_shots_cpp）
 FEW_SHOTS = {
     "array": CPP_ARRAY_EXAMPLE,
     "tree": CPP_TREE_EXAMPLE,
     "graph": CPP_GRAPH_EXAMPLE,
     "string": CPP_STRING_EXAMPLE,
     "number_theory": CPP_NUMBER_THEORY_EXAMPLE,
+    "geometry": CPP_GEOMETRY_EXAMPLE,
     "multi_test": CPP_MULTI_TEST_EXAMPLE,
+    "dp": CPP_DP_EXAMPLE,
+    "matrix": CPP_MATRIX_EXAMPLE,
+    "range_query": CPP_RANGE_QUERY_EXAMPLE,
+    "weighted_tree": CPP_WEIGHTED_TREE_EXAMPLE,
+    "weighted_graph": CPP_WEIGHTED_GRAPH_EXAMPLE,
+    "interactive": CPP_INTERACTIVE_EXAMPLE,
 }
 
 
@@ -573,10 +605,19 @@ def get_few_shot_rag(
 ) -> tuple[str, str]:
     """RAG 召回 few-shot 模板，并返回 (模板字符串, 召回信息摘要)。
 
+    未配置 EMBEDDING_API_KEY 时：直接用关键词/题型模板，不发起 embedding 调用。
+
     若 RAG 调用失败或返回空：
       - use_fallback=True 时，回退到原有关键词模板匹配
       - use_fallback=False 时，返回空字符串
     """
+    from agent.llm import embedding_configured
+
+    if not embedding_configured():
+        fallback = get_few_shot(problem_type, problem_statement, data_range_desc, std_code)
+        typ = detected_type(problem_type, problem_statement, data_range_desc, std_code)
+        return fallback, f"未配置 Embedding，使用 keyword 模板: {typ}"
+
     try:
         examples = retrieve_few_shots(problem_statement, data_range_desc, std_code, top_k=top_k)
     except Exception as e:

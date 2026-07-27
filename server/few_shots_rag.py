@@ -30,6 +30,13 @@ from server.few_shots_cpp import (
     CPP_STRING_EXAMPLE,
     CPP_NUMBER_THEORY_EXAMPLE,
     CPP_MULTI_TEST_EXAMPLE,
+    CPP_GEOMETRY_EXAMPLE,
+    CPP_DP_EXAMPLE,
+    CPP_MATRIX_EXAMPLE,
+    CPP_RANGE_QUERY_EXAMPLE,
+    CPP_WEIGHTED_TREE_EXAMPLE,
+    CPP_WEIGHTED_GRAPH_EXAMPLE,
+    CPP_INTERACTIVE_EXAMPLE,
 )
 
 
@@ -40,7 +47,14 @@ _TEMPLATE_CONTENT: dict[str, str] = {
     "graph": CPP_GRAPH_EXAMPLE,
     "string": CPP_STRING_EXAMPLE,
     "number_theory": CPP_NUMBER_THEORY_EXAMPLE,
+    "geometry": CPP_GEOMETRY_EXAMPLE,
     "multi_test": CPP_MULTI_TEST_EXAMPLE,
+    "dp": CPP_DP_EXAMPLE,
+    "matrix": CPP_MATRIX_EXAMPLE,
+    "range_query": CPP_RANGE_QUERY_EXAMPLE,
+    "weighted_tree": CPP_WEIGHTED_TREE_EXAMPLE,
+    "weighted_graph": CPP_WEIGHTED_GRAPH_EXAMPLE,
+    "interactive": CPP_INTERACTIVE_EXAMPLE,
 }
 
 # 项目根目录
@@ -156,10 +170,11 @@ def _read_corpus_file(path: Path) -> dict | None:
         return None
 
 
-def _load_corpus() -> dict:
-    """加载语料库（含 embedding）。
+def _load_corpus(skip_template_sync: bool = False) -> dict:
+    """加载语料库原始 JSON。
 
-    优先级：本地 .cache → 仓库内 data/ 种子 → 仅用 6 个固定模板初始化。
+    优先级：本地 .cache → 仓库内 data/ 种子 → 仅用固定模板初始化。
+    skip_template_sync 仅供 sync_templates_from_code 内部防递归使用。
     """
     data = _read_corpus_file(_CORPUS_FILE)
     if data is not None:
@@ -167,11 +182,12 @@ def _load_corpus() -> dict:
 
     data = _read_corpus_file(_SEED_FILE)
     if data is not None:
-        # 首次把种子复制到本地 cache，后续读写走 cache
         _save_corpus(data, sync_seed=False)
         return data
 
-    return _init_template_corpus()
+    data = _init_template_corpus()
+    _save_corpus(data)
+    return data
 
 
 def _save_corpus(data: dict, sync_seed: bool = True) -> None:
@@ -185,7 +201,7 @@ def _save_corpus(data: dict, sync_seed: bool = True) -> None:
 
 
 def _init_template_corpus() -> dict:
-    """用 6 个固定模板初始化语料库（无 embedding）。"""
+    """用固定模板初始化语料库（无 embedding）。"""
     now = _now_iso()
     items = []
     for key, content in _TEMPLATE_CONTENT.items():
@@ -203,15 +219,78 @@ def _init_template_corpus() -> dict:
     return {"model": _default_embedding_model(), "items": items}
 
 
+def sync_templates_from_code() -> dict:
+    """用当前代码中的固定模板刷新语料里的 template 条目。
+
+    - content/text 有变化则清空 embedding，待下次检索时重算
+    - 新增题型模板会插入
+    - 代码中已删除的旧模板标记 disabled（保留历史，不参与召回）
+    """
+    corpus = _load_corpus(skip_template_sync=True)
+    items = corpus.setdefault("items", [])
+    by_key = {}
+    for item in items:
+        _normalize_item(item)
+        if item.get("source") == _SOURCE_TEMPLATE:
+            by_key[item.get("key") or ""] = item
+
+    now = _now_iso()
+    changed = 0
+    for key, content in _TEMPLATE_CONTENT.items():
+        summary = _extract_summary_from_template(content)
+        if key in by_key:
+            item = by_key[key]
+            if item.get("content") != content or item.get("text") != summary:
+                item["content"] = content
+                item["text"] = summary
+                item["embedding"] = None
+                item["problem_type"] = key
+                item["disabled"] = False
+                changed += 1
+            else:
+                item["disabled"] = False
+        else:
+            items.append(_normalize_item({
+                "key": key,
+                "source": _SOURCE_TEMPLATE,
+                "text": summary,
+                "content": content,
+                "embedding": None,
+                "problem_type": key,
+                "valid_rate": 1.0,
+                "created_at": now,
+                "disabled": False,
+            }))
+            changed += 1
+
+    for key, item in by_key.items():
+        if key and key not in _TEMPLATE_CONTENT and not item.get("disabled"):
+            item["disabled"] = True
+            item["embedding"] = None
+            changed += 1
+
+    if changed:
+        _save_corpus(corpus)
+    return corpus
+
+
+def refresh_corpus_cache() -> None:
+    """先同步固定模板，再强制重新计算所有 embedding。"""
+    sync_templates_from_code()
+    _build_corpus_embeddings(force_refresh=True)
+
+
 def _build_corpus_embeddings(force_refresh: bool = False) -> dict:
     """确保语料库中每个 item 都有 embedding，返回完整语料数据。
 
     策略：
+      - 先同步代码中的固定模板
       - 模型变更 -> 全部重新计算
       - force_refresh=True -> 全部重新计算
       - 新增 item embedding 缺失 -> 只补算缺失项
     """
-    corpus = _load_corpus()
+    sync_templates_from_code()
+    corpus = _load_corpus(skip_template_sync=True)
     current_model = _default_embedding_model()
     model_changed = corpus.get("model") != current_model
 
@@ -220,7 +299,10 @@ def _build_corpus_embeddings(force_refresh: bool = False) -> dict:
         for item in corpus.get("items", []):
             item["embedding"] = None
 
-    need_fetch = [item for item in corpus.get("items", []) if not item.get("embedding")]
+    need_fetch = [
+        item for item in corpus.get("items", [])
+        if not item.get("embedding") and not item.get("disabled")
+    ]
     if need_fetch:
         for item in need_fetch:
             item["embedding"] = embed_text(item["text"])
@@ -529,11 +611,6 @@ def add_job_to_corpus(
     corpus["model"] = _default_embedding_model()
     _save_corpus(corpus)
     return new_item
-
-
-def refresh_corpus_cache() -> None:
-    """强制重新计算并缓存所有语料项 embedding（含模板 + 已入库历史任务）。"""
-    _build_corpus_embeddings(force_refresh=True)
 
 
 # ---- 语料运营：列表 / 详情 / 禁用 / 删除 / 合并 ----

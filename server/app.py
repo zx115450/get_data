@@ -30,11 +30,21 @@ from server.few_shots_rag import (
     merge_corpus_from_data,
     merge_corpus_from_file,
     set_corpus_item_disabled,
+    sync_templates_from_code,
 )
 from server.range_agent import propose_range_json
 from server.text_agent import beautify_text, simplify_text
 
 app = FastAPI(title="ACM 出数据后端")
+
+
+@app.on_event("startup")
+def _startup_sync_rag_templates():
+    """启动时同步固定 few-shot 模板到 RAG 语料（content 变更会清空旧向量）。"""
+    try:
+        sync_templates_from_code()
+    except Exception:
+        pass
 
 
 class RangeProposeRequest(BaseModel):
@@ -60,6 +70,7 @@ class JobRequest(BaseModel):
     problem_type: str = ""
     range_json: Optional[dict[str, Any]] = None  # 若提供则跳过 Agent 写 range
     special_judge: bool = False  # 是否生成 special judge / checker.zip
+    builtin_checker: str = ""  # 可选 lcmp/wcmp/rcmp4/rcmp6/rcmp9/yesno
 
 
 class CorpusDisableRequest(BaseModel):
@@ -137,6 +148,10 @@ def submit(req: JobRequest):
         raise HTTPException(400, "std_code 不能为空")
     if req.problem_type and req.problem_type not in FEW_SHOTS:
         raise HTTPException(400, f"problem_type 只支持: {list(FEW_SHOTS)}")
+    from agent.tools import BUILTIN_CHECKERS
+    bc = (req.builtin_checker or "").strip().lower()
+    if bc and bc not in BUILTIN_CHECKERS:
+        raise HTTPException(400, f"builtin_checker 只支持: {list(BUILTIN_CHECKERS)}")
 
     job = job_store.create_job()
 
@@ -150,6 +165,7 @@ def submit(req: JobRequest):
                 output_desc=req.output_desc,
                 range_json=req.range_json,
                 special_judge=req.special_judge,
+                builtin_checker=bc,
             )
             job.status = job_store.JobStatus.DONE
         except Exception as e:
@@ -180,6 +196,19 @@ def download(jid: str):
     if not p.exists():
         raise HTTPException(404, "zip 文件不存在")
     return FileResponse(p, media_type="application/zip", filename="data.zip")
+
+
+@app.get("/jobs/{jid}/download_sources")
+def download_sources(jid: str):
+    job = job_store.get_job(jid)
+    if not job:
+        raise HTTPException(404, "job not found")
+    if job.status != job_store.JobStatus.DONE or not job.sources_zip_path:
+        raise HTTPException(409, f"任务未完成或无源码包，当前状态: {job.status.value}")
+    p = Path(job.sources_zip_path)
+    if not p.exists():
+        raise HTTPException(404, "sources zip 文件不存在")
+    return FileResponse(p, media_type="application/zip", filename="sources.zip")
 
 
 @app.get("/jobs/{jid}/download_checker")

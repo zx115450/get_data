@@ -30,6 +30,23 @@
 
 ## 二、安装（只需做一次）
 
+### 方式 A：一键脚本（推荐）
+
+1. 把本项目解压到任意目录  
+2. **Windows**：双击 `setup.bat`，或在项目目录执行：
+
+```powershell
+cd F:\py_project\get_data
+python setup.py
+```
+
+按提示选择大模型供应商、填写 API Key；是否启用 Embedding（不用可跳过）。  
+脚本会自动生成 `.env`、创建 `.venv` 并安装依赖。
+
+3. 用 **PyCharm** 打开项目文件夹 → 解释器选 `.venv` → 运行 `gui.py`。
+
+### 方式 B：手动安装
+
 1. 把本项目解压到任意目录，例如：`F:\py_project\get_data`
 2. 打开 PowerShell / 命令提示符，进入该目录：
 
@@ -125,10 +142,14 @@ python gui.py
 ### 1. 标程 (std)
 
 - **语言**：选 `cpp` 或 `python`（和你的标程一致）
-- **题型**：不会选就留「自动」
+- **题型**：不会选就留「自动」。可选类型包括：
+  - 基础：`array` / `tree` / `graph` / `string` / `number_theory` / `multi_test`
+  - 扩展：`geometry` / `dp` / `matrix` / `range_query` / `weighted_tree` / `weighted_graph` / `interactive`
 - 把**能正确通过样例的标程代码**完整粘贴进去
 
 标程非常重要：后面生成的输入会丢给标程跑，才能得到 `.out` 答案。
+
+树 / 图 / 几何 / 带权结构题会自动使用 **ACM-generator**（`generator.h`，基于 testlib），方便生成链、菊花、二分图、DAG、凸包等；Agent 仍须遵守本项目的 `--seed/--type/--index/--count` 契约。
 
 ### 2. 题面
 
@@ -166,23 +187,42 @@ python gui.py
 ### 5. 提交生成
 
 1. 若题目需要特殊评测，勾选 **Special Judge**
-2. 点 **「提交生成」**
-3. 下方「过程日志」会滚动显示进度（准备标程 → Agent 写代码 → 批量生成 → 打包）
-4. 成功后点 **「下载 zip」** 保存测试数据  
-5. 若勾选了 Special Judge，还可点 **「下载 checker」**
+2. 可选 **内置 Checker**：`lcmp`（按行比 token）/ `wcmp`（按词）/ `rcmp4|6|9`（浮点）/ `yesno`  
+   - 未开 Special Judge 时选中，也会额外打包一份标准比较器，方便上传 OJ  
+   - 开了 Special Judge 时，会优先让 AI 用该内置比较器，而不是手写 checker
+3. 点 **「提交生成」**
+4. 下方「过程日志」会滚动显示进度（准备标程 → Agent 写代码 → 批量生成 → 打包）
+5. 成功后：
+   - **下载 zip**：仅测例 `1.in` / `1.out` …
+   - **下载源码**：`gen.cpp` / `validator.cpp` / `range.json` 等，方便二次修改
+   - **下载 checker**（若有）：special judge 或内置比较器
 
-耐心等待：一次完整生成通常要几分钟，取决于模型和题目复杂度。
+耐心等待：一次完整生成通常要几分钟，取决于模型和题目复杂度。树/图若用了 `generator.h`，单次编译可能稍慢（约十余秒），属正常现象。
 
 ---
 
-## 六、下载到的 zip 里有什么
+## 六、下载到的文件里有什么
 
-一般包含：
+### 测例 zip（「下载 zip」）
 
-- `1.in` / `1.out`、`2.in` / `2.out` … 测试数据
-- 以及生成过程中用到的 `gen.cpp`、`validator.cpp`、`range.json` 等（以实际打包结果为准）
+扁平结构，只含：
 
-把 `.in` / `.out` 拷到评测机或题库平台即可使用。
+- `1.in` / `1.out`、`2.in` / `2.out` …  
+
+适合直接丢给评测机。
+
+### 源码包（「下载源码」）
+
+通常包含：
+
+- `range.json`、`gen.cpp`、`validator.cpp`
+- 若有：`checker.cpp`、`testlib.h`、`generator.h`、标程源码  
+
+方便你本地改生成器再造数据。
+
+### checker zip（「下载 checker」）
+
+Special Judge 或内置比较器产物（`checker.cpp` / 可执行文件 / `testlib.h`）。
 
 ---
 
@@ -211,13 +251,11 @@ python gui.py
 - 常见原因：题面与标程输入格式不一致、范围描述太含糊、标程本身有 bug  
 - 改完题面/标程/范围后重新「提交生成」
 
-### 5. Special Judge 什么时候勾？
+### 5. Special Judge / 内置 Checker 什么时候用？
 
-- 答案不唯一（任意合法解都行）
-- 浮点误差比较
-- 需要按自定义规则判对错  
-
-勾选后请尽量填写「3.5. 输出描述」，AI 写 checker 时会参考。
+- **Special Judge**：答案不唯一、或要按自定义规则判对错时勾选，并尽量填写「输出描述」
+- **内置 Checker**：答案唯一时优先选 `lcmp` / `wcmp` / `rcmp*` / `yesno`，不必让 AI 手写比较器
+- 浮点题用 `rcmp4`（1e-4）/ `rcmp6` / `rcmp9`；Yes/No 题用 `yesno`
 
 ### 6. 每次都要重新装依赖吗？
 
@@ -237,7 +275,7 @@ python gui.py
 
 请打包/分享这些：
 
-- `agent/`、`server/`、`pipeline/`、`utils/`、`data/`
+- `agent/`、`server/`、`pipeline/`、`utils/`、`sandbox/`（含 `testlib.h`、`generator.h`、内置 checker 源码）、`data/`
 - `gui.py`、`requirements.txt`、`.env.example`、`.gitignore`、`README.md`
 
 其中 **`data/few_shots_rag_corpus.json`** 是 RAG few-shot 语料（含历史优质范例与向量）。  
@@ -259,13 +297,10 @@ python gui.py
 
 ```text
 装 Python + g++
-  → 创建 .venv 并 pip install -r requirements.txt
-  → 复制 .env.example 为 .env，填入 API Key
-  → python gui.py
+  → python setup.py（或双击 setup.bat）填 API、装依赖
+  → PyCharm 打开项目，解释器选 .venv，运行 gui.py
   → 点「启动服务器」
-  → 填标程 / 题面 / 范围（可选输出描述）
-  → 点「提交生成」
-  → 完成后「下载 zip」
+  → 填标程 / 题面 / 范围 →「提交生成」→「下载 zip」
 ```
 
 遇到卡住的步骤，把界面里的报错原文发给会用的同学，通常都能很快定位。

@@ -8,9 +8,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent import tools
 from agent.core import run as agent_run
+from agent.tools import BUILTIN_CHECKERS, use_builtin_checker
 from pipeline import gen_data, pack
 from pipeline.gen_data import validate_range_json, normalize_range_json
-from pipeline.pack import pack_checker
+from pipeline.pack import pack_checker, pack_sources
 from sandbox.run import safe_run
 from server import job_store
 from server.few_shots import get_few_shot_rag, detected_type
@@ -48,16 +49,27 @@ def run_job(job: job_store.Job, std_code: str, lang: str,
             problem_type: str = "",
             output_desc: str = "",
             range_json=None,
-            special_judge: bool = False) -> None:
+            special_judge: bool = False,
+            builtin_checker: str = "") -> None:
     """在 worker 线程里跑完整流程。
 
     range_json: 若 GUI 已提供，则跳过 Agent 写 range 的步骤，直接用给定方案写 gen/validator。
-    special_judge: 若 True，则额外要求 Agent 写 checker.cpp 并打包成独立的 checker.zip。
+    special_judge: 若 True，则额外要求 Agent 产出 checker（自定义或内置）并打包 checker.zip。
+    builtin_checker: 可选 lcmp/wcmp/rcmp4/rcmp6/rcmp9/yesno；
+      - special_judge=True 时作为默认推荐（Agent 可用 use_builtin_checker）；
+      - special_judge=False 时若指定，任务结束后自动安装并打包该内置 checker。
     """
+    builtin_checker = (builtin_checker or "").strip().lower()
+    if builtin_checker and builtin_checker not in BUILTIN_CHECKERS:
+        raise ValueError(
+            f"builtin_checker 只支持: {', '.join(BUILTIN_CHECKERS)}，收到 {builtin_checker!r}"
+        )
+
     job_dir = JOBS_DIR / job.id
     job_dir.mkdir(parents=True, exist_ok=True)
     out_dir = job_dir / "out"
     zip_path = job_dir / "data.zip"
+    sources_zip_path = job_dir / "sources.zip"
     checker_zip_path = job_dir / "checker.zip"
 
     def on_event(step, name, args, preview):
@@ -67,6 +79,8 @@ def run_job(job: job_store.Job, std_code: str, lang: str,
         elif name in ("write_gen", "write_validate", "write_range", "write_checker"):
             content = args.get("content") or ""
             brief = {"chars": len(content)}
+        elif name == "use_builtin_checker":
+            brief = {"name": args.get("name")}
         elif name in ("run_validate", "run_std"):
             t = args.get("input_text") or ""
             brief = {"input_chars": len(t)}
@@ -108,6 +122,15 @@ def run_job(job: job_store.Job, std_code: str, lang: str,
 
     tools.set_context(str(job_dir), std_cmd)
     eff_type = detected_type(problem_type, stmt_plain, range_plain, std_code)
+    # 树/图/几何/有权结构题：预先拷贝 generator.h，避免首次 write_gen 才拷贝
+    if eff_type in (
+        "tree", "graph", "geometry", "weighted_tree", "weighted_graph",
+    ):
+        try:
+            tools.prewarm_generator_headers()
+            job_store.add_progress(job, "已预置 generator.h（树/图/几何类题）")
+        except Exception as e:
+            job_store.add_progress(job, f"预置 generator.h 失败（可忽略）: {e}")
     job_store.add_progress(
         job,
         f"题型: {eff_type}" + ("" if problem_type else " (自动检测)")
@@ -120,6 +143,8 @@ def run_job(job: job_store.Job, std_code: str, lang: str,
     if few_shot_summary.startswith("RAG 召回"):
         short = few_shot_summary.replace("RAG 召回 2 个模板: ", "")
         job_store.add_progress(job, f"few-shot RAG: {short}")
+    elif few_shot_summary.startswith("未配置 Embedding"):
+        job_store.add_progress(job, f"few-shot: {few_shot_summary}")
     elif few_shot_summary.startswith("RAG 失败"):
         job_store.add_progress(job, f"few-shot 回退: {few_shot_summary}")
     elif few_shot_summary.startswith("RAG 未召回"):
@@ -177,14 +202,26 @@ def run_job(job: job_store.Job, std_code: str, lang: str,
             if output_plain.strip()
             else ""
         )
+        builtin_hint = ""
+        if builtin_checker:
+            builtin_hint = (
+                f"用户指定优先使用内置 checker「{builtin_checker}」："
+                f"请调用 use_builtin_checker(\"{builtin_checker}\")，不要手写 checker.cpp，"
+                f"除非该比较器无法满足题意。\n"
+            )
+        else:
+            builtin_hint = (
+                "若答案唯一且只需按行/词/浮点/YesNo 比较，优先 use_builtin_checker"
+                "（lcmp/wcmp/rcmp4/rcmp6/rcmp9/yesno），不要手写；"
+                "仅当答案不唯一或需额外判定时才 write_checker。\n"
+            )
         special_judge_block = (
-            f"\n\n【本题为 Special Judge】\n"
-            f"答案不唯一或需要额外判定，请额外调用 write_checker 写一个 testlib special judge。"
-            f"checker.cpp 必须 #include \"testlib.h\"，main 里调用 registerTestlibCmd(argc, argv)，"
+            f"\n\n【本题需要 Checker】\n"
+            f"{builtin_hint}"
+            f"自定义 checker.cpp 必须 #include \"testlib.h\"，main 里调用 registerTestlibCmd(argc, argv)，"
             f"按 (inf, ouf, ans) 顺序读取文件并判定。"
             f"{spj_output_hint}"
-            f"写完后做 gen→validate→std→checker 四连自检：用 run_std 得到标程输出后，"
-            f"再用 run_std 的输出作为 ans 文件、跑 checker 验证 checker 能正确通过标程答案。"
+            f"写完后做 gen→validate→std 自检；若写了自定义 checker，可用标程输出作为 ans 验证能通过。"
         )
 
     # 扫题面关键词，命中特殊结构约束（哈密顿/欧拉/DAG/连通/二分图等）时追加针对性提醒。
@@ -326,8 +363,17 @@ def run_job(job: job_store.Job, std_code: str, lang: str,
         )
     if special_judge:
         has_checker = (job_dir / _exe("checker")).exists() or (job_dir / "checker.cpp").exists()
+        if not has_checker and builtin_checker:
+            # Agent 忘了装：用用户指定的内置 checker 兜底
+            tools.set_context(str(job_dir), std_cmd)
+            msg = use_builtin_checker(builtin_checker)
+            job_store.add_progress(job, f"自动安装内置 checker: {msg}")
+            has_checker = (job_dir / _exe("checker")).exists() or (job_dir / "checker.cpp").exists()
         if not has_checker:
-            raise RuntimeError("已开启 special judge，但 Agent 没有产出 checker.cpp / checker")
+            raise RuntimeError(
+                "已开启 special judge，但 Agent 没有产出 checker"
+                "（可用 use_builtin_checker 或 write_checker）"
+            )
         job_store.add_progress(job, "checker 产物 OK")
 
     job_store.add_progress(
@@ -358,6 +404,13 @@ def run_job(job: job_store.Job, std_code: str, lang: str,
     job.zip_path = str(zip_path)
     job_store.add_progress(job, f"打包完成: {zip_path}")
 
+    try:
+        pack_sources(str(job_dir), str(sources_zip_path))
+        job.sources_zip_path = str(sources_zip_path)
+        job_store.add_progress(job, f"源码包完成: {sources_zip_path}")
+    except Exception as e:
+        job_store.add_progress(job, f"源码包打包失败（非致命）: {type(e).__name__}: {e}")
+
     # 5.5) 把成功任务加入 RAG 语料库（非致命）
     try:
         added = add_job_to_corpus(job_dir, stats=stats, problem_type=eff_type)
@@ -381,3 +434,11 @@ def run_job(job: job_store.Job, std_code: str, lang: str,
         pack_checker(str(job_dir), str(checker_zip_path))
         job.checker_zip_path = str(checker_zip_path)
         job_store.add_progress(job, f"checker 打包完成: {checker_zip_path}")
+    elif builtin_checker:
+        # 未开 SPJ，但用户要求附带内置比较器（上传 OJ 时可用）
+        tools.set_context(str(job_dir), std_cmd)
+        msg = use_builtin_checker(builtin_checker)
+        job_store.add_progress(job, f"安装内置 checker: {msg}")
+        pack_checker(str(job_dir), str(checker_zip_path))
+        job.checker_zip_path = str(checker_zip_path)
+        job_store.add_progress(job, f"内置 checker 打包完成: {checker_zip_path}")

@@ -1,0 +1,62 @@
+【参考范例：一道「查询交互」离线数据写法（C++ testlib）】
+说明：本工具流水线是文件 I/O，不能跑真正的交互库。若题面是交互题但标程可改成「读完全部询问再答」，
+可用本范例生成询问序列作为 .in；真正需要 interactor 的 OJ 交互请另配。
+题面（离线版）：有隐藏数组 a[1..n]，先给定 n，再进行 q 次操作：1 i 询问 a[i]；最后输出所有询问答案之和（标程自带 a）。
+输入格式：第 1 行 n q；第 2 行 n 个整数 a；接下来 q 行，每行两个整数 1 i。
+输出格式：一个整数。
+数据范围：n,q in [1,1e5]，15 组。
+
+range.json:
+{
+  "count": 15,
+  "constraints": {"n": [1, 100000], "q": [1, 100000], "ai": [1, 1000000000]},
+  "edge_cases": ["edge_n1", "edge_nmax", "q1", "qmax", "repeat_ask"]
+}
+
+gen.cpp:
+#include "testlib.h"
+using namespace std;
+int pickSized(int lo, int hi) {
+    int idx = opt<int>("index", 0), cnt = opt<int>("count", 15);
+    if (cnt <= 1) return rnd.next(lo, hi);
+    if (idx < 0) idx = 0; if (idx >= cnt) idx = cnt - 1;
+    long long span = (long long)hi - lo;
+    long long a = lo + span * idx / cnt, b = lo + span * (idx + 1) / cnt;
+    if (b < a) b = a; if (a > hi) a = hi; if (b > hi) b = hi;
+    return rnd.next((int)a, (int)b);
+}
+int main(int argc, char* argv[]) {
+    registerGen(argc, argv, 1);
+    string typ = opt<string>("type", "random");
+    int n = (typ == "edge_n1") ? 1 : (typ == "edge_nmax") ? 100000 : pickSized(1, 100000);
+    int q = (typ == "q1") ? 1 : (typ == "qmax") ? 100000 : pickSized(1, 100000);
+    printf("%d %d\n", n, q);
+    for (int i = 0; i < n; i++) printf("%d%c", rnd.next(1, 1000000000), i + 1 < n ? ' ' : '\n');
+    int fixed = rnd.next(1, n);
+    for (int i = 0; i < q; i++) {
+        int idx = (typ == "repeat_ask") ? fixed : rnd.next(1, n);
+        printf("1 %d\n", idx);
+    }
+    return 0;
+}
+
+validator.cpp:
+#include "testlib.h"
+using namespace std;
+int main(int argc, char* argv[]) {
+    registerValidation();
+    int n = inf.readInt(1, 100000, "n"); inf.readSpace();
+    int q = inf.readInt(1, 100000, "q"); inf.readEoln();
+    for (int i = 0; i < n; i++) {
+        inf.readInt(1, 1000000000, "ai");
+        if (i + 1 < n) inf.readSpace();
+    }
+    inf.readEoln();
+    for (int i = 0; i < q; i++) {
+        int op = inf.readInt(1, 1, "op"); inf.readSpace();
+        inf.readInt(1, n, "i"); inf.readEoln();
+        ensuref(op == 1, "only query op=1 in this offline sample");
+    }
+    inf.readEof();
+    return 0;
+}

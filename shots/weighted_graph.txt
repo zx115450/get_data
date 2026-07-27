@@ -1,0 +1,76 @@
+【参考范例：一道带权图题的标准写法（C++ + ACM-generator）】
+题面：给定 n 点 m 边带权无向图，输出边权之和。
+输入格式：第 1 行 n m；接下来 m 行 u v w（无自环无重边）。
+输出格式：一个整数。
+数据范围：n in [1,1000]，m in [0,n*(n-1)/2]，w in [1,1e9]，15 组。
+
+range.json:
+{
+  "count": 15,
+  "constraints": {"n": [1, 1000], "m": [0, 499500], "w": [1, 1000000000]},
+  "edge_cases": ["connected_tree", "path", "star", "random_sparse", "edge_n1"]
+}
+
+gen.cpp:
+#include "generator.h"
+using namespace std;
+using namespace generator::all;
+int pickSized(int lo, int hi) {
+    int idx = opt<int>("index", 0), cnt = opt<int>("count", 15);
+    if (cnt <= 1) return rnd.next(lo, hi);
+    if (idx < 0) idx = 0; if (idx >= cnt) idx = cnt - 1;
+    long long span = (long long)hi - lo;
+    long long a = lo + span * idx / cnt, b = lo + span * (idx + 1) / cnt;
+    if (b < a) b = a; if (a > hi) a = hi; if (b > hi) b = hi;
+    return rnd.next((int)a, (int)b);
+}
+int main(int argc, char* argv[]) {
+    registerGen(argc, argv, 1);
+    string typ = opt<string>("type", "random_sparse");
+    int n = (typ == "edge_n1") ? 1 : pickSized(1, 1000);
+    vector<tuple<int,int,long long>> edges;
+    auto add_tree = [&](auto &t) {
+        t.set_edges_weight_function([](){ return rnd.next(1, 1000000000); });
+        t.gen();
+        for (auto &e : t.edges()) edges.emplace_back(e.u(), e.v(), e.w());
+    };
+    if (typ == "connected_tree" && n >= 2) {
+        edge_weight::Tree<int> t(n); add_tree(t);
+    } else if (typ == "path" && n >= 2) {
+        edge_weight::Chain<int> t(n); add_tree(t);
+    } else if (typ == "star" && n >= 2) {
+        edge_weight::Flower<int> t(n); add_tree(t);
+    } else if (n >= 2) {
+        int m = rnd.next(0, max(1, n));
+        unordered_set<long long> used;
+        while ((int)edges.size() < m) {
+            int u = rnd.next(1, n), v = rnd.next(1, n);
+            if (u == v) continue;
+            long long key = (long long)min(u,v) * (n + 1) + max(u,v);
+            if (!used.insert(key).second) continue;
+            edges.emplace_back(u, v, rnd.next(1LL, 1000000000LL));
+        }
+    }
+    printf("%d %d\n", n, (int)edges.size());
+    for (auto [u,v,w] : edges) printf("%d %d %lld\n", u, v, w);
+    return 0;
+}
+
+validator.cpp:
+#include "testlib.h"
+using namespace std;
+int main(int argc, char* argv[]) {
+    registerValidation();
+    int n = inf.readInt(1, 1000, "n"); inf.readSpace();
+    int m = inf.readInt(0, 499500, "m"); inf.readEoln();
+    set<pair<int,int>> es;
+    for (int i = 0; i < m; i++) {
+        int u = inf.readInt(1, n, "u"); inf.readSpace();
+        int v = inf.readInt(1, n, "v"); inf.readSpace();
+        inf.readLong(1, 1000000000LL, "w"); inf.readEoln();
+        ensuref(u != v, "self loop");
+        ensuref(es.insert({min(u,v), max(u,v)}).second, "dup");
+    }
+    inf.readEof();
+    return 0;
+}

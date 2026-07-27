@@ -52,6 +52,15 @@ _embedding_client = _openai_client("EMBEDDING_")
 _MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
 _EMBEDDING_MODEL = os.getenv("LLM_EMBEDDING_MODEL", "text-embedding-3-small")
 
+
+def embedding_configured() -> bool:
+    """是否单独配置了 Embedding 服务。
+
+    仅当设置了 EMBEDDING_API_KEY 时视为可用。
+    未配置时不应走 RAG（避免误用 chat 的 DeepSeek 等去调 embedding 接口失败）。
+    """
+    return bool((os.getenv("EMBEDDING_API_KEY") or "").strip())
+
 # 网关 413 防护：单字段 / 整包大致上限（字符）
 _MAX_TOOL_RESULT = 2500
 _MAX_ARG_CONTENT = 400

@@ -1,0 +1,77 @@
+【参考范例：一道计算几何题的标准写法（C++ + ACM-generator）】
+题面：给定平面上 n 个点，求凸包上的点数。
+输入格式：第 1 行 n；接下来 n 行每行两个整数 x y。
+输出格式：一个整数。
+数据范围：n in [3,1000]，坐标 in [-1e6,1e6]，15 组，覆盖凸包、简单多边形顶点、随机点、共线、n=3。
+说明：优先用 ConvexHull / SimplePolygon / RandomPoints；仍须 registerGen 与 CLI 契约。
+
+range.json:
+{
+  "count": 15,
+  "constraints": {"n": [3, 1000], "x": [-1000000, 1000000], "y": [-1000000, 1000000]},
+  "edge_cases": ["convex_hull", "simple_polygon", "random_points", "collinear", "edge_n3"]
+}
+
+gen.cpp:
+#include "generator.h"
+using namespace std;
+using namespace generator::all;
+int pickSized(int lo, int hi) {
+    int idx = opt<int>("index", 0);
+    int cnt = opt<int>("count", 15);
+    if (cnt <= 1) return rnd.next(lo, hi);
+    if (idx < 0) idx = 0;
+    if (idx >= cnt) idx = cnt - 1;
+    long long span = (long long)hi - lo;
+    long long a = lo + span * idx / cnt;
+    long long b = lo + span * (idx + 1) / cnt;
+    if (b < a) b = a;
+    if (a > hi) a = hi;
+    if (b > hi) b = hi;
+    return rnd.next((int)a, (int)b);
+}
+int main(int argc, char* argv[]) {
+    registerGen(argc, argv, 1);
+    int seed = opt<int>("seed");
+    string typ = opt<string>("type", "random_points");
+    int n = (typ == "edge_n3") ? 3 : pickSized(3, 1000);
+    int LIM = 1000000;
+    if (typ == "convex_hull") {
+        ConvexHull<int> c(n);
+        c.set_xy_limit(-LIM, LIM);
+        c.gen();
+        cout << c << "\n";
+    } else if (typ == "simple_polygon") {
+        SimplePolygon<int> p(n);
+        p.set_xy_limit(-LIM, LIM);
+        p.gen();
+        cout << p << "\n";
+    } else if (typ == "collinear") {
+        printf("%d\n", n);
+        int y = rnd.next(-LIM, LIM);
+        for (int i = 0; i < n; i++) {
+            int x = rnd.next(-LIM, LIM);
+            printf("%d %d\n", x, y);
+        }
+    } else {
+        RandomPoints<int> pts(n, -LIM, LIM, -LIM, LIM);
+        pts.gen();
+        cout << pts << "\n";
+    }
+    return 0;
+}
+
+validator.cpp:
+#include "testlib.h"
+using namespace std;
+int main(int argc, char* argv[]) {
+    registerValidation();
+    int n = inf.readInt(3, 1000, "n");
+    inf.readEoln();
+    for (int i = 0; i < n; i++) {
+        inf.readInt(-1000000, 1000000, "x"); inf.readSpace();
+        inf.readInt(-1000000, 1000000, "y"); inf.readEoln();
+    }
+    inf.readEof();
+    return 0;
+}

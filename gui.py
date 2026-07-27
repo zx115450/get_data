@@ -25,8 +25,13 @@ load_dotenv()
 _SERVER_HOST = os.getenv("SERVER_HOST", "127.0.0.1").strip() or "127.0.0.1"
 _SERVER_PORT = int(os.getenv("SERVER_PORT") or "8000")
 BASE = f"http://{_SERVER_HOST}:{_SERVER_PORT}"
-PROBLEM_TYPES = ["自动", "array", "tree", "graph", "string", "number_theory"]
+PROBLEM_TYPES = [
+    "自动", "array", "tree", "graph", "string", "number_theory", "geometry",
+    "multi_test", "dp", "matrix", "range_query", "weighted_tree", "weighted_graph",
+    "interactive",
+]
 LANGS = ["python", "cpp"]
+BUILTIN_CHECKER_OPTIONS = ["无", "lcmp", "wcmp", "rcmp4", "rcmp6", "rcmp9", "yesno"]
 
 
 def _pids_listening_on_port(port: int) -> set[int]:
@@ -235,7 +240,9 @@ class App:
         self.rag_ptype = tk.StringVar(value="全部")
         ttk.OptionMenu(
             filt, self.rag_ptype, "全部",
-            "全部", "array", "tree", "graph", "string", "number_theory", "multi_test",
+            "全部", "array", "tree", "graph", "string", "number_theory", "geometry",
+            "multi_test", "dp", "matrix", "range_query", "weighted_tree", "weighted_graph",
+            "interactive",
         ).pack(side="left", padx=4)
         self.rag_show_disabled = tk.BooleanVar(value=True)
         ttk.Checkbutton(filt, text="显示已禁用", variable=self.rag_show_disabled).pack(side="left", padx=8)
@@ -302,10 +309,15 @@ class App:
         self.btn_submit.pack(side="left", padx=4)
         self.btn_download = ttk.Button(ops, text="下载 zip", state="disabled", command=self.on_download)
         self.btn_download.pack(side="left", padx=4)
+        self.btn_download_sources = ttk.Button(ops, text="下载源码", state="disabled", command=self.on_download_sources)
+        self.btn_download_sources.pack(side="left", padx=4)
         self.btn_download_checker = ttk.Button(ops, text="下载 checker", state="disabled", command=self.on_download_checker)
         self.btn_download_checker.pack(side="left", padx=4)
         self.special_judge_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(ops, text="Special Judge", variable=self.special_judge_var).pack(side="left", padx=4)
+        ttk.Label(ops, text="内置Checker:").pack(side="left", padx=(8, 0))
+        self.builtin_checker = tk.StringVar(value="无")
+        ttk.OptionMenu(ops, self.builtin_checker, "无", *BUILTIN_CHECKER_OPTIONS).pack(side="left", padx=2)
         self.status = tk.StringVar(value="待提交 — 可先在「4. 数据方案」生成方案，或直接提交（含写 range）")
         ttk.Label(ops, textvariable=self.status).pack(side="left", padx=12)
 
@@ -571,6 +583,9 @@ class App:
         ptype = self.ptype.get()
         if ptype == "自动":
             ptype = ""
+        bc = self.builtin_checker.get()
+        if bc == "无":
+            bc = ""
         body = {
             "std_code": std,
             "lang": self.lang.get(),
@@ -579,12 +594,14 @@ class App:
             "data_range_desc": rng,
             "output_desc": out,
             "special_judge": self.special_judge_var.get(),
+            "builtin_checker": bc,
         }
         plan = self.collect_range_from_ui()
         if plan:
             body["range_json"] = plan
         self.btn_submit.config(state="disabled")
         self.btn_download.config(state="disabled")
+        self.btn_download_sources.config(state="disabled")
         self.btn_download_checker.config(state="disabled")
         self.progress.delete("1.0", "end")
         self._seen_progress = 0
@@ -639,9 +656,11 @@ class App:
         err = st.get("error") or ""
         status = st["status"]
         if status == "done":
-            self.status.set("完成 — 可下载 zip（仅含 1.in/1.out …）")
+            self.status.set("完成 — 可下载测例 zip / 源码包")
             self._set_stage("pack", "done")
             self.btn_download.config(state="normal")
+            if st.get("has_sources_zip"):
+                self.btn_download_sources.config(state="normal")
             if st.get("has_checker_zip"):
                 self.btn_download_checker.config(state="normal")
             self.btn_submit.config(state="normal")
@@ -689,6 +708,10 @@ class App:
             hint = "写+编译 validator.cpp"
         elif name == "write_checker":
             hint = "写+编译 checker.cpp"
+        elif name == "use_builtin_checker":
+            hint = f"安装内置 checker={args.get('name', '?')}"
+        elif name == "run_self_check":
+            hint = "强化自检"
         elif name == "run_gen":
             hint = f"生成 type={args.get('type', '?')} seed={args.get('seed', '?')}"
         elif name == "run_validate":
@@ -862,6 +885,28 @@ class App:
             self.server_proc = None
             self.server_pid_var.set("未启动")
             self.btn_start_srv.config(state="normal")
+
+    def on_download_sources(self):
+        if not self.job_id:
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".zip", filetypes=[("zip", "*.zip")],
+            initialfile="sources.zip",
+        )
+        if not path:
+            return
+
+        def work():
+            try:
+                content = urllib.request.urlopen(
+                    f"{BASE}/jobs/{self.job_id}/download_sources", timeout=30).read()
+                with open(path, "wb") as f:
+                    f.write(content)
+                self.root_after(lambda: self.status.set(f"已保存源码包: {path}"))
+            except Exception as e:
+                self.root_after(lambda: messagebox.showerror("下载源码失败", str(e)))
+
+        threading.Thread(target=work, daemon=True).start()
 
     def on_download_checker(self):
         if not self.job_id:

@@ -14,11 +14,27 @@ range.json:
 gen.cpp:
 #include "testlib.h"
 using namespace std;
+// 把 [lo,hi] 按 --index/--count 切成 cnt 段，第 idx 组落在第 idx 段内，保证规模均匀
+int pickSized(int lo, int hi) {
+    int idx = opt<int>("index", 0);
+    int cnt = opt<int>("count", 15);
+    if (cnt <= 1) return rnd.next(lo, hi);
+    if (idx < 0) idx = 0;
+    if (idx >= cnt) idx = cnt - 1;
+    long long span = (long long)hi - lo;
+    long long a = lo + span * idx / cnt;
+    long long b = lo + span * (idx + 1) / cnt;
+    if (b < a) b = a;
+    if (a > hi) a = hi;
+    if (b > hi) b = hi;
+    return rnd.next((int)a, (int)b);
+}
 int main(int argc, char* argv[]) {
     registerGen(argc, argv, 1);
     int seed = opt<int>("seed");
     string typ = opt<string>("type", "random");
-    int n = rnd.next(1, 50);
+    int N_MIN = 1, N_MAX = 1000;
+    int n = pickSized(N_MIN, N_MAX);
     string s, p;
     if (typ == "all_same" || typ == "long_run") {
         char c = 'a' + rnd.next(0, 25);

@@ -1,0 +1,62 @@
+【参考范例：一道矩阵题的标准写法（C++ testlib）】
+题面：给定 n×m 整数矩阵，输出所有元素之和。
+输入格式：第 1 行 n m；接下来 n 行每行 m 个整数。
+输出格式：一个整数。
+数据范围：n,m in [1,200]，aij in [-1e9,1e9]，15 组。
+
+range.json:
+{
+  "count": 15,
+  "constraints": {"n": [1, 200], "m": [1, 200], "aij": [-1000000000, 1000000000]},
+  "edge_cases": ["edge_11", "edge_nmax", "row", "col", "all_zero"]
+}
+
+gen.cpp:
+#include "testlib.h"
+using namespace std;
+int pickSized(int lo, int hi) {
+    int idx = opt<int>("index", 0), cnt = opt<int>("count", 15);
+    if (cnt <= 1) return rnd.next(lo, hi);
+    if (idx < 0) idx = 0; if (idx >= cnt) idx = cnt - 1;
+    long long span = (long long)hi - lo;
+    long long a = lo + span * idx / cnt, b = lo + span * (idx + 1) / cnt;
+    if (b < a) b = a; if (a > hi) a = hi; if (b > hi) b = hi;
+    return rnd.next((int)a, (int)b);
+}
+int main(int argc, char* argv[]) {
+    registerGen(argc, argv, 1);
+    string typ = opt<string>("type", "random");
+    int n = 1, m = 1;
+    if (typ == "edge_11") { n = m = 1; }
+    else if (typ == "edge_nmax") { n = m = 200; }
+    else if (typ == "row") { n = 1; m = pickSized(1, 200); }
+    else if (typ == "col") { n = pickSized(1, 200); m = 1; }
+    else { n = pickSized(1, 200); m = pickSized(1, 200); }
+    printf("%d %d\n", n, m);
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < m; j++) {
+            long long v = (typ == "all_zero") ? 0 : rnd.next(-1000000000LL, 1000000000LL);
+            printf("%lld%c", v, j + 1 < m ? ' ' : '\n');
+        }
+    }
+    return 0;
+}
+
+validator.cpp:
+#include "testlib.h"
+using namespace std;
+int main(int argc, char* argv[]) {
+    registerValidation();
+    int n = inf.readInt(1, 200, "n"); inf.readSpace();
+    int m = inf.readInt(1, 200, "m"); inf.readEoln();
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < m; j++) {
+            inf.readLong(-1000000000LL, 1000000000LL, "aij");
+            if (j + 1 < m) inf.readSpace();
+        }
+        inf.readEoln();
+    }
+    ensuref(n * m >= 1, "nonempty");
+    inf.readEof();
+    return 0;
+}

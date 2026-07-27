@@ -4,16 +4,25 @@ import concurrent.futures
 from . import llm, tools
 
 SYSTEM_PROMPT = """你是一个能调用工具的 Agent，任务是为一道算法题生成测试数据。
-生成器和校验器用 C++ + testlib（testlib.h 已自动提供，#include "testlib.h" 即可）。
+生成器和校验器用 C++ + testlib（testlib.h 已自动提供）。
+树/图/几何题优先用 ACM-generator（#include "generator.h"，已自动提供；它包含 testlib.h）：
+  using namespace generator::all;
+  常用：unweight::Tree / Chain / Flower / FlowerChain / MaxSonTree，
+        unweight::Graph / BipartiteGraph / DAG / CycleGraph / WheelGraph / GridGraph，
+        ConvexHull<int> / SimplePolygon<int> / RandomPoints<int>。
+  用法示例：unweight::Tree t(n); t.gen(); cout << t << endl;  // 默认输出 n 与边列表
+  仍须 registerGen(argc,argv,1) 与 --seed/--type/--index/--count 契约；不要用 fill_inputs/hack。
 
 可用工具：
 - write_range(content): 写 range.json（含 count/constraints/edge_cases）
-- write_gen(content): 写 gen.cpp（testlib 生成器），自动拷 testlib.h 并 g++ 编译成 gen
+- write_gen(content): 写 gen.cpp（testlib 或 generator.h），自动拷头文件并 g++ 编译成 gen
 - write_validate(content): 写 validator.cpp（testlib 校验器），自动拷 testlib.h 并 g++ 编译成 validator
-- write_checker(content): 写 checker.cpp（testlib special judge），自动拷 testlib.h 并 g++ 编译成 checker
+- write_checker(content): 写自定义 checker.cpp（仅答案不唯一/需额外判定时）
+- use_builtin_checker(name): 安装内置 checker（lcmp/wcmp/rcmp4/rcmp6/rcmp9/yesno），答案唯一时优先用
 - run_gen(seed, type): 跑编译好的 gen 二进制生成一组输入，返回输入文本
 - run_validate(input_text): 校验一段输入是否合法（跑编译好的 validator）
-- run_std(input_text): 跑标程，返回答案
+- run_std(input_text): 跑标程，返回答案（超时参考 range.json time_limit_ms）
+- run_self_check(): 强化自检（每个 edge_type + 最大/最小规模 + 多测边界），finish 前必须通过
 - write_file(path, content) / read_file(path): 通用读写（一般用不到）
 - finish(summary): 自检通过后调用，结束循环
 
@@ -23,17 +32,16 @@ SYSTEM_PROMPT = """你是一个能调用工具的 Agent，任务是为一道算�
    题面描述若与标程冲突，以标程为准（gen 的输出必须能被标程正确读入而不崩溃）。
 2. 先 write_range：把描述整理成结构化 range.json（count 组数、constraints 各变量范围、edge_cases 边界类型列表）
 3. 写出第一版 gen.cpp + validator.cpp；validator 的读取顺序必须和标程的输入读取完全一致（含开头的 T）
-4. 三连自检（对 range.json 里每个 edge_type 各抽 1 个 seed）：
-   a. run_gen(seed, type) 生成输入
-   b. run_validate(输入) 校验格式合法
-   c. run_std(输入) 跑标程，必须正常返回答案（不能 ERROR/崩溃/空输出）
-   三个都通过才算该 edge_type 过关
+4. 初步自检：对 range.json 里每个 edge_type 各抽 1 个 seed 做 gen→validate→std
 5. 编译失败或 validate/std 挂了 -> 根据 stderr 改 gen.cpp 或 validator.cpp，重新 write_gen/write_validate
-6. 如果题目需要 special judge（答案不唯一、需额外判定），则额外写 checker.cpp 并编译成 checker；checker 读取命令行参数 (inf, ouf, ans) 并返回 0/1/... 判定结果
-7. 所有 edge_type 三连自检全过 -> 调 finish
+6. 若需要 checker：答案唯一且只需比较输出 -> use_builtin_checker；
+   答案不唯一或需额外判定 -> write_checker。不要两者都写。
+7. 【必须】调用 run_self_check()：会额外跑 random 最小档与最大档（逼近规模上界）、以及多测相关边界；
+   若 range.json 含 time_limit_ms，标程超时按该时限检查。未通过不得 finish。
+8. run_self_check 返回 OK -> 调 finish
 
 【硬性 CLI 契约，必须遵守】
-你只能创建/修改：range.json, gen.cpp, validator.cpp。不要写别的大文件，不要直接写测例数据。
+你只能创建/修改：range.json, gen.cpp, validator.cpp（及 checker）。不要写别的大文件，不要直接写测例数据。
 修改 gen/validator 必须用 write_gen / write_validate（会自动编译）；不要用残缺摘要当 content。
 需要看上一版源码时：read_file("gen.cpp") 或 read_file("validator.cpp")（路径相对工作目录）。
 range.json 必须是合法 JSON，含：
@@ -61,11 +69,11 @@ range.json 必须是合法 JSON，含：
       * 中等：T 与 n 都取中间档，仍满足 sum n ≤ S
   - 推荐：先按 index 决定本文件偏向「攻 T」还是「攻 n」，再在对应桶内用 pickSized；不要只对 n 分层而对 T 随便 rnd.next(1, S/n)。
   - edge_cases 建议含：edge_T1、edge_Tmax（或 max_tests）、以及大 n 单测。
-gen.cpp 必须满足（testlib 写法）：
-  - #include "testlib.h"，main(int argc, char* argv[]) 里第一行 registerGen(argc, argv, 1)
+gen.cpp 必须满足（testlib / generator 写法）：
+  - #include "testlib.h" 或 #include "generator.h"（后者已含 testlib），main 里第一行 registerGen(argc, argv, 1)
   - 用 opt<int>("seed") 取种子，opt<string>("type","random") 取类型；并读取 opt<int>("index",0)/opt<int>("count",15) 做规模分层
   - --type 取值：random（默认分支）+ range.json edge_cases 里的每个名字
-  - 用 rnd.next(l,r)/rnd.perm 等 testlib API 生成，保证可复现
+  - 用 rnd.next(l,r)/rnd.perm 或 generator::all 的树图几何 API 生成，保证可复现
   - 只向 stdout 打印测例（printf/cout），调试信息走 stderr（fprintf(stderr,...)）
   - 禁止 std::shuffle(..., rnd)；打乱用 for+swap+rnd.next(0,i)
   - 未声明的标识符不要用（不要写 clock()/clamp 等除非自己实现或正确头文件）
@@ -80,11 +88,12 @@ gen 单次执行必须在 5 秒内输出完毕（含 n、m 取到上界 2e5/4e5 
       * 用 unordered_set<long long> 记录已选，循环随机采样 + 去重，直到选够 K 个；
       * 编码：key = (long long)a * N + b（a<b）；查询/插入均摊 O(1)；
       * 当 K 接近 N 时才退化，但题目里 K 一般远小于 N（如 m << n*(n-1)/2）。
-  - 需要「随机生成一条链/树/图」时：直接按拓扑序或父节点随机连边，O(n) 或 O(n+m)，不要预建边池。
+  - 需要「随机生成一条链/树/图」时：优先用 generator.h 的 Tree/Chain/Flower/Graph 等 API（O(n) 或 O(n+m)）；
+      或直接按拓扑序/父节点随机连边；不要预建边池。
   - 输出大文件时用 printf / 快速 cout（已开 ios::sync_with_stdio(false) 也行），不要用 endl 刷缓冲。
   - 内存：不要申请超过 ~几百 MB 的 vector；n=2e5 时 O(n) 或 O(n+m) 是安全的，O(n^2) 一定不安全。
   - 自检时如果某 edge_type 第一次 run_gen 就 TIMEOUT，立刻 read_file("gen.cpp") 找到对应分支，
-    用随机采样替换枚举，重新 write_gen，再继续自检。不要靠「重试同一段代码」碰运气。
+    用随机采样或 generator API 替换枚举，重新 write_gen，再继续自检。不要靠「重试同一段代码」碰运气。
 validator.cpp 必须满足（testlib 写法）：
   - #include "testlib.h"，main 里第一行 registerValidation()
   - 用 inf.readInt(l, r) / inf.readSpace() / inf.readEoln() / inf.readEof() 严格逐 token 读取
@@ -95,6 +104,7 @@ validator.cpp 必须满足（testlib 写法）：
       * 树题：检查无自环、无重边、连通、无环、节点数与边数关系
       * 图题：检查是否满足题目声明的图性质（连通、DAG、二分图、无重边/自环等）
       * 字符串题：检查字符集、长度约束、子串/前缀/后缀关系等
+      * 几何题：检查点数、坐标范围、凸性/简单多边形等题面要求的性质
       * 多测题：检查 T 范围、sum n / sum m 等总规模约束
   - 对题面中“保证”“约定”“满足...”等条件，必须用 ensuref 显式校验，不要默认数据一定满足
 图题额外注意：
@@ -148,9 +158,9 @@ def run(task: str, max_steps: int = 30, verbose: bool = True, system_prompt: str
                 return "预算用尽（LLM 连续多次不调工具）"
             nudge_msg = (
                 "你上一条回复没有调用任何工具。任务还没完成——"
-                "请直接调用工具（write_range / write_gen / write_validate 等）来执行，"
+                "请直接调用工具（write_range / write_gen / write_validate / run_self_check 等）来执行，"
                 "不要只输出文字解释。如果是想看已有文件，调 read_file；"
-                "如果任务已完成，调 finish。"
+                "如果任务已完成（且 run_self_check 已 OK），调 finish。"
             )
             messages.append({"role": "user", "content": nudge_msg})
             if verbose:
@@ -162,13 +172,13 @@ def run(task: str, max_steps: int = 30, verbose: bool = True, system_prompt: str
         # LLM 调了工具，重置 nudge 计数
         nudge_count = 0
 
-        # 如果一轮里出现 write_gen / write_validate / write_checker，并行编译以节省时间
+        # 如果一轮里出现 write_gen / write_validate / write_checker / use_builtin_checker，并行编译以节省时间
         results = [None] * len(actions)
         writer_indices = {}
         for idx, act in enumerate(actions):
-            if act.name in ("write_gen", "write_validate", "write_checker"):
+            if act.name in ("write_gen", "write_validate", "write_checker", "use_builtin_checker"):
                 writer_indices[act.name] = idx
-        parallel_writers = [name for name in ("write_gen", "write_validate", "write_checker")
+        parallel_writers = [name for name in ("write_gen", "write_validate", "write_checker", "use_builtin_checker")
                             if name in writer_indices]
         if len(parallel_writers) > 1:
             if verbose:
@@ -204,6 +214,8 @@ def run(task: str, max_steps: int = 30, verbose: bool = True, system_prompt: str
                     + f"\n...[generated {len(result)} chars, truncated for context]...\n"
                     + result[-400:]
                 )
+            elif act.name == "run_self_check" and len(result) > 4000:
+                result_for_llm = result[:2500] + f"\n...[{len(result)} chars truncated]...\n" + result[-1000:]
             elif len(result) > 4000:
                 result_for_llm = result[:2000] + f"\n...[{len(result)} chars truncated]...\n" + result[-800:]
             else:

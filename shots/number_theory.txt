@@ -15,6 +15,21 @@ gen.cpp:
 #include "testlib.h"
 using namespace std;
 bool isPrime(long long x) { if (x < 2) return false; for (long long i = 2; i * i <= x; i++) if (x % i == 0) return false; return true; }
+// 把 [lo,hi] 按 --index/--count 切成 cnt 段，第 idx 组落在第 idx 段内，保证规模均匀
+int pickSized(int lo, int hi) {
+    int idx = opt<int>("index", 0);
+    int cnt = opt<int>("count", 15);
+    if (cnt <= 1) return rnd.next(lo, hi);
+    if (idx < 0) idx = 0;
+    if (idx >= cnt) idx = cnt - 1;
+    long long span = (long long)hi - lo;
+    long long a = lo + span * idx / cnt;
+    long long b = lo + span * (idx + 1) / cnt;
+    if (b < a) b = a;
+    if (a > hi) a = hi;
+    if (b > hi) b = hi;
+    return rnd.next((int)a, (int)b);
+}
 int main(int argc, char* argv[]) {
     registerGen(argc, argv, 1);
     int seed = opt<int>("seed");
@@ -23,7 +38,7 @@ int main(int argc, char* argv[]) {
     long long A_MIN = 1, A_MAX = 1000000000LL;
     int n;
     if (typ == "edge_n1") n = 1;
-    else n = rnd.next(N_MIN, min(100, N_MAX));
+    else n = pickSized(N_MIN, N_MAX);
     vector<long long> a(n);
     if (typ == "all_equal") { long long v = rnd.next(A_MIN, A_MAX); for (int i = 0; i < n; i++) a[i] = v; }
     else if (typ == "all_prime") { vector<long long> pr; for (long long x = 2; x < 200; x++) if (isPrime(x)) pr.push_back(x); for (int i = 0; i < n; i++) a[i] = pr[rnd.next(0, (int)pr.size() - 1)]; }

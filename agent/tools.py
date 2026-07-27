@@ -7,6 +7,7 @@
 数据生成工具需要一个工作目录（work_dir）和标程命令（std_cmd），
 由 main.py 在跑 Agent 前通过 set_context() 注入。
 """
+import hashlib
 import json
 import os
 import shutil
@@ -17,8 +18,19 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from sandbox.run import safe_run
 
-# testlib.h 单头文件库的位置（随项目分发，每个 job 目录拷一份）
-TESTLIB_H = Path(__file__).resolve().parent.parent / "sandbox" / "testlib.h"
+# testlib.h / generator.h / 内置 checker 源码（随项目分发，每个 job 目录按需拷贝）
+_SANDBOX = Path(__file__).resolve().parent.parent / "sandbox"
+TESTLIB_H = _SANDBOX / "testlib.h"
+GENERATOR_H = _SANDBOX / "generator.h"
+CHECKER_SRC_DIR = _SANDBOX / "checker"
+
+# 允许的内置 checker 名（对应 sandbox/checker/<name>.cpp）
+BUILTIN_CHECKERS = ("lcmp", "wcmp", "rcmp4", "rcmp6", "rcmp9", "yesno")
+
+# 题型里通常会用到 generator.h 的集合（供 runner 预置）
+GENERATOR_PROBLEM_TYPES = frozenset({
+    "tree", "graph", "geometry", "weighted_tree", "weighted_graph",
+})
 
 
 def _exe(base: str) -> str:
@@ -33,16 +45,42 @@ def _copy_testlib() -> None:
         shutil.copyfile(TESTLIB_H, dst)
 
 
+def _copy_generator() -> None:
+    """把 generator.h 拷到工作目录（依赖同目录 testlib.h）。仅在需要时调用。"""
+    _copy_testlib()
+    dst = WORK_DIR / "generator.h"
+    if GENERATOR_H.exists() and not dst.exists():
+        shutil.copyfile(GENERATOR_H, dst)
+
+
+def prewarm_generator_headers() -> None:
+    """为树/图/几何类题预先拷贝 generator.h（不预编译；PCH 在本机无明显收益）。"""
+    _copy_generator()
+
+
+def _needs_generator(content: str) -> bool:
+    """源码是否引用 ACM-generator。"""
+    return "generator.h" in content or "generator::" in content
+
+
+def _content_hash(content: str) -> str:
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
 # ---- 运行上下文（由 main.py 注入）----
 WORK_DIR = Path(".")
 STD_CMD = ""
+_LAST_GEN_HASH = ""
+_LAST_VAL_HASH = ""
 
 
 def set_context(work_dir: str, std_cmd: str) -> None:
-    global WORK_DIR, STD_CMD
+    global WORK_DIR, STD_CMD, _LAST_GEN_HASH, _LAST_VAL_HASH
     WORK_DIR = Path(work_dir)
     WORK_DIR.mkdir(parents=True, exist_ok=True)
     STD_CMD = std_cmd
+    _LAST_GEN_HASH = ""
+    _LAST_VAL_HASH = ""
 
 
 def _resolve(path: str) -> Path:
@@ -139,28 +177,45 @@ def write_range(content: str) -> str:
 
 
 def write_gen(content: str) -> str:
-    """把生成器 C++ 源码写到 work_dir/gen.cpp，拷 testlib.h，编译成 gen(.exe)。"""
+    """把生成器 C++ 源码写到 work_dir/gen.cpp，拷 testlib.h（及可选 generator.h），编译成 gen(.exe)。"""
+    global _LAST_GEN_HASH
     if _looks_like_omitted_stub(content):
         return (
             "ERROR: content 像是历史摘要，不是完整 gen.cpp。"
-            "请重新输出完整 C++ 源码（#include \"testlib.h\" + registerGen）。"
+            "请重新输出完整 C++ 源码（#include \"testlib.h\" 或 \"generator.h\" + registerGen）。"
             "若需查看上一版，先 read_file(\"gen.cpp\")。"
         )
-    if "registerGen" not in content and "testlib.h" not in content:
-        return "ERROR: gen.cpp 必须 #include \"testlib.h\" 并调用 registerGen(argc, argv, 1)"
+    if "registerGen" not in content and "testlib.h" not in content and "generator.h" not in content:
+        return (
+            "ERROR: gen.cpp 必须 #include \"testlib.h\"（或 \"generator.h\"）"
+            "并调用 registerGen(argc, argv, 1)"
+        )
+    h = _content_hash(content)
+    exe_path = WORK_DIR / _exe("gen")
+    if h == _LAST_GEN_HASH and exe_path.exists():
+        (WORK_DIR / "gen.cpp").write_text(content, encoding="utf-8")
+        return f"OK: gen unchanged (hash={h[:12]}…), skipped recompile"
+
     (WORK_DIR / "gen.cpp").write_text(content, encoding="utf-8")
-    _copy_testlib()
+    if _needs_generator(content):
+        _copy_generator()
+        compile_timeout = 120
+    else:
+        _copy_testlib()
+        compile_timeout = 60
     rc, out, err = safe_run(
         "g++ -O2 -std=c++17 gen.cpp -o " + _exe("gen"),
-        timeout=60, cwd=str(WORK_DIR),
+        timeout=compile_timeout, cwd=str(WORK_DIR),
     )
     if rc != 0:
         return _compile_err("gen.cpp", rc, out, err)
+    _LAST_GEN_HASH = h
     return f"OK: wrote & compiled gen ({len(content)} chars)"
 
 
 def write_validate(content: str) -> str:
     """把校验器 C++ 源码写到 work_dir/validator.cpp，拷 testlib.h，编译成 validator(.exe)。"""
+    global _LAST_VAL_HASH
     if _looks_like_omitted_stub(content):
         return (
             "ERROR: content 像是历史摘要，不是完整 validator.cpp。"
@@ -172,6 +227,13 @@ def write_validate(content: str) -> str:
     static_err = _validator_static_check(content)
     if static_err:
         return static_err
+
+    h = _content_hash(content)
+    exe_path = WORK_DIR / _exe("validator")
+    if h == _LAST_VAL_HASH and exe_path.exists():
+        (WORK_DIR / "validator.cpp").write_text(content, encoding="utf-8")
+        return f"OK: validator unchanged (hash={h[:12]}…), skipped recompile"
+
     (WORK_DIR / "validator.cpp").write_text(content, encoding="utf-8")
     _copy_testlib()
     rc, out, err = safe_run(
@@ -180,6 +242,7 @@ def write_validate(content: str) -> str:
     )
     if rc != 0:
         return _compile_err("validator.cpp", rc, out, err)
+    _LAST_VAL_HASH = h
     return f"OK: wrote & compiled validator ({len(content)} chars)"
 
 
@@ -202,6 +265,37 @@ def write_checker(content: str) -> str:
     if rc != 0:
         return _compile_err("checker.cpp", rc, out, err)
     return f"OK: wrote & compiled checker ({len(content)} chars)"
+
+
+def use_builtin_checker(name: str) -> str:
+    """使用内置 testlib checker（lcmp/wcmp/rcmp4/rcmp6/rcmp9/yesno），编译为 checker(.exe)。
+
+    适用于答案唯一、只需按行/词/浮点/YesNo 比较的题目；答案不唯一时请改用 write_checker。
+    """
+    name = (name or "").strip().lower()
+    if name not in BUILTIN_CHECKERS:
+        return (
+            f"ERROR: 未知内置 checker {name!r}，"
+            f"可选: {', '.join(BUILTIN_CHECKERS)}"
+        )
+    src = CHECKER_SRC_DIR / f"{name}.cpp"
+    if not src.exists():
+        return f"ERROR: 缺少内置 checker 源码 {src}"
+    _copy_testlib()
+    dst_src = WORK_DIR / "checker.cpp"
+    shutil.copyfile(src, dst_src)
+    # 在源码顶部标注来源，方便打包识别
+    note = f"// builtin checker: {name} (from sandbox/checker/{name}.cpp)\n"
+    body = dst_src.read_text(encoding="utf-8")
+    if not body.lstrip().startswith("// builtin checker:"):
+        dst_src.write_text(note + body, encoding="utf-8")
+    rc, out, err = safe_run(
+        "g++ -O2 -std=c++17 checker.cpp -o " + _exe("checker"),
+        timeout=60, cwd=str(WORK_DIR),
+    )
+    if rc != 0:
+        return _compile_err(f"builtin checker {name}", rc, out, err)
+    return f"OK: installed builtin checker {name} -> checker"
 
 
 def run_gen(seed: int, type: str = "random", index: int = -1, count: int = 15) -> str:
@@ -239,8 +333,20 @@ def run_validate(input_text: str) -> str:
 
 def run_std(input_text: str) -> str:
     """把 input_text 喂给标程，返回 stdout（即答案）。std_cmd 相对项目根，在根目录跑。"""
-    rc, out, err = safe_run(STD_CMD, stdin=input_text, timeout=10)
+    timeout = 10
+    rj_path = WORK_DIR / "range.json"
+    if rj_path.exists():
+        try:
+            rj = json.loads(rj_path.read_text(encoding="utf-8"))
+            tl = rj.get("time_limit_ms")
+            if isinstance(tl, int) and tl > 0:
+                timeout = max(1, (tl + 999) // 1000) + 1  # 题面时限 +1s 余量
+        except Exception:
+            pass
+    rc, out, err = safe_run(STD_CMD, stdin=input_text, timeout=timeout)
     if rc != 0:
+        if rc == 124:
+            return f"ERROR std TIMEOUT after {timeout}s: 标程超时（检查数据规模或标程复杂度）"
         return f"ERROR std rc={rc}: {err.strip()}"
     return out if out else f"ERROR std: empty output (stderr={err.strip()})"
 
@@ -253,6 +359,100 @@ def read_range() -> str:
     return p.read_text(encoding="utf-8")
 
 
+def _triple_check(seed: int, typ: str, index: int, count: int, std_timeout: int) -> str:
+    """单组 gen→validate→std，成功返回 OK 行，失败返回 ERROR 详情。"""
+    gen_out = run_gen(seed=seed, type=typ, index=index, count=count)
+    if isinstance(gen_out, str) and gen_out.startswith("ERROR"):
+        return f"FAIL type={typ} seed={seed}: {gen_out}"
+    val = run_validate(gen_out)
+    if not val.startswith("OK"):
+        return f"FAIL type={typ} seed={seed} validate: {val}"
+    # 直接调 safe_run 以便用 std_timeout（run_std 会再读 range，此处统一）
+    rc, out, err = safe_run(STD_CMD, stdin=gen_out, timeout=std_timeout)
+    if rc != 0:
+        if rc == 124:
+            return f"FAIL type={typ} seed={seed}: std TIMEOUT after {std_timeout}s"
+        return f"FAIL type={typ} seed={seed}: std rc={rc} {(err or '').strip()}"
+    if not (out or "").strip():
+        return f"FAIL type={typ} seed={seed}: std empty output"
+    return f"OK type={typ} seed={seed} index={index} in_chars={len(gen_out)} out_chars={len(out)}"
+
+
+def run_self_check() -> str:
+    """按 range.json 做强化自检：每个 edge_type + 最大规模 + 多测 sum 相关边界。
+
+    通过返回以 OK 开头的摘要；任一失败返回 ERROR/... 详情，供 Agent 修改后重试。
+    """
+    p = WORK_DIR / "range.json"
+    if not p.exists():
+        return "ERROR: range.json not found，请先 write_range"
+    if not (WORK_DIR / _exe("gen")).exists():
+        return "ERROR: gen 未编译，请先 write_gen"
+    if not (WORK_DIR / _exe("validator")).exists():
+        return "ERROR: validator 未编译，请先 write_validate"
+    try:
+        rj = json.loads(p.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        return f"ERROR: range.json 非法: {e}"
+
+    count = int(rj.get("count") or 15)
+    edge_cases = list(rj.get("edge_cases") or [])
+    constraints = rj.get("constraints") or {}
+    tl = rj.get("time_limit_ms")
+    std_timeout = 10
+    if isinstance(tl, int) and tl > 0:
+        std_timeout = max(2, (tl + 999) // 1000 + 1)
+
+    checks: list[tuple[str, int, int]] = []  # type, seed, index
+    # 1) 每个 edge_type 一组
+    for i, typ in enumerate(edge_cases):
+        checks.append((typ, 1000 + i, min(i, max(0, count - 1))))
+    # 2) random 分层：最小档 + 最大档（逼近上界）
+    checks.append(("random", 2000, 0))
+    checks.append(("random", 2001, max(0, count - 1)))
+    # 3) 若有明确 nmax / edge_nmax 类型，再加一次（可能已在 edge_cases）
+    for name in ("edge_nmax", "nmax", "edge_n_max", "max_n"):
+        if name in edge_cases:
+            checks.append((name, 3000, count - 1))
+            break
+    # 4) 多测 sum：优先跑已有边界名；否则用 random 两端
+    multi_hints = [
+        "big_T_small_n", "small_T_big_n", "edge_Tmax", "edge_T1",
+        "sum_full", "single_max_case",
+    ]
+    for name in multi_hints:
+        if name in edge_cases:
+            checks.append((name, 4000 + hash(name) % 100, count // 2))
+
+    # 去重保序
+    seen = set()
+    uniq = []
+    for typ, seed, idx in checks:
+        key = (typ, idx)
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append((typ, seed, idx))
+
+    lines = [f"self_check start: count={count} edges={edge_cases} std_timeout={std_timeout}s"]
+    if isinstance(constraints, dict) and constraints:
+        lines.append(f"constraints_keys={list(constraints.keys())}")
+    fails = []
+    for typ, seed, idx in uniq:
+        msg = _triple_check(seed, typ, idx, count, std_timeout)
+        lines.append(msg)
+        if msg.startswith("FAIL") or msg.startswith("ERROR"):
+            fails.append(msg)
+
+    if fails:
+        return (
+            "ERROR: self_check failed\n"
+            + "\n".join(lines)
+            + "\n请根据 FAIL 修复 gen/validator 后重新 write_* 再 run_self_check。"
+        )
+    return "OK: self_check passed\n" + "\n".join(lines)
+
+
 # ---- 函数表 ----
 FUNCTIONS = {
     "write_file": write_file,
@@ -262,9 +462,11 @@ FUNCTIONS = {
     "write_gen": write_gen,
     "write_validate": write_validate,
     "write_checker": write_checker,
+    "use_builtin_checker": use_builtin_checker,
     "run_gen": run_gen,
     "run_validate": run_validate,
     "run_std": run_std,
+    "run_self_check": run_self_check,
     "read_range": read_range,
 }
 
@@ -308,8 +510,11 @@ TOOL_SCHEMAS = [
     ),
     _schema(
         "write_gen",
-        "把【完整】生成器 C++ 源码写到工作目录 gen.cpp 并 g++ 编译。random 分支必须用 --index/--count 在 [L,R] 分层取规模，禁止只抽 min(100,R)。禁止 std::shuffle(...,rnd)。",
-        {"content": {"type": "string", "description": "完整 gen.cpp（#include \"testlib.h\"，registerGen(argc,argv,1)）"}},
+        "把【完整】生成器 C++ 源码写到工作目录 gen.cpp 并 g++ 编译。"
+        "树/图/几何题优先 #include \"generator.h\" + using namespace generator::all，用 unweight::Tree/Chain/Flower、BipartiteGraph、DAG、ConvexHull 等 API；"
+        "仍须 registerGen + --seed/--type/--index/--count。random 分支必须用 --index/--count 分层取规模。"
+        "禁止 std::shuffle(...,rnd)；禁止枚举 O(n^2) 边池。",
+        {"content": {"type": "string", "description": "完整 gen.cpp（testlib.h 或 generator.h + registerGen）"}},
         ["content"],
     ),
     _schema(
@@ -320,9 +525,23 @@ TOOL_SCHEMAS = [
     ),
     _schema(
         "write_checker",
-        "把【完整】special judge / checker C++ 源码写到工作目录 checker.cpp 并 g++ 编译。special judge 用于答案不唯一或需要额外判定的题目。",
+        "把【完整】special judge / checker C++ 源码写到工作目录 checker.cpp 并 g++ 编译。"
+        "仅当答案不唯一或需额外判定时使用；若只需按行/词/浮点/YesNo 比较，请改用 use_builtin_checker。",
         {"content": {"type": "string", "description": "完整 checker.cpp（#include \"testlib.h\"，registerTestlibCmd(...)）"}},
         ["content"],
+    ),
+    _schema(
+        "use_builtin_checker",
+        "安装并编译内置 testlib checker 为 checker(.exe)。"
+        "name=lcmp(按行比 token) / wcmp(按词) / rcmp4|rcmp6|rcmp9(浮点精度) / yesno(Yes/No)。"
+        "答案唯一的常规题优先用这个，不要手写 checker。",
+        {
+            "name": {
+                "type": "string",
+                "description": "lcmp | wcmp | rcmp4 | rcmp6 | rcmp9 | yesno",
+            },
+        },
+        ["name"],
     ),
     _schema(
         "run_gen",
@@ -343,9 +562,16 @@ TOOL_SCHEMAS = [
     ),
     _schema(
         "run_std",
-        "把一段输入文本喂给标程，返回标程的输出（即答案）。",
+        "把一段输入文本喂给标程，返回标程的输出（即答案）。超时参考 range.json 的 time_limit_ms。",
         {"input_text": {"type": "string", "description": "标程的 stdin 输入"}},
         ["input_text"],
+    ),
+    _schema(
+        "run_self_check",
+        "强化自检：对每个 edge_type + random 最小/最大档（逼近规模上界）+ 多测相关边界，"
+        "执行 gen→validate→std。全部通过才返回 OK；失败返回 ERROR 详情。finish 前必须调用且通过。",
+        {},
+        [],
     ),
     _schema(
         "read_range",

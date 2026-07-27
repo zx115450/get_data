@@ -5,6 +5,7 @@ range 规划阶段和 gen/validator 编写阶段都会用到：
 - runner 用它给写 gen 的 Agent 一份针对性提醒，确保 gen 真正保证该性质。
 
 两边共用同一份关键词表，避免重复维护。
+提示中优先推荐 ACM-generator（generator.h）API，减少 LLM 手写慢/错的构造。
 """
 
 # 题面里出现这些关键词时，说明题目对图/序列的结构有「特殊约束」。
@@ -18,7 +19,7 @@ _STRUCT_CONSTRAINT_HINTS = [
         "hint": (
             "题面涉及哈密顿路径/回路。生成器不能只造普通图：必须保证生成的图"
             "「真的存在哈密顿路径/回路」，否则标程算出的答案与题意不符。"
-            "推荐做法：先固定一条总序链（v1->v2->...->vn）作为骨架保证存在性，"
+            "推荐做法：先固定一条总序链（可用 unweight::Chain 作骨架）保证存在性，"
             "再在链上随机加前向边（i<j）扩充边数；validator 用 ensuref 显式校验"
             "「图存在哈密顿路径」或至少校验「存在唯一汇点 / 拓扑序覆盖所有点」。"
             "edge_cases 至少含 edge_hamiltonian_chain（纯链）和 edge_hamiltonian_extra（链+额外边）。"
@@ -41,7 +42,7 @@ _STRUCT_CONSTRAINT_HINTS = [
         "hint": (
             "题面要求图是平面图。生成器不能用任意随机图：必须保证可平面嵌入"
             "（如外平面图、链+局部边、K4 子结构受控）。"
-            "推荐做法：用链/树/外平面图作为骨架，避免 K5/K3,3 子结构。"
+            "推荐：unweight::Chain / Tree / GridGraph 作为骨架，避免 K5/K3,3。"
             "validator 用 ensuref 校验边数 <= 3n-6（n>=3）作为必要条件，"
             "或干脆只生成已知平面结构（链、树、外平面图、网格图）。"
         ),
@@ -59,8 +60,9 @@ _STRUCT_CONSTRAINT_HINTS = [
         "keywords": ("二分图", "bipartite"),
         "title": "二分图",
         "hint": (
-            "题面要求图是二分图。生成器必须保证图可二染色：先随机划分左右部，"
-            "再只在左右部之间连边。validator 用 ensuref + BFS 染色校验无奇环。"
+            "题面要求图是二分图。优先用 unweight::BipartiteGraph(n, m)；"
+            "或手写：先随机划分左右部，再只在左右部之间连边。"
+            "validator 用 ensuref + BFS 染色校验无奇环。"
             "edge_cases 至少含 edge_bipartite_balanced 和 edge_bipartite_unbalanced。"
         ),
     },
@@ -76,8 +78,8 @@ _STRUCT_CONSTRAINT_HINTS = [
         "keywords": ("连通图", "connected", "保证连通"),
         "title": "连通图",
         "hint": (
-            "题面要求图连通。生成器必须保证连通：先随机生成一棵生成树作为骨架，"
-            "再加额外边。validator 用 ensuref + 并查集/BFS 校验连通分量数=1。"
+            "题面要求图连通。推荐：先 unweight::Tree 作生成树骨架，再加额外边；"
+            "或 unweight::Graph 并确保连通参数。validator 用 ensuref + 并查集/BFS 校验连通分量数=1。"
             "edge_cases 至少含 edge_connected_tree 和 edge_connected_dense。"
         ),
     },
@@ -85,8 +87,9 @@ _STRUCT_CONSTRAINT_HINTS = [
         "keywords": ("DAG", "有向无环", "directed acyclic", "拓扑"),
         "title": "DAG / 有向无环图",
         "hint": (
-            "题面要求图是 DAG。生成器必须保证无环：先固定一个顶点排列作为拓扑序，"
-            "只在拓扑序前向（i<j）连边。validator 用 ensuref + Kahn 拓扑校验无环。"
+            "题面要求图是 DAG。优先用 unweight::DAG(n, m)；"
+            "或手写：固定顶点排列作拓扑序，只在前向（i<j）连边。"
+            "validator 用 ensuref + Kahn 拓扑校验无环。"
             "edge_cases 至少含 edge_dag_chain（纯链）和 edge_dag_extra（链+前向边）。"
         ),
     },
@@ -94,8 +97,25 @@ _STRUCT_CONSTRAINT_HINTS = [
         "keywords": ("树", "tree"),
         "title": "树",
         "hint": (
-            "题面要求图是树（n-1 条边、连通、无环）。生成器必须输出恰好 n-1 条边且连通无环。"
-            "validator 用 ensuref 校验边数=n-1、无自环、无重边、连通、无环。"
+            "题面要求图是树（n-1 条边、连通、无环）。优先用 generator.h："
+            "unweight::Tree / Chain（链）/ Flower（菊花）/ FlowerChain / MaxSonTree。"
+            "cout << tree 默认输出 n 与边列表。validator 用 ensuref 校验边数=n-1、无自环、无重边、连通、无环。"
+        ),
+    },
+    {
+        "keywords": ("凸包", "convex hull", "convex"),
+        "title": "凸包 / 点集几何",
+        "hint": (
+            "题面涉及凸包或平面点集。优先用 ConvexHull<int> / SimplePolygon<int> / RandomPoints<int>，"
+            "set_xy_limit 后 gen()，cout << obj 输出。validator 校验点数与坐标范围，必要时校验凸性。"
+        ),
+    },
+    {
+        "keywords": ("基环树", "伪树", "pseudotree", "cactus", "仙人掌"),
+        "title": "基环树 / 仙人掌",
+        "hint": (
+            "题面涉及基环树或仙人掌。优先用 unweight::PseudoTree / PseudoInTree / PseudoOutTree / Cactus。"
+            "validator 按题意校验环数/块结构。"
         ),
     },
 ]
@@ -126,6 +146,7 @@ def scan_structural_hints(text: str) -> str:
         lines.append(f"\n● {spec['title']}\n{spec['hint']}")
     lines.append(
         "\n以上结构约束必须在 gen.cpp 的对应 --type 分支里真正实现，"
+        "优先 #include \"generator.h\" 使用对应 API，"
         "并在 validator.cpp 用 ensuref 显式校验；不要只写 random 分支指望碰运气。"
     )
     return "".join(lines)

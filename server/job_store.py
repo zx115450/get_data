@@ -18,6 +18,7 @@ class Job:
     status: JobStatus = JobStatus.QUEUED
     progress: list = field(default_factory=list)   # 每步事件文本
     zip_path: str = ""                              # 数据 zip 路径
+    sources_zip_path: str = ""                      # gen/validator/range 源码包
     checker_zip_path: str = ""                      # special judge zip 路径（空表示无）
     error: str = ""                                 # 失败原因
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -54,5 +55,6 @@ def snapshot(job: Job) -> dict:
             "progress": list(job.progress),
             "error": job.error,
             "has_zip": bool(job.zip_path),
+            "has_sources_zip": bool(job.sources_zip_path),
             "has_checker_zip": bool(job.checker_zip_path),
         }

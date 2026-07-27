@@ -55,7 +55,7 @@ _TYPE_EDGE_HINTS = {
     ],
     "tree": [
         "edge_n2", "edge_nmax", "chain", "star", "balanced_binary", "random_tree",
-        "caterpillar", "broom",
+        "flower_chain", "caterpillar", "broom",
     ],
     "graph": [
         "edge_n1", "edge_nmax", "edge_m_min", "edge_m_max",
@@ -70,19 +70,48 @@ _TYPE_EDGE_HINTS = {
         "edge_n1", "edge_nmax", "all_equal", "all_prime", "coprime_pair",
         "all_even", "include_one", "all_max_value",
     ],
+    "geometry": [
+        "edge_n3", "edge_nmax", "convex_hull", "simple_polygon",
+        "random_points", "collinear", "same_x",
+    ],
     "multi_test": [
         "edge_T1", "edge_Tmax", "edge_n_min", "edge_nmax",
         "big_T_small_n", "small_T_big_n", "single_max_case",
+    ],
+    "dp": [
+        "edge_n1", "edge_nmax", "edge_W1", "edge_Wmax", "all_heavy", "all_light",
+    ],
+    "matrix": [
+        "edge_11", "edge_nmax", "row", "col", "all_zero", "all_max",
+    ],
+    "range_query": [
+        "edge_n1", "edge_nmax", "q1", "qmax", "point_queries", "full_range",
+    ],
+    "weighted_tree": [
+        "edge_n2", "edge_nmax", "chain", "star", "random_tree", "heavy_weights",
+    ],
+    "weighted_graph": [
+        "connected_tree", "path", "star", "random_sparse", "edge_n1", "dense",
+    ],
+    "interactive": [
+        "edge_n1", "edge_nmax", "q1", "qmax", "repeat_ask",
     ],
 }
 
 _TYPE_HINT_HEADER = {
     "array": "数组/序列题：建议 edge_cases 覆盖以下边界（按需挑选，不要全抄）",
-    "tree": "树题：建议 edge_cases 覆盖以下边界（按需挑选，不要全抄）",
-    "graph": "图题：建议 edge_cases 覆盖以下边界（按需挑选，不要全抄）。注意图题还要根据题意补结构边界（如 DAG 题加 dag_acyclic，连通题加 connected/disconnected）",
+    "tree": "树题：建议 edge_cases 覆盖以下边界（按需挑选，不要全抄）。生成优先用 generator.h 的 Tree/Chain/Flower",
+    "graph": "图题：建议 edge_cases 覆盖以下边界（按需挑选，不要全抄）。注意图题还要根据题意补结构边界（如 DAG 题加 dag_acyclic，连通题加 connected/disconnected）；优先用 Graph/BipartiteGraph/DAG 等 API",
     "string": "字符串题：建议 edge_cases 覆盖以下边界（按需挑选，不要全抄）",
     "number_theory": "数论题：建议 edge_cases 覆盖以下边界（按需挑选，不要全抄）",
+    "geometry": "几何题：建议 edge_cases 覆盖以下边界（按需挑选，不要全抄）。优先用 ConvexHull/SimplePolygon/RandomPoints",
     "multi_test": "多测题：建议 edge_cases 覆盖以下边界（按需挑选，不要全抄）",
+    "dp": "DP 题：建议覆盖规模边界与退化背包/转移情形",
+    "matrix": "矩阵题：建议覆盖 1×1、满规模、单行/单列",
+    "range_query": "区间查询题：建议覆盖 n/q 极值与点询/整段询",
+    "weighted_tree": "带权树：优先 edge_weight::Tree/Chain/Flower",
+    "weighted_graph": "带权图：树骨架 + 稀疏随机边，注意边权范围",
+    "interactive": "交互/询问序列（离线）：本工具只生成询问文件，不能替代真正 interactor",
 }
 
 

@@ -1,8 +1,9 @@
-【参考范例：一道树题的标准写法（C++ testlib）】
+【参考范例：一道树题的标准写法（C++ + ACM-generator）】
 题面：给定一棵 n 个节点的无权无根树，求树的直径（最长简单路径的边数）。
 输入格式：第 1 行 n；接下来 n-1 行每行两个整数 u v 表示一条边（节点编号 1..n）。
 输出格式：一个整数。
 数据范围：n in [2,1e5]，默认 15 组，覆盖链、菊花、随机树、平衡二叉树、n=2；其余组 n 按 index 在 [2,1e5] 分层。
+说明：树结构优先用 generator.h（Chain/Flower/Tree），仍须 registerGen 与 --seed/--type/--index/--count。
 
 range.json:
 {
@@ -12,8 +13,9 @@ range.json:
 }
 
 gen.cpp:
-#include "testlib.h"
+#include "generator.h"
 using namespace std;
+using namespace generator::all;
 int pickSized(int lo, int hi) {
     int idx = opt<int>("index", 0);
     int cnt = opt<int>("count", 15);
@@ -28,26 +30,28 @@ int pickSized(int lo, int hi) {
     if (b > hi) b = hi;
     return rnd.next((int)a, (int)b);
 }
-vector<pair<int,int>> build(int n, string typ) {
-    vector<pair<int,int>> e;
-    if (n == 1) return e;
-    if (typ == "chain") { for (int i = 1; i < n; i++) e.push_back({i, i + 1}); return e; }
-    if (typ == "star") { for (int i = 2; i <= n; i++) e.push_back({1, i}); return e; }
-    if (typ == "balanced_binary") { for (int i = 2; i <= n; i++) e.push_back({i / 2, i}); return e; }
-    for (int i = 2; i <= n; i++) e.push_back({rnd.next(1, i - 1), i});
-    return e;
-}
 int main(int argc, char* argv[]) {
     registerGen(argc, argv, 1);
     int seed = opt<int>("seed");
     string typ = opt<string>("type", "random_tree");
     int N_MIN = 2, N_MAX = 100000;
-    int n;
-    if (typ == "edge_n2") n = 2;
-    else n = pickSized(N_MIN, N_MAX);
-    auto e = build(n, typ);
-    printf("%d\n", n);
-    for (auto p : e) printf("%d %d\n", p.first, p.second);
+    int n = (typ == "edge_n2") ? 2 : pickSized(N_MIN, N_MAX);
+    if (typ == "chain") {
+        unweight::Chain tree(n);
+        tree.gen();
+        cout << tree << "\n";
+    } else if (typ == "star") {
+        unweight::Flower tree(n);
+        tree.gen();
+        cout << tree << "\n";
+    } else if (typ == "balanced_binary") {
+        printf("%d\n", n);
+        for (int i = 2; i <= n; i++) printf("%d %d\n", i / 2, i);
+    } else {
+        unweight::Tree tree(n);
+        tree.gen();
+        cout << tree << "\n";
+    }
     return 0;
 }
 

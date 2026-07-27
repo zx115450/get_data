@@ -1,0 +1,61 @@
+【参考范例：一道区间查询题的标准写法（C++ testlib）】
+题面：给定长度为 n 的数组与 q 次询问，每次询问 [l,r] 的区间和。
+输入格式：第 1 行 n q；第 2 行 n 个整数；接下来 q 行每行 l r（1-index）。
+输出格式：q 行，每行一个整数。
+数据范围：n,q in [1,1e5]，ai in [-1e9,1e9]，15 组。
+
+range.json:
+{
+  "count": 15,
+  "constraints": {"n": [1, 100000], "q": [1, 100000], "ai": [-1000000000, 1000000000]},
+  "edge_cases": ["edge_n1", "edge_nmax", "q1", "qmax", "point_queries"]
+}
+
+gen.cpp:
+#include "testlib.h"
+using namespace std;
+int pickSized(int lo, int hi) {
+    int idx = opt<int>("index", 0), cnt = opt<int>("count", 15);
+    if (cnt <= 1) return rnd.next(lo, hi);
+    if (idx < 0) idx = 0; if (idx >= cnt) idx = cnt - 1;
+    long long span = (long long)hi - lo;
+    long long a = lo + span * idx / cnt, b = lo + span * (idx + 1) / cnt;
+    if (b < a) b = a; if (a > hi) a = hi; if (b > hi) b = hi;
+    return rnd.next((int)a, (int)b);
+}
+int main(int argc, char* argv[]) {
+    registerGen(argc, argv, 1);
+    string typ = opt<string>("type", "random");
+    int n = (typ == "edge_n1") ? 1 : (typ == "edge_nmax") ? 100000 : pickSized(1, 100000);
+    int q = (typ == "q1") ? 1 : (typ == "qmax") ? 100000 : pickSized(1, 100000);
+    printf("%d %d\n", n, q);
+    for (int i = 0; i < n; i++) printf("%lld%c", rnd.next(-1000000000LL, 1000000000LL), i + 1 < n ? ' ' : '\n');
+    for (int i = 0; i < q; i++) {
+        int l, r;
+        if (typ == "point_queries") { l = r = rnd.next(1, n); }
+        else { l = rnd.next(1, n); r = rnd.next(1, n); if (l > r) swap(l, r); }
+        printf("%d %d\n", l, r);
+    }
+    return 0;
+}
+
+validator.cpp:
+#include "testlib.h"
+using namespace std;
+int main(int argc, char* argv[]) {
+    registerValidation();
+    int n = inf.readInt(1, 100000, "n"); inf.readSpace();
+    int q = inf.readInt(1, 100000, "q"); inf.readEoln();
+    for (int i = 0; i < n; i++) {
+        inf.readLong(-1000000000LL, 1000000000LL, "ai");
+        if (i + 1 < n) inf.readSpace();
+    }
+    inf.readEoln();
+    for (int i = 0; i < q; i++) {
+        int l = inf.readInt(1, n, "l"); inf.readSpace();
+        int r = inf.readInt(l, n, "r"); inf.readEoln();
+        ensuref(l <= r, "l<=r");
+    }
+    inf.readEof();
+    return 0;
+}

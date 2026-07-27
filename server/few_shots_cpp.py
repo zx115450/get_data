@@ -77,11 +77,12 @@ int main(int argc, char* argv[]) {
 """
 
 CPP_TREE_EXAMPLE = r"""
-【参考范例：一道树题的标准写法（C++ testlib）】
+【参考范例：一道树题的标准写法（C++ + ACM-generator）】
 题面：给定一棵 n 个节点的无权无根树，求树的直径（最长简单路径的边数）。
 输入格式：第 1 行 n；接下来 n-1 行每行两个整数 u v 表示一条边（节点编号 1..n）。
 输出格式：一个整数。
 数据范围：n in [2,1e5]，默认 15 组，覆盖链、菊花、随机树、平衡二叉树、n=2；其余组 n 按 index 在 [2,1e5] 分层。
+说明：树结构优先用 generator.h（Chain/Flower/Tree），仍须 registerGen 与 --seed/--type/--index/--count。
 
 range.json:
 {
@@ -91,8 +92,9 @@ range.json:
 }
 
 gen.cpp:
-#include "testlib.h"
+#include "generator.h"
 using namespace std;
+using namespace generator::all;
 int pickSized(int lo, int hi) {
     int idx = opt<int>("index", 0);
     int cnt = opt<int>("count", 15);
@@ -107,26 +109,28 @@ int pickSized(int lo, int hi) {
     if (b > hi) b = hi;
     return rnd.next((int)a, (int)b);
 }
-vector<pair<int,int>> build(int n, string typ) {
-    vector<pair<int,int>> e;
-    if (n == 1) return e;
-    if (typ == "chain") { for (int i = 1; i < n; i++) e.push_back({i, i + 1}); return e; }
-    if (typ == "star") { for (int i = 2; i <= n; i++) e.push_back({1, i}); return e; }
-    if (typ == "balanced_binary") { for (int i = 2; i <= n; i++) e.push_back({i / 2, i}); return e; }
-    for (int i = 2; i <= n; i++) e.push_back({rnd.next(1, i - 1), i});
-    return e;
-}
 int main(int argc, char* argv[]) {
     registerGen(argc, argv, 1);
     int seed = opt<int>("seed");
     string typ = opt<string>("type", "random_tree");
     int N_MIN = 2, N_MAX = 100000;
-    int n;
-    if (typ == "edge_n2") n = 2;
-    else n = pickSized(N_MIN, N_MAX);
-    auto e = build(n, typ);
-    printf("%d\n", n);
-    for (auto p : e) printf("%d %d\n", p.first, p.second);
+    int n = (typ == "edge_n2") ? 2 : pickSized(N_MIN, N_MAX);
+    if (typ == "chain") {
+        unweight::Chain tree(n);
+        tree.gen();
+        cout << tree << "\n";
+    } else if (typ == "star") {
+        unweight::Flower tree(n);
+        tree.gen();
+        cout << tree << "\n";
+    } else if (typ == "balanced_binary") {
+        printf("%d\n", n);
+        for (int i = 2; i <= n; i++) printf("%d %d\n", i / 2, i);
+    } else {
+        unweight::Tree tree(n);
+        tree.gen();
+        cout << tree << "\n";
+    }
     return 0;
 }
 
@@ -161,10 +165,9 @@ int main(int argc, char* argv[]) {
 """
 
 CPP_GRAPH_EXAMPLE = r"""
-【参考范例：一道图题的标准写法（C++ testlib）】
+【参考范例：一道图题的标准写法（C++ + ACM-generator）】
 题面：给定 n 个点 m 条边的无向图（无自环无重边），判断是否连通。
-说明：本例默认无自环无重边。若目标题允许自环/重边，请去掉 gen 中 u<v 的池子限制以及 validator 中 u!=v 和重复边检查，按题面为准。
-注意：random_sparse 分支用 unordered_set 随机采样，是「从 N 个候选选 K 个不重复」的标准写法；严禁枚举所有 n*(n-1)/2 条边再 shuffle（n=2e5 时必爆）。
+说明：树/链/菊花优先用 generator.h；稀疏随机边用 unordered_set 采样。严禁枚举 O(n^2) 边池。
 输入格式：第 1 行 n m；接下来 m 行每行 u v。
 输出格式：YES 或 NO。
 数据范围：n in [1,1000]，m in [0,n*(n-1)/2]，15 组，覆盖连通树、不连通、完全图、链、菊花、随机稀疏。
@@ -177,9 +180,9 @@ range.json:
 }
 
 gen.cpp:
-#include "testlib.h"
+#include "generator.h"
 using namespace std;
-// 把 [lo,hi] 按 --index/--count 切成 cnt 段，第 idx 组落在第 idx 段内，保证规模均匀
+using namespace generator::all;
 int pickSized(int lo, int hi) {
     int idx = opt<int>("index", 0);
     int cnt = opt<int>("count", 15);
@@ -198,26 +201,36 @@ int main(int argc, char* argv[]) {
     registerGen(argc, argv, 1);
     int seed = opt<int>("seed");
     string typ = opt<string>("type", "random_sparse");
-    int N_MIN = 1, N_MAX = 1000;
-    int n = pickSized(N_MIN, N_MAX);
+    int n = max(1, pickSized(1, 1000));
     vector<pair<int,int>> edges;
-    if (typ == "connected_tree") { for (int i = 2; i <= n; i++) edges.push_back({rnd.next(1, i - 1), i}); }
-    else if (typ == "disconnected") {
-        int mid = n / 2 ? n / 2 : 1;
-        for (int i = 2; i <= mid; i++) edges.push_back({rnd.next(1, i - 1), i});
-        for (int i = mid + 2; i <= n; i++) edges.push_back({rnd.next(mid + 1, i - 1), i});
-    } else if (typ == "complete") { for (int u = 1; u <= n; u++) for (int v = u + 1; v <= n; v++) edges.push_back({u, v}); }
-    else if (typ == "path") { for (int i = 1; i < n; i++) edges.push_back({i, i + 1}); }
-    else if (typ == "star") { for (int i = 2; i <= n; i++) edges.push_back({1, i}); }
-    else {
-        // random_sparse: 用 unordered_set 随机采样 m 条不重复边，O(m) 而非 O(n^2)。
-        // 关键写法：n 很大时不要枚举所有 n*(n-1)/2 条边再 shuffle，会爆内存/时间。
+    if (typ == "connected_tree") {
+        unweight::Tree t(n); t.gen();
+        for (auto &e : t.edges()) edges.push_back({e.u(), e.v()});
+    } else if (typ == "path") {
+        unweight::Chain t(n); t.gen();
+        for (auto &e : t.edges()) edges.push_back({e.u(), e.v()});
+    } else if (typ == "star") {
+        unweight::Flower t(n); t.gen();
+        for (auto &e : t.edges()) edges.push_back({e.u(), e.v()});
+    } else if (typ == "disconnected") {
+        int mid = max(1, n / 2);
+        if (mid >= 2) {
+            unweight::Tree a(mid); a.gen();
+            for (auto &e : a.edges()) edges.push_back({e.u(), e.v()});
+        }
+        int right = n - mid;
+        if (right >= 2) {
+            unweight::Tree b(right); b.gen();
+            for (auto &e : b.edges()) edges.push_back({e.u() + mid, e.v() + mid});
+        }
+    } else if (typ == "complete") {
+        for (int u = 1; u <= n; u++) for (int v = u + 1; v <= n; v++) edges.push_back({u, v});
+    } else {
         int m = rnd.next(0, max(1, n));
         unordered_set<long long> used;
         used.reserve(m * 2);
         while ((int)edges.size() < m) {
-            int u = rnd.next(1, n);
-            int v = rnd.next(1, n);
+            int u = rnd.next(1, n), v = rnd.next(1, n);
             if (u == v) continue;
             long long key = (long long)min(u, v) * (n + 1) + max(u, v);
             if (!used.insert(key).second) continue;
@@ -393,6 +406,88 @@ int main(int argc, char* argv[]) {
 
 """
 
+
+CPP_GEOMETRY_EXAMPLE = r"""
+【参考范例：一道计算几何题的标准写法（C++ + ACM-generator）】
+题面：给定平面上 n 个点，求凸包上的点数。
+输入格式：第 1 行 n；接下来 n 行每行两个整数 x y。
+输出格式：一个整数。
+数据范围：n in [3,1000]，坐标 in [-1e6,1e6]，15 组，覆盖凸包、简单多边形顶点、随机点、共线、n=3。
+说明：优先用 ConvexHull / SimplePolygon / RandomPoints；仍须 registerGen 与 CLI 契约。
+
+range.json:
+{
+  "count": 15,
+  "constraints": {"n": [3, 1000], "x": [-1000000, 1000000], "y": [-1000000, 1000000]},
+  "edge_cases": ["convex_hull", "simple_polygon", "random_points", "collinear", "edge_n3"]
+}
+
+gen.cpp:
+#include "generator.h"
+using namespace std;
+using namespace generator::all;
+int pickSized(int lo, int hi) {
+    int idx = opt<int>("index", 0);
+    int cnt = opt<int>("count", 15);
+    if (cnt <= 1) return rnd.next(lo, hi);
+    if (idx < 0) idx = 0;
+    if (idx >= cnt) idx = cnt - 1;
+    long long span = (long long)hi - lo;
+    long long a = lo + span * idx / cnt;
+    long long b = lo + span * (idx + 1) / cnt;
+    if (b < a) b = a;
+    if (a > hi) a = hi;
+    if (b > hi) b = hi;
+    return rnd.next((int)a, (int)b);
+}
+int main(int argc, char* argv[]) {
+    registerGen(argc, argv, 1);
+    int seed = opt<int>("seed");
+    string typ = opt<string>("type", "random_points");
+    int n = (typ == "edge_n3") ? 3 : pickSized(3, 1000);
+    int LIM = 1000000;
+    if (typ == "convex_hull") {
+        ConvexHull<int> c(n);
+        c.set_xy_limit(-LIM, LIM);
+        c.gen();
+        cout << c << "\n";
+    } else if (typ == "simple_polygon") {
+        SimplePolygon<int> p(n);
+        p.set_xy_limit(-LIM, LIM);
+        p.gen();
+        cout << p << "\n";
+    } else if (typ == "collinear") {
+        printf("%d\n", n);
+        int y = rnd.next(-LIM, LIM);
+        for (int i = 0; i < n; i++) {
+            int x = rnd.next(-LIM, LIM);
+            printf("%d %d\n", x, y);
+        }
+    } else {
+        RandomPoints<int> pts(n, -LIM, LIM, -LIM, LIM);
+        pts.gen();
+        cout << pts << "\n";
+    }
+    return 0;
+}
+
+validator.cpp:
+#include "testlib.h"
+using namespace std;
+int main(int argc, char* argv[]) {
+    registerValidation();
+    int n = inf.readInt(3, 1000, "n");
+    inf.readEoln();
+    for (int i = 0; i < n; i++) {
+        inf.readInt(-1000000, 1000000, "x"); inf.readSpace();
+        inf.readInt(-1000000, 1000000, "y"); inf.readEoln();
+    }
+    inf.readEof();
+    return 0;
+}
+
+"""
+
 CPP_MULTI_TEST_EXAMPLE = r"""
 【参考范例：一道多测数组题的标准写法（C++ testlib）】
 题面：输入第一行是测试组数 T，接下来 T 组，每组第一行 n，第二行 n 个整数，输出这 n 个数的和。保证 sum n ≤ 1e5。
@@ -506,11 +601,429 @@ int main(int argc, char* argv[]) {
 
 """
 
+
+CPP_DP_EXAMPLE = r"""
+【参考范例：一道 DP 题的标准写法（C++ testlib）】
+题面：0-1 背包。给定容量 W 与 n 件物品的重量 wi、价值 vi，求最大价值。
+输入格式：第 1 行 n W；接下来 n 行每行 wi vi。
+输出格式：一个整数。
+数据范围：n in [1,100]，W in [1,1000]，wi,vi in [1,1000]，15 组。
+
+range.json:
+{
+  "count": 15,
+  "constraints": {"n": [1, 100], "W": [1, 1000], "wi": [1, 1000], "vi": [1, 1000]},
+  "edge_cases": ["edge_n1", "edge_nmax", "edge_W1", "edge_Wmax", "all_heavy"]
+}
+
+gen.cpp:
+#include "testlib.h"
+using namespace std;
+int pickSized(int lo, int hi) {
+    int idx = opt<int>("index", 0), cnt = opt<int>("count", 15);
+    if (cnt <= 1) return rnd.next(lo, hi);
+    if (idx < 0) idx = 0; if (idx >= cnt) idx = cnt - 1;
+    long long span = (long long)hi - lo;
+    long long a = lo + span * idx / cnt, b = lo + span * (idx + 1) / cnt;
+    if (b < a) b = a; if (a > hi) a = hi; if (b > hi) b = hi;
+    return rnd.next((int)a, (int)b);
+}
+int main(int argc, char* argv[]) {
+    registerGen(argc, argv, 1);
+    string typ = opt<string>("type", "random");
+    int n = (typ == "edge_n1") ? 1 : (typ == "edge_nmax") ? 100 : pickSized(1, 100);
+    int W = (typ == "edge_W1") ? 1 : (typ == "edge_Wmax") ? 1000 : pickSized(1, 1000);
+    printf("%d %d\n", n, W);
+    for (int i = 0; i < n; i++) {
+        int w = (typ == "all_heavy") ? rnd.next(max(1, W), 1000) : rnd.next(1, 1000);
+        int v = rnd.next(1, 1000);
+        printf("%d %d\n", w, v);
+    }
+    return 0;
+}
+
+validator.cpp:
+#include "testlib.h"
+using namespace std;
+int main(int argc, char* argv[]) {
+    registerValidation();
+    int n = inf.readInt(1, 100, "n"); inf.readSpace();
+    int W = inf.readInt(1, 1000, "W"); inf.readEoln();
+    for (int i = 0; i < n; i++) {
+        inf.readInt(1, 1000, "wi"); inf.readSpace();
+        inf.readInt(1, 1000, "vi"); inf.readEoln();
+    }
+    ensuref(n >= 1, "n>=1");
+    inf.readEof();
+    return 0;
+}
+
+"""
+
+CPP_MATRIX_EXAMPLE = r"""
+【参考范例：一道矩阵题的标准写法（C++ testlib）】
+题面：给定 n×m 整数矩阵，输出所有元素之和。
+输入格式：第 1 行 n m；接下来 n 行每行 m 个整数。
+输出格式：一个整数。
+数据范围：n,m in [1,200]，aij in [-1e9,1e9]，15 组。
+
+range.json:
+{
+  "count": 15,
+  "constraints": {"n": [1, 200], "m": [1, 200], "aij": [-1000000000, 1000000000]},
+  "edge_cases": ["edge_11", "edge_nmax", "row", "col", "all_zero"]
+}
+
+gen.cpp:
+#include "testlib.h"
+using namespace std;
+int pickSized(int lo, int hi) {
+    int idx = opt<int>("index", 0), cnt = opt<int>("count", 15);
+    if (cnt <= 1) return rnd.next(lo, hi);
+    if (idx < 0) idx = 0; if (idx >= cnt) idx = cnt - 1;
+    long long span = (long long)hi - lo;
+    long long a = lo + span * idx / cnt, b = lo + span * (idx + 1) / cnt;
+    if (b < a) b = a; if (a > hi) a = hi; if (b > hi) b = hi;
+    return rnd.next((int)a, (int)b);
+}
+int main(int argc, char* argv[]) {
+    registerGen(argc, argv, 1);
+    string typ = opt<string>("type", "random");
+    int n = 1, m = 1;
+    if (typ == "edge_11") { n = m = 1; }
+    else if (typ == "edge_nmax") { n = m = 200; }
+    else if (typ == "row") { n = 1; m = pickSized(1, 200); }
+    else if (typ == "col") { n = pickSized(1, 200); m = 1; }
+    else { n = pickSized(1, 200); m = pickSized(1, 200); }
+    printf("%d %d\n", n, m);
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < m; j++) {
+            long long v = (typ == "all_zero") ? 0 : rnd.next(-1000000000LL, 1000000000LL);
+            printf("%lld%c", v, j + 1 < m ? ' ' : '\n');
+        }
+    }
+    return 0;
+}
+
+validator.cpp:
+#include "testlib.h"
+using namespace std;
+int main(int argc, char* argv[]) {
+    registerValidation();
+    int n = inf.readInt(1, 200, "n"); inf.readSpace();
+    int m = inf.readInt(1, 200, "m"); inf.readEoln();
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < m; j++) {
+            inf.readLong(-1000000000LL, 1000000000LL, "aij");
+            if (j + 1 < m) inf.readSpace();
+        }
+        inf.readEoln();
+    }
+    ensuref(n * m >= 1, "nonempty");
+    inf.readEof();
+    return 0;
+}
+
+"""
+
+CPP_RANGE_QUERY_EXAMPLE = r"""
+【参考范例：一道区间查询题的标准写法（C++ testlib）】
+题面：给定长度为 n 的数组与 q 次询问，每次询问 [l,r] 的区间和。
+输入格式：第 1 行 n q；第 2 行 n 个整数；接下来 q 行每行 l r（1-index）。
+输出格式：q 行，每行一个整数。
+数据范围：n,q in [1,1e5]，ai in [-1e9,1e9]，15 组。
+
+range.json:
+{
+  "count": 15,
+  "constraints": {"n": [1, 100000], "q": [1, 100000], "ai": [-1000000000, 1000000000]},
+  "edge_cases": ["edge_n1", "edge_nmax", "q1", "qmax", "point_queries"]
+}
+
+gen.cpp:
+#include "testlib.h"
+using namespace std;
+int pickSized(int lo, int hi) {
+    int idx = opt<int>("index", 0), cnt = opt<int>("count", 15);
+    if (cnt <= 1) return rnd.next(lo, hi);
+    if (idx < 0) idx = 0; if (idx >= cnt) idx = cnt - 1;
+    long long span = (long long)hi - lo;
+    long long a = lo + span * idx / cnt, b = lo + span * (idx + 1) / cnt;
+    if (b < a) b = a; if (a > hi) a = hi; if (b > hi) b = hi;
+    return rnd.next((int)a, (int)b);
+}
+int main(int argc, char* argv[]) {
+    registerGen(argc, argv, 1);
+    string typ = opt<string>("type", "random");
+    int n = (typ == "edge_n1") ? 1 : (typ == "edge_nmax") ? 100000 : pickSized(1, 100000);
+    int q = (typ == "q1") ? 1 : (typ == "qmax") ? 100000 : pickSized(1, 100000);
+    printf("%d %d\n", n, q);
+    for (int i = 0; i < n; i++) printf("%lld%c", rnd.next(-1000000000LL, 1000000000LL), i + 1 < n ? ' ' : '\n');
+    for (int i = 0; i < q; i++) {
+        int l, r;
+        if (typ == "point_queries") { l = r = rnd.next(1, n); }
+        else { l = rnd.next(1, n); r = rnd.next(1, n); if (l > r) swap(l, r); }
+        printf("%d %d\n", l, r);
+    }
+    return 0;
+}
+
+validator.cpp:
+#include "testlib.h"
+using namespace std;
+int main(int argc, char* argv[]) {
+    registerValidation();
+    int n = inf.readInt(1, 100000, "n"); inf.readSpace();
+    int q = inf.readInt(1, 100000, "q"); inf.readEoln();
+    for (int i = 0; i < n; i++) {
+        inf.readLong(-1000000000LL, 1000000000LL, "ai");
+        if (i + 1 < n) inf.readSpace();
+    }
+    inf.readEoln();
+    for (int i = 0; i < q; i++) {
+        int l = inf.readInt(1, n, "l"); inf.readSpace();
+        int r = inf.readInt(l, n, "r"); inf.readEoln();
+        ensuref(l <= r, "l<=r");
+    }
+    inf.readEof();
+    return 0;
+}
+
+"""
+
+CPP_WEIGHTED_TREE_EXAMPLE = r"""
+【参考范例：一道带权树题的标准写法（C++ + ACM-generator）】
+题面：给定 n 个节点带边权的树，求边权和。
+输入格式：第 1 行 n；接下来 n-1 行 u v w。
+输出格式：一个整数。
+数据范围：n in [2,1e5]，w in [1,1e9]，15 组，覆盖链、菊花、随机树。
+
+range.json:
+{
+  "count": 15,
+  "constraints": {"n": [2, 100000], "w": [1, 1000000000]},
+  "edge_cases": ["chain", "star", "random_tree", "edge_n2", "edge_nmax"]
+}
+
+gen.cpp:
+#include "generator.h"
+using namespace std;
+using namespace generator::all;
+int pickSized(int lo, int hi) {
+    int idx = opt<int>("index", 0), cnt = opt<int>("count", 15);
+    if (cnt <= 1) return rnd.next(lo, hi);
+    if (idx < 0) idx = 0; if (idx >= cnt) idx = cnt - 1;
+    long long span = (long long)hi - lo;
+    long long a = lo + span * idx / cnt, b = lo + span * (idx + 1) / cnt;
+    if (b < a) b = a; if (a > hi) a = hi; if (b > hi) b = hi;
+    return rnd.next((int)a, (int)b);
+}
+auto wfn = []() { return rnd.next(1, 1000000000); };
+int main(int argc, char* argv[]) {
+    registerGen(argc, argv, 1);
+    string typ = opt<string>("type", "random_tree");
+    int n = (typ == "edge_n2") ? 2 : (typ == "edge_nmax") ? 100000 : pickSized(2, 100000);
+    if (typ == "chain") {
+        edge_weight::Chain<int> t(n);
+        t.set_edges_weight_function(wfn); t.gen(); cout << t << "\n";
+    } else if (typ == "star") {
+        edge_weight::Flower<int> t(n);
+        t.set_edges_weight_function(wfn); t.gen(); cout << t << "\n";
+    } else {
+        edge_weight::Tree<int> t(n);
+        t.set_edges_weight_function(wfn); t.gen(); cout << t << "\n";
+    }
+    return 0;
+}
+
+validator.cpp:
+#include "testlib.h"
+using namespace std;
+const int MAXN = 100005; int par[MAXN];
+int find(int x){return par[x]==x?x:par[x]=find(par[x]);}
+int main(int argc, char* argv[]) {
+    registerValidation();
+    int n = inf.readInt(2, 100000, "n"); inf.readEoln();
+    for (int i = 1; i <= n; i++) par[i] = i;
+    set<pair<int,int>> es;
+    for (int i = 0; i < n - 1; i++) {
+        int u = inf.readInt(1, n, "u"); inf.readSpace();
+        int v = inf.readInt(1, n, "v"); inf.readSpace();
+        inf.readLong(1, 1000000000LL, "w"); inf.readEoln();
+        ensuref(u != v, "self loop");
+        auto key = make_pair(min(u,v), max(u,v));
+        ensuref(es.insert(key).second, "dup edge");
+        int ru = find(u), rv = find(v);
+        ensuref(ru != rv, "cycle");
+        par[ru] = rv;
+    }
+    int r = find(1);
+    for (int i = 2; i <= n; i++) ensuref(find(i) == r, "not connected");
+    inf.readEof();
+    return 0;
+}
+
+"""
+
+CPP_WEIGHTED_GRAPH_EXAMPLE = r"""
+【参考范例：一道带权图题的标准写法（C++ + ACM-generator）】
+题面：给定 n 点 m 边带权无向图，输出边权之和。
+输入格式：第 1 行 n m；接下来 m 行 u v w（无自环无重边）。
+输出格式：一个整数。
+数据范围：n in [1,1000]，m in [0,n*(n-1)/2]，w in [1,1e9]，15 组。
+
+range.json:
+{
+  "count": 15,
+  "constraints": {"n": [1, 1000], "m": [0, 499500], "w": [1, 1000000000]},
+  "edge_cases": ["connected_tree", "path", "star", "random_sparse", "edge_n1"]
+}
+
+gen.cpp:
+#include "generator.h"
+using namespace std;
+using namespace generator::all;
+int pickSized(int lo, int hi) {
+    int idx = opt<int>("index", 0), cnt = opt<int>("count", 15);
+    if (cnt <= 1) return rnd.next(lo, hi);
+    if (idx < 0) idx = 0; if (idx >= cnt) idx = cnt - 1;
+    long long span = (long long)hi - lo;
+    long long a = lo + span * idx / cnt, b = lo + span * (idx + 1) / cnt;
+    if (b < a) b = a; if (a > hi) a = hi; if (b > hi) b = hi;
+    return rnd.next((int)a, (int)b);
+}
+int main(int argc, char* argv[]) {
+    registerGen(argc, argv, 1);
+    string typ = opt<string>("type", "random_sparse");
+    int n = (typ == "edge_n1") ? 1 : pickSized(1, 1000);
+    vector<tuple<int,int,long long>> edges;
+    auto add_tree = [&](auto &t) {
+        t.set_edges_weight_function([](){ return rnd.next(1, 1000000000); });
+        t.gen();
+        for (auto &e : t.edges()) edges.emplace_back(e.u(), e.v(), e.w());
+    };
+    if (typ == "connected_tree" && n >= 2) {
+        edge_weight::Tree<int> t(n); add_tree(t);
+    } else if (typ == "path" && n >= 2) {
+        edge_weight::Chain<int> t(n); add_tree(t);
+    } else if (typ == "star" && n >= 2) {
+        edge_weight::Flower<int> t(n); add_tree(t);
+    } else if (n >= 2) {
+        int m = rnd.next(0, max(1, n));
+        unordered_set<long long> used;
+        while ((int)edges.size() < m) {
+            int u = rnd.next(1, n), v = rnd.next(1, n);
+            if (u == v) continue;
+            long long key = (long long)min(u,v) * (n + 1) + max(u,v);
+            if (!used.insert(key).second) continue;
+            edges.emplace_back(u, v, rnd.next(1LL, 1000000000LL));
+        }
+    }
+    printf("%d %d\n", n, (int)edges.size());
+    for (auto [u,v,w] : edges) printf("%d %d %lld\n", u, v, w);
+    return 0;
+}
+
+validator.cpp:
+#include "testlib.h"
+using namespace std;
+int main(int argc, char* argv[]) {
+    registerValidation();
+    int n = inf.readInt(1, 1000, "n"); inf.readSpace();
+    int m = inf.readInt(0, 499500, "m"); inf.readEoln();
+    set<pair<int,int>> es;
+    for (int i = 0; i < m; i++) {
+        int u = inf.readInt(1, n, "u"); inf.readSpace();
+        int v = inf.readInt(1, n, "v"); inf.readSpace();
+        inf.readLong(1, 1000000000LL, "w"); inf.readEoln();
+        ensuref(u != v, "self loop");
+        ensuref(es.insert({min(u,v), max(u,v)}).second, "dup");
+    }
+    inf.readEof();
+    return 0;
+}
+
+"""
+
+CPP_INTERACTIVE_EXAMPLE = r"""
+【参考范例：一道「查询交互」离线数据写法（C++ testlib）】
+说明：本工具流水线是文件 I/O，不能跑真正的交互库。若题面是交互题但标程可改成「读完全部询问再答」，
+可用本范例生成询问序列作为 .in；真正需要 interactor 的 OJ 交互请另配。
+题面（离线版）：有隐藏数组 a[1..n]，先给定 n，再进行 q 次操作：1 i 询问 a[i]；最后输出所有询问答案之和（标程自带 a）。
+输入格式：第 1 行 n q；第 2 行 n 个整数 a；接下来 q 行，每行两个整数 1 i。
+输出格式：一个整数。
+数据范围：n,q in [1,1e5]，15 组。
+
+range.json:
+{
+  "count": 15,
+  "constraints": {"n": [1, 100000], "q": [1, 100000], "ai": [1, 1000000000]},
+  "edge_cases": ["edge_n1", "edge_nmax", "q1", "qmax", "repeat_ask"]
+}
+
+gen.cpp:
+#include "testlib.h"
+using namespace std;
+int pickSized(int lo, int hi) {
+    int idx = opt<int>("index", 0), cnt = opt<int>("count", 15);
+    if (cnt <= 1) return rnd.next(lo, hi);
+    if (idx < 0) idx = 0; if (idx >= cnt) idx = cnt - 1;
+    long long span = (long long)hi - lo;
+    long long a = lo + span * idx / cnt, b = lo + span * (idx + 1) / cnt;
+    if (b < a) b = a; if (a > hi) a = hi; if (b > hi) b = hi;
+    return rnd.next((int)a, (int)b);
+}
+int main(int argc, char* argv[]) {
+    registerGen(argc, argv, 1);
+    string typ = opt<string>("type", "random");
+    int n = (typ == "edge_n1") ? 1 : (typ == "edge_nmax") ? 100000 : pickSized(1, 100000);
+    int q = (typ == "q1") ? 1 : (typ == "qmax") ? 100000 : pickSized(1, 100000);
+    printf("%d %d\n", n, q);
+    for (int i = 0; i < n; i++) printf("%d%c", rnd.next(1, 1000000000), i + 1 < n ? ' ' : '\n');
+    int fixed = rnd.next(1, n);
+    for (int i = 0; i < q; i++) {
+        int idx = (typ == "repeat_ask") ? fixed : rnd.next(1, n);
+        printf("1 %d\n", idx);
+    }
+    return 0;
+}
+
+validator.cpp:
+#include "testlib.h"
+using namespace std;
+int main(int argc, char* argv[]) {
+    registerValidation();
+    int n = inf.readInt(1, 100000, "n"); inf.readSpace();
+    int q = inf.readInt(1, 100000, "q"); inf.readEoln();
+    for (int i = 0; i < n; i++) {
+        inf.readInt(1, 1000000000, "ai");
+        if (i + 1 < n) inf.readSpace();
+    }
+    inf.readEoln();
+    for (int i = 0; i < q; i++) {
+        int op = inf.readInt(1, 1, "op"); inf.readSpace();
+        inf.readInt(1, n, "i"); inf.readEoln();
+        ensuref(op == 1, "only query op=1 in this offline sample");
+    }
+    inf.readEof();
+    return 0;
+}
+
+"""
+
 CPP_FEW_SHOTS = {
     "array": CPP_ARRAY_EXAMPLE,
     "tree": CPP_TREE_EXAMPLE,
     "graph": CPP_GRAPH_EXAMPLE,
     "string": CPP_STRING_EXAMPLE,
     "number_theory": CPP_NUMBER_THEORY_EXAMPLE,
+    "geometry": CPP_GEOMETRY_EXAMPLE,
     "multi_test": CPP_MULTI_TEST_EXAMPLE,
+    "dp": CPP_DP_EXAMPLE,
+    "matrix": CPP_MATRIX_EXAMPLE,
+    "range_query": CPP_RANGE_QUERY_EXAMPLE,
+    "weighted_tree": CPP_WEIGHTED_TREE_EXAMPLE,
+    "weighted_graph": CPP_WEIGHTED_GRAPH_EXAMPLE,
+    "interactive": CPP_INTERACTIVE_EXAMPLE,
 }
+

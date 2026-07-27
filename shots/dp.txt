@@ -1,0 +1,54 @@
+【参考范例：一道 DP 题的标准写法（C++ testlib）】
+题面：0-1 背包。给定容量 W 与 n 件物品的重量 wi、价值 vi，求最大价值。
+输入格式：第 1 行 n W；接下来 n 行每行 wi vi。
+输出格式：一个整数。
+数据范围：n in [1,100]，W in [1,1000]，wi,vi in [1,1000]，15 组。
+
+range.json:
+{
+  "count": 15,
+  "constraints": {"n": [1, 100], "W": [1, 1000], "wi": [1, 1000], "vi": [1, 1000]},
+  "edge_cases": ["edge_n1", "edge_nmax", "edge_W1", "edge_Wmax", "all_heavy"]
+}
+
+gen.cpp:
+#include "testlib.h"
+using namespace std;
+int pickSized(int lo, int hi) {
+    int idx = opt<int>("index", 0), cnt = opt<int>("count", 15);
+    if (cnt <= 1) return rnd.next(lo, hi);
+    if (idx < 0) idx = 0; if (idx >= cnt) idx = cnt - 1;
+    long long span = (long long)hi - lo;
+    long long a = lo + span * idx / cnt, b = lo + span * (idx + 1) / cnt;
+    if (b < a) b = a; if (a > hi) a = hi; if (b > hi) b = hi;
+    return rnd.next((int)a, (int)b);
+}
+int main(int argc, char* argv[]) {
+    registerGen(argc, argv, 1);
+    string typ = opt<string>("type", "random");
+    int n = (typ == "edge_n1") ? 1 : (typ == "edge_nmax") ? 100 : pickSized(1, 100);
+    int W = (typ == "edge_W1") ? 1 : (typ == "edge_Wmax") ? 1000 : pickSized(1, 1000);
+    printf("%d %d\n", n, W);
+    for (int i = 0; i < n; i++) {
+        int w = (typ == "all_heavy") ? rnd.next(max(1, W), 1000) : rnd.next(1, 1000);
+        int v = rnd.next(1, 1000);
+        printf("%d %d\n", w, v);
+    }
+    return 0;
+}
+
+validator.cpp:
+#include "testlib.h"
+using namespace std;
+int main(int argc, char* argv[]) {
+    registerValidation();
+    int n = inf.readInt(1, 100, "n"); inf.readSpace();
+    int W = inf.readInt(1, 1000, "W"); inf.readEoln();
+    for (int i = 0; i < n; i++) {
+        inf.readInt(1, 1000, "wi"); inf.readSpace();
+        inf.readInt(1, 1000, "vi"); inf.readEoln();
+    }
+    ensuref(n >= 1, "n>=1");
+    inf.readEof();
+    return 0;
+}

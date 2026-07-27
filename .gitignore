@@ -1,30 +1,66 @@
-﻿# 本地虚拟环境
+﻿# ---- 本地环境 / 密钥 ----
 .venv/
 env/
 venv/
-
-# 敏感配置（保留 .env.example 供他人参考）
 .env
+!.env.example
 
-# Python 缓存
+# ---- Python ----
 __pycache__/
 *.py[cod]
 *$py.class
 *.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.cover
 
-# 运行时生成（不要忽略源码目录 sandbox/）
+# ---- 运行时生成（保留 sandbox/ 源码头文件）----
 jobs/
 .cache/
 out/
+*.log
 
-# IDE
+# ---- 第三方完整源码树（已 vendoring 到 sandbox/generator.h + checker/）----
+ACM-generator-main/
+
+# ---- 编译 / 二进制产物 ----
+*.exe
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.gch
+*.pch
+a.out
+
+# ---- 打包 / 压缩包 ----
+*.zip
+*.tar
+*.tar.gz
+*.7z
+
+# ---- IDE / 系统 ----
 .idea/
 .vscode/
-
-# 打包产物 / 临时文件
-*.zip
-*.log
+*.swp
+*.swo
+*~
 .DS_Store
 Thumbs.db
+desktop.ini
 
-docs
+# ---- 本地杂项 ----
+docs/
+tmp/
+temp/
+*.tmp
+*.bak
