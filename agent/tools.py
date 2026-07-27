@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from sandbox.run import safe_run
+from sandbox.run import EXIT_MEMORY, parse_memory_limit_mb, safe_run
 
 # testlib.h / generator.h / 内置 checker 源码（随项目分发，每个 job 目录按需拷贝）
 _SANDBOX = Path(__file__).resolve().parent.parent / "sandbox"
@@ -298,18 +298,47 @@ def use_builtin_checker(name: str) -> str:
     return f"OK: installed builtin checker {name} -> checker"
 
 
+def _load_range_json() -> dict:
+    """读取工作目录 range.json；失败返回空 dict。"""
+    p = WORK_DIR / "range.json"
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _std_timeout_s(rj: dict | None = None) -> int:
+    """标程超时（秒）：time_limit_ms + 1s 余量，默认 10。"""
+    rj = rj if rj is not None else _load_range_json()
+    tl = rj.get("time_limit_ms")
+    if isinstance(tl, int) and not isinstance(tl, bool) and tl > 0:
+        return max(1, (tl + 999) // 1000) + 1
+    return 10
+
+
+def _memory_limit_mb(rj: dict | None = None):
+    """从 range.json 取 memory_limit_mb；未设置返回 None。"""
+    return parse_memory_limit_mb(rj if rj is not None else _load_range_json())
+
+
 def run_gen(seed: int, type: str = "random", index: int = -1, count: int = 15) -> str:
     """跑编译好的 gen 二进制：`./gen --seed N --type T [--index i --count C]`，返回 stdout。
 
     超时硬上限 5 秒。超时直接判定 gen 算法不达标（通常是 O(n^2) 枚举），
     返回明确的 TIMEOUT 错误，提示 Agent 重写 gen.cpp。
+    若 range.json 含 memory_limit_mb，则同步限制生成器内存。
     """
     if index < 0:
         index = seed
+    mem_mb = _memory_limit_mb()
     rc, out, err = safe_run(
         f"{_exe('gen')} --seed {seed} --type {type} --index {index} --count {count}",
         timeout=5,
         cwd=str(WORK_DIR),
+        memory_limit_mb=mem_mb,
     )
     if rc != 0:
         if rc == 124:
@@ -319,34 +348,49 @@ def run_gen(seed: int, type: str = "random", index: int = -1, count: int = 15) -
                 f"请 read_file(\"gen.cpp\") 找到对应分支，改用 unordered_set 随机采样，"
                 f"重新 write_gen，再继续自检。不要重试同一段代码。"
             )
+        if rc == EXIT_MEMORY:
+            return (
+                f"ERROR gen MEMORY_LIMIT ({mem_mb} MB) type={type} seed={seed}: "
+                f"生成器内存超限。请降低单组规模，或避免 O(n^2) 大数组/边池；"
+                f"必要时调高 range.json 的 memory_limit_mb。"
+            )
         return f"ERROR gen rc={rc}: {(err or '').strip()}"
     return out if out else f"ERROR gen: empty output (stderr={(err or '').strip()})"
 
 
 def run_validate(input_text: str) -> str:
     """把 input_text 喂给编译好的 validator 二进制，合法返回 OK，非法返回 stderr。"""
-    rc, out, err = safe_run(_exe("validator"), stdin=input_text, timeout=10, cwd=str(WORK_DIR))
+    mem_mb = _memory_limit_mb()
+    rc, out, err = safe_run(
+        _exe("validator"),
+        stdin=input_text,
+        timeout=10,
+        cwd=str(WORK_DIR),
+        memory_limit_mb=mem_mb,
+    )
     if rc == 0:
         return "OK: valid"
+    if rc == EXIT_MEMORY:
+        return f"ERROR validate MEMORY_LIMIT ({mem_mb} MB): {(err or '').strip()}"
     return f"ERROR validate rc={rc}: {err.strip()}"
 
 
 def run_std(input_text: str) -> str:
     """把 input_text 喂给标程，返回 stdout（即答案）。std_cmd 相对项目根，在根目录跑。"""
-    timeout = 10
-    rj_path = WORK_DIR / "range.json"
-    if rj_path.exists():
-        try:
-            rj = json.loads(rj_path.read_text(encoding="utf-8"))
-            tl = rj.get("time_limit_ms")
-            if isinstance(tl, int) and tl > 0:
-                timeout = max(1, (tl + 999) // 1000) + 1  # 题面时限 +1s 余量
-        except Exception:
-            pass
-    rc, out, err = safe_run(STD_CMD, stdin=input_text, timeout=timeout)
+    rj = _load_range_json()
+    timeout = _std_timeout_s(rj)
+    mem_mb = _memory_limit_mb(rj)
+    rc, out, err = safe_run(
+        STD_CMD, stdin=input_text, timeout=timeout, memory_limit_mb=mem_mb
+    )
     if rc != 0:
         if rc == 124:
             return f"ERROR std TIMEOUT after {timeout}s: 标程超时（检查数据规模或标程复杂度）"
+        if rc == EXIT_MEMORY:
+            return (
+                f"ERROR std MEMORY_LIMIT ({mem_mb} MB): "
+                f"标程超内存（检查数据规模/复杂度，或调高 memory_limit_mb）"
+            )
         return f"ERROR std rc={rc}: {err.strip()}"
     return out if out else f"ERROR std: empty output (stderr={err.strip()})"
 
@@ -359,7 +403,14 @@ def read_range() -> str:
     return p.read_text(encoding="utf-8")
 
 
-def _triple_check(seed: int, typ: str, index: int, count: int, std_timeout: int) -> str:
+def _triple_check(
+    seed: int,
+    typ: str,
+    index: int,
+    count: int,
+    std_timeout: int,
+    mem_mb=None,
+) -> str:
     """单组 gen→validate→std，成功返回 OK 行，失败返回 ERROR 详情。"""
     gen_out = run_gen(seed=seed, type=typ, index=index, count=count)
     if isinstance(gen_out, str) and gen_out.startswith("ERROR"):
@@ -368,10 +419,14 @@ def _triple_check(seed: int, typ: str, index: int, count: int, std_timeout: int)
     if not val.startswith("OK"):
         return f"FAIL type={typ} seed={seed} validate: {val}"
     # 直接调 safe_run 以便用 std_timeout（run_std 会再读 range，此处统一）
-    rc, out, err = safe_run(STD_CMD, stdin=gen_out, timeout=std_timeout)
+    rc, out, err = safe_run(
+        STD_CMD, stdin=gen_out, timeout=std_timeout, memory_limit_mb=mem_mb
+    )
     if rc != 0:
         if rc == 124:
             return f"FAIL type={typ} seed={seed}: std TIMEOUT after {std_timeout}s"
+        if rc == EXIT_MEMORY:
+            return f"FAIL type={typ} seed={seed}: std MEMORY_LIMIT ({mem_mb} MB)"
         return f"FAIL type={typ} seed={seed}: std rc={rc} {(err or '').strip()}"
     if not (out or "").strip():
         return f"FAIL type={typ} seed={seed}: std empty output"
@@ -398,10 +453,8 @@ def run_self_check() -> str:
     count = int(rj.get("count") or 15)
     edge_cases = list(rj.get("edge_cases") or [])
     constraints = rj.get("constraints") or {}
-    tl = rj.get("time_limit_ms")
-    std_timeout = 10
-    if isinstance(tl, int) and tl > 0:
-        std_timeout = max(2, (tl + 999) // 1000 + 1)
+    std_timeout = _std_timeout_s(rj)
+    mem_mb = _memory_limit_mb(rj)
 
     checks: list[tuple[str, int, int]] = []  # type, seed, index
     # 1) 每个 edge_type 一组
@@ -434,12 +487,15 @@ def run_self_check() -> str:
         seen.add(key)
         uniq.append((typ, seed, idx))
 
-    lines = [f"self_check start: count={count} edges={edge_cases} std_timeout={std_timeout}s"]
+    limit_note = f"std_timeout={std_timeout}s"
+    if mem_mb:
+        limit_note += f" memory_limit_mb={mem_mb}"
+    lines = [f"self_check start: count={count} edges={edge_cases} {limit_note}"]
     if isinstance(constraints, dict) and constraints:
         lines.append(f"constraints_keys={list(constraints.keys())}")
     fails = []
     for typ, seed, idx in uniq:
-        msg = _triple_check(seed, typ, idx, count, std_timeout)
+        msg = _triple_check(seed, typ, idx, count, std_timeout, mem_mb=mem_mb)
         lines.append(msg)
         if msg.startswith("FAIL") or msg.startswith("ERROR"):
             fails.append(msg)
@@ -562,7 +618,8 @@ TOOL_SCHEMAS = [
     ),
     _schema(
         "run_std",
-        "把一段输入文本喂给标程，返回标程的输出（即答案）。超时参考 range.json 的 time_limit_ms。",
+        "把一段输入文本喂给标程，返回标程的输出（即答案）。"
+        "超时参考 range.json 的 time_limit_ms；内存参考 memory_limit_mb。",
         {"input_text": {"type": "string", "description": "标程的 stdin 输入"}},
         ["input_text"],
     ),

@@ -13,7 +13,7 @@ from pathlib import Path
 import sys
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from sandbox.run import safe_run
+from sandbox.run import EXIT_MEMORY, parse_memory_limit_mb, safe_run
 
 
 def _exe(base: str) -> str:
@@ -51,7 +51,7 @@ def validate_range_json(rj) -> list:
       - edge_cases: 字符串列表（每个是 gen.py --type 能接受的取值）
     可选字段：
       - std_cmd（后端会强制注入）
-      - time_limit_ms、memory_limit_mb
+      - time_limit_ms、memory_limit_mb（正整数；缺省表示不限制内存）
       - special_constraints: 字符串列表，题面里提取出的特殊结构约束
         （如 "图是 DAG"、"图必须存在哈密顿路径"）。缺省视为 []。
     """
@@ -89,6 +89,16 @@ def validate_range_json(rj) -> list:
             if not isinstance(s, str) or not s.strip():
                 errs.append(f"special_constraints 每条必须是非空字符串，当前含 {s!r}")
                 break
+
+    ml = rj.get("memory_limit_mb")
+    if ml is not None:
+        if isinstance(ml, bool) or not isinstance(ml, int) or ml <= 0:
+            errs.append(f"memory_limit_mb 必须是正整数（MB），当前为 {ml!r}")
+
+    tl = rj.get("time_limit_ms")
+    if tl is not None:
+        if isinstance(tl, bool) or not isinstance(tl, int) or tl <= 0:
+            errs.append(f"time_limit_ms 必须是正整数（毫秒），当前为 {tl!r}")
 
     # 'random' 由系统自动补，Agent 若写进 edge_cases 会在 normalize 时剥掉，这里不报错
 
@@ -145,6 +155,9 @@ def generate(range_json: dict, work_dir: str, out_dir: str, verbose: bool = True
     # 不让慢生成器拖垮整批；validate/std 仍按 range.json 的 time_limit_ms。
     gen_timeout_s = 5
     other_timeout_s = max(range_json.get("time_limit_ms", 1000) / 1000, 1)
+    mem_mb = parse_memory_limit_mb(range_json)
+    if verbose and mem_mb:
+        print(f"memory_limit_mb={mem_mb}（作用于 gen / validator / std）")
 
     ok = 0
     bad = 0
@@ -164,12 +177,18 @@ def generate(range_json: dict, work_dir: str, out_dir: str, verbose: bool = True
                     f"{gen_cmd} --seed {seed} --type {try_typ} --index {i} --count {count}",
                     timeout=gen_timeout_s,
                     cwd=str(work),
+                    memory_limit_mb=mem_mb,
                 )
                 if rc != 0:
                     if rc == 124:
                         last_error = (
                             f"gen TIMEOUT after {gen_timeout_s}s type={try_typ}: "
                             f"算法太慢（疑似 O(n^2) 枚举/预建大池子），需重写 gen.cpp"
+                        )
+                    elif rc == EXIT_MEMORY:
+                        last_error = (
+                            f"gen MEMORY_LIMIT ({mem_mb} MB) type={try_typ}: "
+                            f"生成器内存超限，请降低规模或优化 gen.cpp"
                         )
                     else:
                         last_error = f"gen FAILED type={try_typ}: {err.strip()}"
@@ -178,16 +197,36 @@ def generate(range_json: dict, work_dir: str, out_dir: str, verbose: bool = True
                     continue
                 inp = inp.rstrip("\n") + "\n"
 
-                rc, _, err = safe_run(validator_cmd, stdin=inp, timeout=other_timeout_s, cwd=str(work))
+                rc, _, err = safe_run(
+                    validator_cmd,
+                    stdin=inp,
+                    timeout=other_timeout_s,
+                    cwd=str(work),
+                    memory_limit_mb=mem_mb,
+                )
                 if rc != 0:
-                    last_error = f"validate FAILED type={try_typ}: {err.strip()}"
+                    if rc == EXIT_MEMORY:
+                        last_error = f"validate MEMORY_LIMIT ({mem_mb} MB) type={try_typ}"
+                    else:
+                        last_error = f"validate FAILED type={try_typ}: {err.strip()}"
                     if verbose:
                         print(f"[{i+1}/{count}] attempt {attempt+1}/{max_retries+1} {last_error}")
                     continue
 
-                rc, ans, err = safe_run(std_cmd, stdin=inp, timeout=other_timeout_s)
+                rc, ans, err = safe_run(
+                    std_cmd,
+                    stdin=inp,
+                    timeout=other_timeout_s,
+                    memory_limit_mb=mem_mb,
+                )
                 if rc != 0:
-                    last_error = f"std FAILED type={try_typ}: {err.strip()}"
+                    if rc == EXIT_MEMORY:
+                        last_error = (
+                            f"std MEMORY_LIMIT ({mem_mb} MB) type={try_typ}: "
+                            f"标程超内存（检查数据规模或标程复杂度）"
+                        )
+                    else:
+                        last_error = f"std FAILED type={try_typ}: {err.strip()}"
                     if verbose:
                         print(f"[{i+1}/{count}] attempt {attempt+1}/{max_retries+1} {last_error}")
                     continue

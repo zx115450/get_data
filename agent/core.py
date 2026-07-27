@@ -21,7 +21,7 @@ SYSTEM_PROMPT = """你是一个能调用工具的 Agent，任务是为一道算�
 - use_builtin_checker(name): 安装内置 checker（lcmp/wcmp/rcmp4/rcmp6/rcmp9/yesno），答案唯一时优先用
 - run_gen(seed, type): 跑编译好的 gen 二进制生成一组输入，返回输入文本
 - run_validate(input_text): 校验一段输入是否合法（跑编译好的 validator）
-- run_std(input_text): 跑标程，返回答案（超时参考 range.json time_limit_ms）
+- run_std(input_text): 跑标程，返回答案（超时参考 range.json time_limit_ms；内存参考 memory_limit_mb）
 - run_self_check(): 强化自检（每个 edge_type + 最大/最小规模 + 多测边界），finish 前必须通过
 - write_file(path, content) / read_file(path): 通用读写（一般用不到）
 - finish(summary): 自检通过后调用，结束循环
@@ -37,7 +37,7 @@ SYSTEM_PROMPT = """你是一个能调用工具的 Agent，任务是为一道算�
 6. 若需要 checker：答案唯一且只需比较输出 -> use_builtin_checker；
    答案不唯一或需额外判定 -> write_checker。不要两者都写。
 7. 【必须】调用 run_self_check()：会额外跑 random 最小档与最大档（逼近规模上界）、以及多测相关边界；
-   若 range.json 含 time_limit_ms，标程超时按该时限检查。未通过不得 finish。
+   若 range.json 含 time_limit_ms / memory_limit_mb，标程超时/超内存按该限制检查。未通过不得 finish。
 8. run_self_check 返回 OK -> 调 finish
 
 【硬性 CLI 契约，必须遵守】
@@ -49,6 +49,8 @@ range.json 必须是合法 JSON，含：
   - constraints: 对象，各变量名 -> [min, max]
   - edge_cases: 数组，边界类型名；每个名字必须是你 gen --type 能接受的取值
   - 禁止在 edge_cases 里写 "random"：系统会给非边界组自动补 random（可写 random_tree / random_sparse 等具体名）
+  - 建议写 time_limit_ms（毫秒）与 memory_limit_mb（MB）：系统会对 gen/validator/std 强制限时限内存；
+    超限分别返回 TIMEOUT / MEMORY_LIMIT。题面未写内存时可省略（不限制）或写 256。
 【规模均匀 — 很重要】
 对 n、m、|s| 这类落在 [L,R] 的规模变量：15 组测例必须同时覆盖小数据与大数据，不能全挤在小数。
   - 系统跑 gen 时会传 --index i --count C（i=0..C-1）。random 分支请用它们分层取规模，例如：
