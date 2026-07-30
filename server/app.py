@@ -71,6 +71,8 @@ class JobRequest(BaseModel):
     range_json: Optional[dict[str, Any]] = None  # 若提供则跳过 Agent 写 range
     special_judge: bool = False  # 是否生成 special judge / checker.zip
     builtin_checker: str = ""  # 可选 lcmp/wcmp/rcmp4/rcmp6/rcmp9/yesno
+    # 失败续跑上下文：由上次失败时返回的 failure_context.json 提供，携带后 runner 会尝试复用产物
+    resume_context: Optional[dict[str, Any]] = None
 
 
 class CorpusDisableRequest(BaseModel):
@@ -166,6 +168,7 @@ def submit(req: JobRequest):
                 range_json=req.range_json,
                 special_judge=req.special_judge,
                 builtin_checker=bc,
+                resume_context=req.resume_context,
             )
             job.status = job_store.JobStatus.DONE
         except Exception as e:

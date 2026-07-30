@@ -1,8 +1,12 @@
 """内存级任务存储。生产环境可换 SQLite/Redis，这里保持简单。"""
+import hashlib
+import json
 import threading
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
+from pathlib import Path
 
 
 class JobStatus(str, Enum):
@@ -29,7 +33,8 @@ _store_lock = threading.Lock()
 
 
 def create_job() -> Job:
-    jid = uuid.uuid4().hex[:12]
+    # 目录名：日期 + 短 id，例如 20260730_a3f8c2d1e4b5
+    jid = f"{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:12]}"
     job = Job(id=jid)
     with _store_lock:
         _store[jid] = job
@@ -49,7 +54,7 @@ def add_progress(job: Job, msg: str) -> None:
 def snapshot(job: Job) -> dict:
     """返回给前端的只读快照。"""
     with job.lock:
-        return {
+        data = {
             "id": job.id,
             "status": job.status.value,
             "progress": list(job.progress),
@@ -58,3 +63,18 @@ def snapshot(job: Job) -> dict:
             "has_sources_zip": bool(job.sources_zip_path),
             "has_checker_zip": bool(job.checker_zip_path),
         }
+
+    # 失败时若存在 failure_context.json，把它返回给前端，便于 GUI 重试时携带
+    if job.status in (JobStatus.ERROR, JobStatus.DONE):
+        try:
+            p = Path("jobs") / job.id / "failure_context.json"
+            if p.exists():
+                data["failure_context"] = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return data
+
+
+def _text_hash(text: str) -> str:
+    """返回文本的 sha256 摘要（用于同题校验）。"""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()

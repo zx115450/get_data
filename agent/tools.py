@@ -23,13 +23,28 @@ _SANDBOX = Path(__file__).resolve().parent.parent / "sandbox"
 TESTLIB_H = _SANDBOX / "testlib.h"
 GENERATOR_H = _SANDBOX / "generator.h"
 CHECKER_SRC_DIR = _SANDBOX / "checker"
+CHECKER_TEMPLATE_DIR = _SANDBOX / "checker" / "templates"
 
 # 允许的内置 checker 名（对应 sandbox/checker/<name>.cpp）
 BUILTIN_CHECKERS = ("lcmp", "wcmp", "rcmp4", "rcmp6", "rcmp9", "yesno")
 
+# 可用的 checker 模板（对应 sandbox/checker/templates/<name>.cpp）
+CHECKER_TEMPLATES = (
+    "construct_verify",    # 通用构造/方案验证
+    "any_of_answers",      # 多解但可推导正确答案条件
+    "graph_path",          # 路径/环/walk 验证
+    "permutation",         # 排列验证
+    "subset",              # 子集/选择验证
+    "sequence_property",     # 序列/数组性质验证
+    "point_set",           # 点集/几何构造验证
+    "matching",            # 匹配/配对方案验证
+    "tree_parent",         # 树父节点/边集验证
+)
+
 # 题型里通常会用到 generator.h 的集合（供 runner 预置）
 GENERATOR_PROBLEM_TYPES = frozenset({
     "tree", "graph", "geometry", "weighted_tree", "weighted_graph",
+    "permutation", "array", "string", "matrix", "number_theory",
 })
 
 
@@ -54,7 +69,11 @@ def _copy_generator() -> None:
 
 
 def prewarm_generator_headers() -> None:
-    """为树/图/几何类题预先拷贝 generator.h（不预编译；PCH 在本机无明显收益）。"""
+    """为所有题目预先拷贝 generator.h（不预编译；PCH 在本机无明显收益）。
+
+    generator.h 是 testlib 的封装扩展，包含所有 testlib 功能，
+    大模型可按需使用其数组/树/图/几何/排列等便捷 API，不必局限于树/图/几何题型。
+    """
     _copy_generator()
 
 
@@ -298,6 +317,175 @@ def use_builtin_checker(name: str) -> str:
     return f"OK: installed builtin checker {name} -> checker"
 
 
+def use_checker_template(name: str) -> str:
+    """使用 checker 模板（目前支持 construct_verify），生成骨架 checker.cpp 并编译。
+
+    模板会提供一个可编译通过的骨架，模型后续用 read_file + write_checker 替换 TODO 部分。
+    """
+    name = (name or "").strip().lower()
+    if name not in CHECKER_TEMPLATES:
+        return (
+            f"ERROR: 未知 checker 模板 {name!r}，"
+            f"可选: {', '.join(CHECKER_TEMPLATES)}"
+        )
+    src = CHECKER_TEMPLATE_DIR / f"{name}.cpp"
+    if not src.exists():
+        return f"ERROR: 缺少 checker 模板源码 {src}"
+    _copy_testlib()
+    dst = WORK_DIR / "checker.cpp"
+    shutil.copyfile(src, dst)
+    rc, out, err = safe_run(
+        "g++ -O2 -std=c++17 checker.cpp -o " + _exe("checker"),
+        timeout=60, cwd=str(WORK_DIR),
+    )
+    if rc != 0:
+        return _compile_err(f"checker template {name}", rc, out, err)
+    return f"OK: installed checker template {name} -> checker.cpp ({len(src.read_text(encoding='utf-8'))} chars)"
+
+
+def run_checker(input_text: str, output_text: str, answer_text: str) -> str:
+    """运行编译好的 checker，判定 output_text 相对 answer_text 是否正确。
+
+    三个参数分别对应 inf / ouf / ans 的内容。会写临时文件、调用 checker、清理临时文件。
+    返回包含退出码、stdout、stderr 的摘要。
+    """
+    exe = WORK_DIR / _exe("checker")
+    if not exe.exists():
+        return "ERROR: checker 未编译，请先 write_checker 或 use_builtin_checker / use_checker_template"
+
+    inf = WORK_DIR / "_checker_run_inf.txt"
+    ouf = WORK_DIR / "_checker_run_ouf.txt"
+    ans = WORK_DIR / "_checker_run_ans.txt"
+    try:
+        inf.write_text(input_text, encoding="utf-8")
+        ouf.write_text(output_text, encoding="utf-8")
+        ans.write_text(answer_text, encoding="utf-8")
+
+        rc, out, err = safe_run(
+            f"{_exe('checker')} {inf} {ouf} {ans}",
+            timeout=10,
+            cwd=str(WORK_DIR),
+        )
+        out_s = (out or "").strip()
+        err_s = (err or "").strip()
+        return (
+            f"checker exit_code={rc}\n"
+            f"stdout: {out_s[:500]}{'...' if len(out_s) > 500 else ''}\n"
+            f"stderr: {err_s[:1500]}{'...' if len(err_s) > 1500 else ''}"
+        )
+    finally:
+        for p in (inf, ouf, ans):
+            try:
+                p.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+def _mutate_output(output: str) -> str:
+    """对选手输出做轻微扰动，生成一个应该被判错的负例。"""
+    if not output.strip():
+        return "wrong\n"
+    lines = output.splitlines()
+    if not lines:
+        return output + "x"
+    last = lines[-1]
+    if last:
+        # 改最后一个 token 的末尾字符
+        lines[-1] = last[:-1] if len(last) > 1 else last + "x"
+    return "\n".join(lines) + "\n"
+
+
+def run_checker_self_check(count: int = 3) -> str:
+    """用当前 gen + std + checker 做 reactive 自检。
+
+    正例：用 gen 生成输入，std 跑出答案，把答案同时当 ouf/ans 跑 checker，必须返回 _ok。
+    负例：把答案轻微扰动后当 ouf 跑 checker，必须返回非 _ok（_wa / _pe 均可）。
+    全部通过返回 OK；任一失败返回 ERROR 详情。
+    """
+    exe = WORK_DIR / _exe("checker")
+    if not exe.exists():
+        return "ERROR: checker 未编译，请先 write_checker 或 use_builtin_checker / use_checker_template"
+    if not (WORK_DIR / _exe("gen")).exists():
+        return "ERROR: gen 未编译，无法为 checker 生成测试输入"
+    if not (WORK_DIR / _exe("std")).exists() and not STD_CMD:
+        return "ERROR: 标程不可用，无法为 checker 生成标准答案"
+
+    rj = _load_range_json()
+    edge_cases = list(rj.get("edge_cases") or [])
+    total_count = int(rj.get("count") or 15)
+
+    checks = []
+    # 正例：count 个不同规模 / 边界
+    for i in range(count):
+        idx = min(i, total_count - 1)
+        checks.append(("random", 2000 + i, idx, True))
+    if edge_cases:
+        checks.append((edge_cases[0], 2002, 0, True))
+    # 负例：同样输入，扰动输出
+    checks.append(("random", 3000, 0, False))
+
+    lines = [f"checker_self_check start: count={count} planned_checks={len(checks)}"]
+    fails = []
+    for typ, seed, idx, is_positive in checks:
+        gen_out = _run_gen_raw(seed, typ, idx, total_count)
+        if gen_out.startswith("ERROR"):
+            lines.append(f"FAIL gen seed={seed} type={typ}: {gen_out[:200]}")
+            fails.append((typ, seed, "gen failed"))
+            continue
+
+        std_out = _run_std_raw(gen_out)
+        if std_out.startswith("ERROR"):
+            lines.append(f"FAIL std seed={seed} type={typ}: {std_out[:200]}")
+            fails.append((typ, seed, "std failed"))
+            continue
+
+        ouf = std_out if is_positive else _mutate_output(std_out)
+        result = run_checker(gen_out, ouf, std_out)
+        ok = result.startswith("checker exit_code=0") or "_ok" in result
+        status = "OK" if ok else "NOT_OK"
+        expected = "expected _ok" if is_positive else "expected _wa or _pe"
+        lines.append(f"{status} type={typ} seed={seed} positive={is_positive} {expected}\n{result[:400]}")
+        if is_positive and not ok:
+            fails.append((typ, seed, "positive case rejected by checker"))
+        elif not is_positive and ok:
+            fails.append((typ, seed, "negative case accepted by checker"))
+
+    if fails:
+        return (
+            "ERROR: checker_self_check failed\n"
+            + "\n".join(lines)
+            + "\n请根据失败信息修复 checker.cpp 后重新 write_checker，再 run_checker_self_check。"
+        )
+    return "OK: checker_self_check passed\n" + "\n".join(lines)
+
+
+def _run_gen_raw(seed: int, typ: str, idx: int, count: int) -> str:
+    """内部：跑 gen 返回原始输出，失败返回 ERROR 开头字符串。"""
+    if not (WORK_DIR / _exe("gen")).exists():
+        return "ERROR: gen 未编译"
+    rc, out, err = safe_run(
+        f"{_exe('gen')} --seed {seed} --type {typ} --index {idx} --count {count}",
+        timeout=10,
+        cwd=str(WORK_DIR),
+    )
+    if rc != 0:
+        return f"ERROR: gen failed (rc={rc}): {err or out}"
+    return out or ""
+
+
+def _run_std_raw(input_text: str) -> str:
+    """内部：跑标程返回原始输出，失败返回 ERROR 开头字符串。"""
+    rc, out, err = safe_run(
+        STD_CMD,
+        stdin=input_text,
+        timeout=30,
+        cwd=str(WORK_DIR),
+    )
+    if rc != 0:
+        return f"ERROR: std failed (rc={rc}): {err or out}"
+    return out or ""
+
+
 def _load_range_json() -> dict:
     """读取工作目录 range.json；失败返回空 dict。"""
     p = WORK_DIR / "range.json"
@@ -519,10 +707,13 @@ FUNCTIONS = {
     "write_validate": write_validate,
     "write_checker": write_checker,
     "use_builtin_checker": use_builtin_checker,
+    "use_checker_template": use_checker_template,
     "run_gen": run_gen,
     "run_validate": run_validate,
     "run_std": run_std,
     "run_self_check": run_self_check,
+    "run_checker": run_checker,
+    "run_checker_self_check": run_checker_self_check,
     "read_range": read_range,
 }
 
@@ -600,6 +791,28 @@ TOOL_SCHEMAS = [
         ["name"],
     ),
     _schema(
+        "use_checker_template",
+        "安装 checker 模板，生成可编译的骨架 checker.cpp。"
+        "可选模板：\n"
+        "- construct_verify: 通用构造/方案验证\n"
+        "- any_of_answers: 多解但可推导正确答案条件\n"
+        "- graph_path: 路径/环/walk 验证\n"
+        "- permutation: 排列验证\n"
+        "- subset: 子集/选择验证\n"
+        "- sequence_property: 序列/数组性质验证\n"
+        "- point_set: 点集/几何构造验证\n"
+        "- matching: 匹配/配对方案验证\n"
+        "- tree_parent: 树父节点/边集验证\n"
+        "安装后应 read_file(\"checker.cpp\") 查看并用 write_checker 替换 TODO 部分。",
+        {
+            "name": {
+                "type": "string",
+                "description": "construct_verify | any_of_answers | graph_path | permutation | subset | sequence_property | point_set | matching | tree_parent",
+            },
+        },
+        ["name"],
+    ),
+    _schema(
         "run_gen",
         "运行编译好的 gen：`gen --seed N --type T --index i --count C`。返回生成的输入文本。",
         {
@@ -627,6 +840,26 @@ TOOL_SCHEMAS = [
         "run_self_check",
         "强化自检：对每个 edge_type + random 最小/最大档（逼近规模上界）+ 多测相关边界，"
         "执行 gen→validate→std。全部通过才返回 OK；失败返回 ERROR 详情。finish 前必须调用且通过。",
+        {},
+        [],
+    ),
+    _schema(
+        "run_checker",
+        "运行编译好的 checker，用一组 (input, output, answer) 测试其判定行为。"
+        "input_text 对应 inf，output_text 对应 ouf，answer_text 对应 ans。"
+        "返回退出码与 stdout/stderr 摘要。",
+        {
+            "input_text": {"type": "string", "description": "题目输入内容（inf）"},
+            "output_text": {"type": "string", "description": "选手输出内容（ouf）"},
+            "answer_text": {"type": "string", "description": "标程答案内容（ans）"},
+        },
+        ["input_text", "output_text", "answer_text"],
+    ),
+    _schema(
+        "run_checker_self_check",
+        "用当前 gen + std + checker 做 reactive 自检："
+        "正例（标程输出当 ouf/ans）必须返回 _ok；负例（扰动输出当 ouf）必须返回 _wa 或 _pe。"
+        "全部通过才返回 OK；失败返回 ERROR 详情。write_checker 后建议调用。",
         {},
         [],
     ),

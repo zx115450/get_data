@@ -1,12 +1,16 @@
 """单个任务的执行：准备 std -> 跑 Agent 写 gen/validate -> pipeline 出数据 -> 打包 zip。"""
+import hashlib
 import json
 import os
+import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agent import tools
+from agent import prompts, tools
 from agent.core import run as agent_run
 from agent.tools import BUILTIN_CHECKERS, use_builtin_checker
 from pipeline import gen_data, pack
@@ -21,6 +25,116 @@ from server.text_agent import simplify_text
 from utils.markup import to_plain_for_llm
 
 JOBS_DIR = Path("jobs")
+
+
+# 阶段工具集：按阶段只暴露该阶段允许的工具，避免模型分心。
+RANGE_TOOL_SCHEMAS = [
+    s for s in tools.TOOL_SCHEMAS
+    if s["function"]["name"] in {"write_range", "read_file", "read_range", "finish"}
+]
+GEN_TOOL_SCHEMAS = [
+    s for s in tools.TOOL_SCHEMAS
+    if s["function"]["name"] not in {"write_checker", "use_builtin_checker"}
+]
+FIXER_TOOL_SCHEMAS = [
+    s for s in tools.TOOL_SCHEMAS
+    if s["function"]["name"] in {
+        "read_file", "write_gen", "run_gen", "run_validate", "run_std",
+        "run_self_check", "finish",
+    }
+]
+CHECKER_TOOL_SCHEMAS = [
+    s for s in tools.TOOL_SCHEMAS
+    if s["function"]["name"] in {
+        "write_checker", "use_checker_template", "read_file",
+        "run_checker", "run_checker_self_check", "finish",
+    }
+]
+REVIEWER_TOOL_SCHEMAS = [
+    s for s in tools.TOOL_SCHEMAS
+    if s["function"]["name"] in {
+        "read_file", "read_range", "run_gen", "run_validate", "run_std", "finish",
+    }
+]
+
+
+def _build_checker_task(
+    stmt_plain: str,
+    range_plain: str,
+    output_plain: str,
+    std_for_prompt: str,
+    range_json: dict,
+    failure_context: str = "",
+) -> str:
+    """为自定义 checker 构造第二轮 Agent 的 task。"""
+    parts = [
+        "请为本题写一个 checker.cpp（Special Judge）。",
+        f"\n【题面】\n{stmt_plain}",
+        f"\n【数据范围】\n{range_plain}",
+    ]
+    if output_plain.strip():
+        parts.append(f"\n【输出描述 / 判定规则】\n{output_plain}")
+    if std_for_prompt.strip():
+        parts.append(f"\n【标程源码片段】\n{std_for_prompt}")
+    parts.append(
+        "\n【已有产物】\n"
+        f"- range.json: {json.dumps(range_json, ensure_ascii=False, indent=2)}\n"
+        "- 工作目录已有 gen.cpp / validator.cpp / 标程，可用 read_file 查看。\n"
+    )
+    if failure_context:
+        parts.append(f"\n{failure_context}\n")
+    parts.append(
+        "\n要求：\n"
+        "1. 优先用 use_checker_template(\"construct_verify\") 安装骨架，再 read_file(\"checker.cpp\") 查看 TODO 位置。\n"
+        "2. 用 write_checker 写完整 checker.cpp，必须 #include \"testlib.h\" 并调用 registerTestlibCmd(argc, argv)。\n"
+        "3. 按 (inf, ouf, ans) 顺序读取文件并判定；多解时检查选手输出的合法性，不要直接字符串全等。\n"
+        "4. 编译成功后必须调用 run_checker_self_check()：正例（标程输出）必须 _ok，负例（扰动输出）必须 _wa/_pe。\n"
+        "5. run_checker_self_check() 返回 OK 后调 finish。"
+    )
+    return "\n".join(parts)
+
+
+def _build_reviewer_task(
+    stmt_plain: str,
+    range_plain: str,
+    range_json: dict,
+    gen_agent_summary: str,
+) -> str:
+    """为 Reviewer Agent 构造 task。"""
+    parts = [
+        "请审查当前工作目录的 gen.cpp。",
+        f"\n【题面】\n{stmt_plain}",
+        f"\n【数据范围】\n{range_plain}",
+        f"\n【range.json】\n{json.dumps(range_json, ensure_ascii=False, indent=2)}",
+        f"\n【Gen Agent 执行摘要】\n{gen_agent_summary}",
+        "\n工作目录已有 gen.cpp / validator.cpp / range.json / 标程。"
+        "请用 read_file 和 run_gen / run_validate / run_std 进行审查，"
+        "最后调 finish(summary)，summary 必须是结构化审查报告。",
+    ]
+    return "\n".join(parts)
+
+
+def _build_fixer_task(
+    stmt_plain: str,
+    range_plain: str,
+    range_json: dict,
+    review_report: str,
+    gen_agent_summary: str,
+) -> str:
+    """为 Fixer Agent 构造 task。"""
+    parts = [
+        "请根据 Reviewer 报告修复当前工作目录的 gen.cpp。",
+        f"\n【题面】\n{stmt_plain}",
+        f"\n【数据范围】\n{range_plain}",
+        f"\n【range.json】\n{json.dumps(range_json, ensure_ascii=False, indent=2)}",
+        f"\n【Gen Agent 执行摘要】\n{gen_agent_summary}",
+        f"\n【Reviewer 报告】\n{review_report}",
+        "\n工作目录已有 gen.cpp / validator.cpp / review_report.txt。"
+        "请优先 read_file(\"review_report.txt\") 和 read_file(\"gen.cpp\")，"
+        "按 MUST_FIX 问题修复，用 write_gen 写完整源码并编译，"
+        "最后调 run_self_check() 自检，通过后 finish。",
+    ]
+    return "\n".join(parts)
 
 
 def _compile_std(job_dir: Path, std_code: str, lang: str) -> str:
@@ -44,21 +158,96 @@ def _compile_std(job_dir: Path, std_code: str, lang: str) -> str:
     raise ValueError(f"不支持的标程语言: {lang}")
 
 
-def run_job(job: job_store.Job, std_code: str, lang: str,
-            problem_statement: str, data_range_desc: str,
-            problem_type: str = "",
-            output_desc: str = "",
-            range_json=None,
-            special_judge: bool = False,
-            builtin_checker: str = "") -> None:
-    """在 worker 线程里跑完整流程。
+def _text_hash(text: str) -> str:
+    """返回文本的 sha256 摘要。"""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-    range_json: 若 GUI 已提供，则跳过 Agent 写 range 的步骤，直接用给定方案写 gen/validator。
-    special_judge: 若 True，则额外要求 Agent 产出 checker（自定义或内置）并打包 checker.zip。
-    builtin_checker: 可选 lcmp/wcmp/rcmp4/rcmp6/rcmp9/yesno；
-      - special_judge=True 时作为默认推荐（Agent 可用 use_builtin_checker）；
-      - special_judge=False 时若指定，任务结束后自动安装并打包该内置 checker。
-    """
+
+def _detect_artifacts(job_dir: Path) -> list[str]:
+    """列出 job_dir 下可复用的产物文件名。"""
+    candidates = [
+        "range.json",
+        "gen.cpp", "gen.py",
+        "validator.cpp", "validate.py",
+        "checker.cpp",
+    ]
+    found = []
+    for name in candidates:
+        if (job_dir / name).is_file():
+            found.append(name)
+    if os.name == "nt":
+        for name in ("gen.exe", "validator.exe", "checker.exe"):
+            if (job_dir / name).is_file():
+                found.append(name)
+    return found
+
+
+def _copy_resume_artifacts(parent_dir: Path, job_dir: Path) -> list[str]:
+    """把父任务的可复用产物拷到当前目录。返回实际拷贝的列表。"""
+    copied = []
+    for name in _detect_artifacts(parent_dir):
+        src = parent_dir / name
+        dst = job_dir / name
+        shutil.copy2(src, dst)
+        copied.append(name)
+    # 同时把简化题面带过来，避免重复 LLM 调用
+    if (parent_dir / "statement_simplified.txt").is_file():
+        shutil.copy2(
+            parent_dir / "statement_simplified.txt",
+            job_dir / "statement_simplified.txt",
+        )
+        copied.append("statement_simplified.txt")
+    return copied
+
+
+def _load_parent_failure_context(parent_dir: Path) -> dict[str, Any] | None:
+    """读取父任务的 failure_context.json，若不存在或非法则返回 None。"""
+    p = parent_dir / "failure_context.json"
+    if not p.is_file():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or data.get("v") != 1:
+            return None
+        return data
+    except Exception:
+        return None
+
+
+def _build_resume_failure_block(resume_info: dict[str, Any]) -> str:
+    """把失败上下文格式化成一段 prompt 追加语。"""
+    stage = resume_info.get("stage", "unknown")
+    error_summary = resume_info.get("error_summary", "")
+    parent_id = resume_info.get("parent_job_id", "")
+    return (
+        "\n\n【从上次失败续跑】\n"
+        f"- 父任务: {parent_id}\n"
+        f"- 失败阶段: {stage}\n"
+        f"- 错误摘要: {error_summary}\n"
+        "- 工作目录已复制上次产物，请 read_file 查看；"
+        "请针对性修复导致失败的问题，不要从零重写。\n"
+    )
+
+
+def has_gen_val_at_resume(job_dir: Path) -> bool:
+    """检查当前目录是否已有 gen + validator 可执行产物。"""
+    _exe = lambda b: b + (".exe" if os.name == "nt" else "")
+    has_gen = (job_dir / _exe("gen")).exists() or (job_dir / "gen.py").exists() or (job_dir / "gen.cpp").exists()
+    has_val = (job_dir / _exe("validator")).exists() or (job_dir / "validate.py").exists() or (job_dir / "validator.cpp").exists()
+    return has_gen and has_val
+
+
+def _run_job_impl(
+    job: job_store.Job, std_code: str, lang: str,
+    problem_statement: str, data_range_desc: str,
+    problem_type: str,
+    output_desc: str,
+    range_json,
+    special_judge: bool,
+    builtin_checker: str,
+    resume_context: dict[str, Any] | None,
+) -> None:
+    """run_job 的实际实现。"""
     builtin_checker = (builtin_checker or "").strip().lower()
     if builtin_checker and builtin_checker not in BUILTIN_CHECKERS:
         raise ValueError(
@@ -71,6 +260,45 @@ def run_job(job: job_store.Job, std_code: str, lang: str,
     zip_path = job_dir / "data.zip"
     sources_zip_path = job_dir / "sources.zip"
     checker_zip_path = job_dir / "checker.zip"
+
+    # 1.0) 失败续跑：先尝试同题校验与产物复用
+    resume_info: dict[str, Any] | None = None
+    resume_failure_block = ""
+    if resume_context:
+        parent_id = (resume_context.get("parent_job_id") or "").strip()
+        parent_dir = JOBS_DIR / parent_id if parent_id else None
+        parent_ctx = _load_parent_failure_context(parent_dir) if parent_dir else None
+        if parent_ctx is None:
+            job_store.add_progress(
+                job,
+                f"【续跑】提供的父任务 {parent_id!r} 无有效 failure_context，按新任务执行。"
+            )
+        else:
+            # 同题校验：题面、标程、语言一致才算同题
+            stmt_hash = _text_hash(problem_statement or "")
+            std_hash = _text_hash(std_code or "")
+            parent_stmt_hash = parent_ctx.get("statement_hash", "")
+            parent_std_hash = parent_ctx.get("std_hash", "")
+            parent_lang = parent_ctx.get("lang", "")
+            if stmt_hash != parent_stmt_hash or std_hash != parent_std_hash or lang != parent_lang:
+                job_store.add_progress(
+                    job,
+                    "【续跑】父任务与当前提交不是同一题（题面/标程/lang 不同），按新任务执行。"
+                )
+            elif parent_dir and not parent_dir.is_dir():
+                job_store.add_progress(
+                    job,
+                    f"【续跑】父任务目录 {parent_dir} 不存在，按新任务执行。"
+                )
+            else:
+                copied = _copy_resume_artifacts(parent_dir, job_dir)
+                job_store.add_progress(
+                    job,
+                    f"【续跑】同题校验通过，复制 {len(copied)} 项产物: {copied}"
+                )
+                resume_info = dict(parent_ctx)
+                resume_info["parent_job_id"] = parent_id
+                resume_failure_block = _build_resume_failure_block(resume_info)
 
     def on_event(step, name, args, preview):
         brief = {}
@@ -122,15 +350,13 @@ def run_job(job: job_store.Job, std_code: str, lang: str,
 
     tools.set_context(str(job_dir), std_cmd)
     eff_type = detected_type(problem_type, stmt_plain, range_plain, std_code)
-    # 树/图/几何/有权结构题：预先拷贝 generator.h，避免首次 write_gen 才拷贝
-    if eff_type in (
-        "tree", "graph", "geometry", "weighted_tree", "weighted_graph",
-    ):
-        try:
-            tools.prewarm_generator_headers()
-            job_store.add_progress(job, "已预置 generator.h（树/图/几何类题）")
-        except Exception as e:
-            job_store.add_progress(job, f"预置 generator.h 失败（可忽略）: {e}")
+    # 预先拷贝 generator.h。generator.h 已内嵌 testlib.h，且封装了数组/排列/树/图/几何等便捷 API。
+    # 对任意题型都预置，让大模型写 gen 时可以直接使用 generator.h 中的 rnd / Tree / Graph / Sequence 等工具。
+    try:
+        tools.prewarm_generator_headers()
+        job_store.add_progress(job, "已预置 generator.h（含 ACM-generator 封装）")
+    except Exception as e:
+        job_store.add_progress(job, f"预置 generator.h 失败（可忽略）: {e}")
     job_store.add_progress(
         job,
         f"题型: {eff_type}" + ("" if problem_type else " (自动检测)")
@@ -195,35 +421,6 @@ def run_job(job: job_store.Job, std_code: str, lang: str,
             f"以上原始文本可能与简化版有差异，若冲突请优先以原始文本为准。"
         )
 
-    special_judge_block = ""
-    if special_judge:
-        spj_output_hint = (
-            f"\n\n【输出描述参考】\n{output_plain}\n"
-            if output_plain.strip()
-            else ""
-        )
-        builtin_hint = ""
-        if builtin_checker:
-            builtin_hint = (
-                f"用户指定优先使用内置 checker「{builtin_checker}」："
-                f"请调用 use_builtin_checker(\"{builtin_checker}\")，不要手写 checker.cpp，"
-                f"除非该比较器无法满足题意。\n"
-            )
-        else:
-            builtin_hint = (
-                "若答案唯一且只需按行/词/浮点/YesNo 比较，优先 use_builtin_checker"
-                "（lcmp/wcmp/rcmp4/rcmp6/rcmp9/yesno），不要手写；"
-                "仅当答案不唯一或需额外判定时才 write_checker。\n"
-            )
-        special_judge_block = (
-            f"\n\n【本题需要 Checker】\n"
-            f"{builtin_hint}"
-            f"自定义 checker.cpp 必须 #include \"testlib.h\"，main 里调用 registerTestlibCmd(argc, argv)，"
-            f"按 (inf, ouf, ans) 顺序读取文件并判定。"
-            f"{spj_output_hint}"
-            f"写完后做 gen→validate→std 自检；若写了自定义 checker，可用标程输出作为 ans 验证能通过。"
-        )
-
     # 扫题面关键词，命中特殊结构约束（哈密顿/欧拉/DAG/连通/二分图等）时追加针对性提醒。
     # 这种约束往往是标程算法的隐含假设，生成器不保证就会导致「格式合法但语义错误」。
     struct_hint_block = scan_structural_hints(stmt_plain) or scan_structural_hints(problem_statement or "")
@@ -271,7 +468,7 @@ def run_job(job: job_store.Job, std_code: str, lang: str,
             f"{range_block}"
             f"{struct_hint_block}"
             f"{few_shot_block}"
-            f"{special_judge_block}"
+            f"{resume_failure_block}"
         )
         job_store.add_progress(job, "【阶段 2/5】启动 Agent（跳过 write_range，写 gen/validator）")
     else:
@@ -289,12 +486,59 @@ def run_job(job: job_store.Job, std_code: str, lang: str,
             f"对每种 edge_type 做 run_gen→run_validate→run_std 三连自检，全过后调 finish。"
             f"{struct_hint_block}"
             f"{few_shot_block}"
-            f"{special_judge_block}"
+            f"{resume_failure_block}"
         )
         job_store.add_progress(job, "【阶段 2/5】启动 Agent（写 range.json / gen.cpp / validator.cpp）")
 
-    summary = agent_run(task, max_steps=40, verbose=False, on_event=on_event)
-    job_store.add_progress(job, f"Agent 结束: {summary}")
+    # 按阶段切换 System Prompt：先写 range 的短 prompt，再切 gen/validator 的完整 prompt。
+    # 若 GUI 已给定 range，则直接进入 gen 阶段。
+    full_prompt = prompts.build_full_prompt(
+        eff_type,
+        range_json=range_json,
+        problem_statement=stmt_plain,
+        std_code=std_code,
+    )
+    # 续跑分支：同题复用后，如果已有 range.json，直接进 gen 阶段；
+    # 若父任务失败在 checker 阶段，则跳过 gen 阶段只跑 checker。
+    resume_stage = resume_info.get("stage") if resume_info else None
+    if resume_stage == "checker" and (job_dir / "range.json").is_file() and has_gen_val_at_resume(job_dir):
+        stage_prompts = {}
+        stage_tool_schemas = {}
+        job_store.add_progress(job, "【续跑】父任务 checker 阶段失败，跳过 gen/validator Agent")
+    elif resume_info and (job_dir / "range.json").is_file():
+        stage_prompts = {"gen": full_prompt}
+        stage_tool_schemas = {"gen": GEN_TOOL_SCHEMAS}
+        job_store.add_progress(job, "【续跑】已有 range.json，直接进入 gen/validator 修复阶段")
+    elif preset is not None:
+        stage_prompts = {"gen": full_prompt}
+    else:
+        stage_prompts = {
+            "range": prompts.build_range_prompt(),
+            "gen": full_prompt,
+        }
+    stage_tool_schemas = {
+        "range": RANGE_TOOL_SCHEMAS,
+        "gen": GEN_TOOL_SCHEMAS,
+    }
+    job_store.add_progress(
+        job,
+        f"Agent prompt stages: {list(stage_prompts.keys())} | type={eff_type}"
+    )
+
+    # 续跑 checker 阶段：不需要跑 gen Agent，直接空过
+    if resume_stage == "checker" and not stage_prompts:
+        summary = "checker 阶段续跑：跳过 gen/validator Agent"
+        job_store.add_progress(job, f"Agent 结束: {summary}")
+    else:
+        summary = agent_run(
+            task,
+            max_steps=40,
+            verbose=False,
+            on_event=on_event,
+            stage_prompts=stage_prompts,
+            stage_tool_schemas=stage_tool_schemas,
+        )
+        job_store.add_progress(job, f"Agent 结束: {summary}")
 
     # 把 Agent 的进度日志落盘，方便事后排查（服务器重启后内存进度会丢）。
     # 尤其是当 Agent 没产出 gen/validator 时，这份日志是定位根因的唯一线索。
@@ -361,18 +605,83 @@ def run_job(job: job_store.Job, std_code: str, lang: str,
             f"40 步预算用尽、或 write_gen/write_validate 编译失败循环。"
             f"完整日志见 {job_dir / 'agent_log.txt'}。"
         )
+
+    # 3.5) Reviewer Agent：对 gen.cpp 做性能与正确性审查
+    job_store.add_progress(job, "【阶段 3.5/5】Reviewer 审查 gen.cpp")
+    try:
+        review_task = _build_reviewer_task(
+            stmt_plain, range_plain, produced, summary
+        )
+        review_summary = agent_run(
+            review_task,
+            max_steps=15,
+            verbose=False,
+            on_event=on_event,
+            system_prompt=prompts.build_reviewer_prompt(),
+            tool_schemas=REVIEWER_TOOL_SCHEMAS,
+        )
+        job_store.add_progress(job, f"Reviewer 结束: {review_summary}")
+        try:
+            (job_dir / "review_report.txt").write_text(
+                str(review_summary), encoding="utf-8"
+            )
+        except Exception as e:
+            job_store.add_progress(job, f"review_report.txt 写盘失败（非致命）: {type(e).__name__}: {e}")
+
+        # 解析报告：有 MUST_FIX 时触发 Fixer Agent 自动修复
+        has_must_fix, issue_summary = _extract_review_issues(review_summary)
+        if has_must_fix and (job_dir / "gen.cpp").is_file():
+            job_store.add_progress(job, f"Reviewer 发现 MUST_FIX，启动 Fixer Agent: {issue_summary[:200]}")
+            try:
+                fixer_task = _build_fixer_task(
+                    stmt_plain, range_plain, produced, review_summary, summary
+                )
+                fixer_summary = agent_run(
+                    fixer_task,
+                    max_steps=15,
+                    verbose=False,
+                    on_event=on_event,
+                    system_prompt=prompts.build_fixer_prompt(),
+                    tool_schemas=FIXER_TOOL_SCHEMAS,
+                )
+                job_store.add_progress(job, f"Fixer 结束: {fixer_summary}")
+                # 刷新产物存在性（Fixer 可能替换了 gen）
+                has_gen = (job_dir / _exe("gen")).exists() or (job_dir / "gen.py").exists() or (job_dir / "gen.cpp").exists()
+                if not has_gen:
+                    job_store.add_progress(job, "Fixer Agent 未能保留 gen.cpp，继续使用原生成器")
+            except Exception as e:
+                job_store.add_progress(job, f"Fixer 调用失败（非致命）: {type(e).__name__}: {e}")
+    except Exception as e:
+        job_store.add_progress(job, f"Reviewer 调用失败（非致命）: {type(e).__name__}: {e}")
+
     if special_judge:
-        has_checker = (job_dir / _exe("checker")).exists() or (job_dir / "checker.cpp").exists()
-        if not has_checker and builtin_checker:
-            # Agent 忘了装：用用户指定的内置 checker 兜底
+        job_store.add_progress(job, "【阶段 3.5/5】生成 checker")
+        if builtin_checker:
+            # 指定内置 checker：直接安装，不经过 LLM
             tools.set_context(str(job_dir), std_cmd)
             msg = use_builtin_checker(builtin_checker)
-            job_store.add_progress(job, f"自动安装内置 checker: {msg}")
-            has_checker = (job_dir / _exe("checker")).exists() or (job_dir / "checker.cpp").exists()
+            job_store.add_progress(job, f"安装内置 checker: {msg}")
+        else:
+            # 自定义 checker：单独开一轮 Agent 只写 checker
+            checker_task = _build_checker_task(
+                stmt_plain, range_plain, output_plain, std_for_prompt, produced,
+                failure_context=resume_failure_block,
+            )
+            checker_summary = agent_run(
+                checker_task,
+                max_steps=25,
+                verbose=False,
+                on_event=on_event,
+                system_prompt=prompts.build_checker_prompt(),
+                tool_schemas=CHECKER_TOOL_SCHEMAS,
+            )
+            job_store.add_progress(job, f"Checker Agent 结束: {checker_summary}")
+
+        has_checker = (job_dir / _exe("checker")).exists() or (job_dir / "checker.cpp").exists()
         if not has_checker:
             raise RuntimeError(
-                "已开启 special judge，但 Agent 没有产出 checker"
-                "（可用 use_builtin_checker 或 write_checker）"
+                "已开启 special judge，但 checker 生成失败"
+                "（未指定内置 checker，且自定义 checker 未能产出）"
             )
         job_store.add_progress(job, "checker 产物 OK")
 
@@ -429,16 +738,116 @@ def run_job(job: job_store.Job, std_code: str, lang: str,
     except Exception as e:
         job_store.add_progress(job, f"RAG 语料库更新失败（非致命）: {type(e).__name__}: {e}")
 
-    if special_judge:
-        job_store.add_progress(job, "打包 special judge（checker.zip）")
-        pack_checker(str(job_dir), str(checker_zip_path))
-        job.checker_zip_path = str(checker_zip_path)
-        job_store.add_progress(job, f"checker 打包完成: {checker_zip_path}")
-    elif builtin_checker:
-        # 未开 SPJ，但用户要求附带内置比较器（上传 OJ 时可用）
-        tools.set_context(str(job_dir), std_cmd)
-        msg = use_builtin_checker(builtin_checker)
-        job_store.add_progress(job, f"安装内置 checker: {msg}")
-        pack_checker(str(job_dir), str(checker_zip_path))
-        job.checker_zip_path = str(checker_zip_path)
-        job_store.add_progress(job, f"内置 checker 打包完成: {checker_zip_path}")
+
+def _infer_failure_stage(progress: list[str]) -> str:
+    """根据进度日志推断失败阶段。"""
+    for msg in reversed(progress):
+        if "阶段 4/5" in msg or "批量生成" in msg:
+            return "batch_generate"
+        if "阶段 3.5/5" in msg or "生成 checker" in msg:
+            return "checker"
+        if "阶段 3/5" in msg or "校验产物" in msg:
+            return "validate"
+        if "阶段 2/5" in msg or "启动 Agent" in msg:
+            return "agent"
+        if "阶段 1/5" in msg or "准备标程" in msg:
+            return "std_compile"
+    return "unknown"
+
+
+def _extract_review_issues(review_summary: str) -> tuple[bool, str]:
+    """解析 Reviewer 报告，返回 (是否有 MUST_FIX, 问题摘要)。"""
+    text = (review_summary or "").lower()
+    has_must_fix = "must_fix" in text or "must fix" in text or "必须修" in text
+    lines = [ln.strip() for ln in (review_summary or "").splitlines() if ln.strip()]
+    issue_lines = [ln for ln in lines if any(k in ln.lower() for k in ("must_fix", "must fix", "should_fix", "should fix", "严重", "超时", "性能问题"))]
+    summary = "\n".join(issue_lines[:10]) or ("MUST_FIX" if has_must_fix else "")
+    return has_must_fix, summary
+
+
+def _write_failure_context(
+    job_dir: Path,
+    job_id: str,
+    stage: str,
+    error: str,
+    statement: str,
+    std_code: str,
+    lang: str,
+    range_file: Path | None,
+    review_report: str = "",
+) -> None:
+    """失败时把可携带的上下文写入 failure_context.json。"""
+    artifacts = _detect_artifacts(job_dir)
+    ctx = {
+        "v": 1,
+        "parent_job_id": job_id,
+        "stage": stage,
+        "statement_hash": _text_hash(statement or ""),
+        "std_hash": _text_hash(std_code or ""),
+        "lang": lang,
+        "range_hash": "",
+        "artifacts": artifacts,
+        "error_summary": error[:1000],
+        "review_report": review_report[:2000],
+        "created_at": datetime.now().isoformat(),
+    }
+    if range_file and range_file.is_file():
+        try:
+            ctx["range_hash"] = _text_hash(range_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    try:
+        (job_dir / "failure_context.json").write_text(
+            json.dumps(ctx, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+
+def run_job(job: job_store.Job, std_code: str, lang: str,
+            problem_statement: str, data_range_desc: str,
+            problem_type: str = "",
+            output_desc: str = "",
+            range_json=None,
+            special_judge: bool = False,
+            builtin_checker: str = "",
+            resume_context: dict[str, Any] | None = None) -> None:
+    """在 worker 线程里跑完整流程。
+
+    range_json: 若 GUI 已提供，则跳过 Agent 写 range 的步骤，直接用给定方案写 gen/validator。
+    special_judge: 若 True，则额外要求 Agent 产出 checker（自定义或内置）并打包 checker.zip。
+    builtin_checker: 可选 lcmp/wcmp/rcmp4/rcmp6/rcmp9/yesno；
+      - special_judge=True 时作为默认推荐（Agent 可用 use_builtin_checker）；
+      - special_judge=False 时若指定，任务结束后自动安装并打包该内置 checker。
+    resume_context: 失败续跑上下文。若校验通过且同题，会复制父任务产物并注入失败摘要。
+    """
+    job_dir = JOBS_DIR / job.id
+    range_file = job_dir / "range.json"
+    try:
+        _run_job_impl(
+            job, std_code, lang,
+            problem_statement, data_range_desc,
+            problem_type,
+            output_desc,
+            range_json,
+            special_judge,
+            builtin_checker,
+            resume_context,
+        )
+    except Exception as e:
+        stage = _infer_failure_stage(list(job.progress))
+        review_report = ""
+        try:
+            p = job_dir / "review_report.txt"
+            if p.is_file():
+                review_report = p.read_text(encoding="utf-8")
+        except Exception:
+            pass
+        _write_failure_context(
+            job_dir, job.id, stage, f"{type(e).__name__}: {e}",
+            problem_statement, std_code, lang, range_file,
+            review_report=review_report,
+        )
+        raise
+
+
