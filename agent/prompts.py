@@ -127,12 +127,14 @@ gen 单次执行必须在 5 秒内输出完毕（含 n、m 取到上界 2e5/4e5 
 
 BASE_GEN_RULES = """gen.cpp 必须满足（testlib / ACM-generator 写法）：
   - #include "testlib.h" 或 #include "generator.h"（后者已含 testlib，并额外提供数组/排列/树/图/几何便捷 API），main 里第一行 registerGen(argc, argv, 1)
-  - 用 opt<int>("seed") 取种子，opt<string>("type","random") 取类型；并读取 opt<int>("index",0)/opt<int>("count",15) 做规模分层
+  - 用 opt<int>("seed") 取种子，opt<string>("type","random") 取类型；并读取 opt<int>("index",0)/opt<int>("count",15) 做规模分层。这三个参数由框架传入且必须被解析，漏掉任何一个 testlib 都会报 `FAIL Opts: unused key 'xxx'` 并退出。
   - --type 取值：random（默认分支）+ range.json edge_cases 里的每个名字
   - 用 rnd.next(l,r)/rnd.perm 或 generator::all 的 API 生成，保证可复现
   - 只向 stdout 打印测例（printf/cout），调试信息走 stderr（fprintf(stderr,...)）
   - 禁止 std::shuffle(..., rnd)；打乱用 for+swap+rnd.next(0,i)
   - 未声明的标识符不要用（不要写 clock()/clamp 等除非自己实现或正确头文件）
+  - 【从 range.json 读取全部必要参数】写 gen.cpp 前务必 read_file("range.json")，读取 constraints 对象里的所有变量名（如 n、m、a、b、k 等）。每个变量名必须在 gen.cpp 中通过 opt<T>("name") 注册并用于生成本组数据；固定参数 index、count、type 也必须注册。若某个变量名在算法里不需要直接使用，也须用 opt<T>(...) 消费掉，避免 testlib 报 "unused key" 错误。
+  - 【禁止输出摘要占位符】调用 write_gen / write_validate / write_checker 时，content 必须是完整可编译的 C++ 源码。禁止输出 `__OMITTED_SOURCE__`、`已写入`、源码片段节选等对话压缩摘要。若需要查看上一版，先调 read_file("gen.cpp") 再重写完整内容。
 
 ACM-generator（generator.h）常用速查（using namespace generator::all）：
   - 树：unweight::Tree t(n); t.gen(); cout << t << endl;            // 默认输出 n 与边

@@ -180,6 +180,18 @@ def submit(req: JobRequest):
     return {"job_id": job.id}
 
 
+@app.post("/jobs/{jid}/cancel")
+def cancel(jid: str):
+    """请求取消正在运行的任务。worker 会优雅结束并写入 failure_context。"""
+    job = job_store.get_job(jid)
+    if not job:
+        raise HTTPException(404, "job not found")
+    ok = job_store.request_cancel(job)
+    if not ok:
+        raise HTTPException(409, f"任务不在可取消状态，当前状态: {job.status.value}")
+    return {"ok": True, "status": job.status.value}
+
+
 @app.get("/jobs/{jid}")
 def status(jid: str):
     job = job_store.get_job(jid)

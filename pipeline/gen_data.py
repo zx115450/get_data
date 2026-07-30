@@ -135,8 +135,13 @@ def pick_type(i: int, count: int, edge_cases: list) -> str:
     return "random"
 
 
-def generate(range_json: dict, work_dir: str, out_dir: str, verbose: bool = True) -> dict:
-    """按 range.json 批量生成测例，返回统计信息。"""
+def generate(range_json: dict, work_dir: str, out_dir: str, verbose: bool = True,
+             reuse_existing: bool = True) -> dict:
+    """按 range.json 批量生成测例，返回统计信息。
+
+    reuse_existing=True 时：若 out_dir 已有成对的 {i}.in/{i}.out，则跳过该组，
+    只补缺失组。这样父任务里已通过 gen→validate→std 的合法测例可以复用。
+    """
     range_json = normalize_range_json(dict(range_json))  # 拷贝后再洗，避免改调用方
     errs = validate_range_json(range_json)
     if errs:
@@ -159,8 +164,18 @@ def generate(range_json: dict, work_dir: str, out_dir: str, verbose: bool = True
     if verbose and mem_mb:
         print(f"memory_limit_mb={mem_mb}（作用于 gen / validator / std）")
 
-    ok = 0
+    # 已存在的成对测例（1-based）可直接复用
+    existing_pairs: set[int] = set()
+    if reuse_existing:
+        for i in range(1, count + 1):
+            if (out / f"{i}.in").is_file() and (out / f"{i}.out").is_file():
+                existing_pairs.add(i)
+                if verbose:
+                    print(f"[{i}/{count}] REUSE existing .in/.out")
+
+    ok = len(existing_pairs)
     bad = 0
+    reused = len(existing_pairs)
     t0 = time.perf_counter()
     max_retries = 3  # 同类型失败后最多重试几次
 
@@ -244,18 +259,20 @@ def generate(range_json: dict, work_dir: str, out_dir: str, verbose: bool = True
 
         return (i, False, "", "", "\n".join(error_log))
 
-    # 并行生成，默认最多 8 个并发，避免外部标程互相抢 CPU
-    max_workers = min(8, os.cpu_count() or 1, count)
+    # 只生成缺失组
+    todo = [i for i in range(count) if (i + 1) not in existing_pairs]
     results = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {}
-        for i in range(count):
-            typ = pick_type(i, count, edge_cases)
-            # 降级类型：优先回退到 random，再尝试前几个 edge_case
-            fallback = ["random"] + [e for e in edge_cases[:3] if e != typ]
-            futures[executor.submit(_gen_one, i, typ, fallback)] = i
-        for fut in concurrent.futures.as_completed(futures):
-            results.append(fut.result())
+    if todo:
+        max_workers = min(8, os.cpu_count() or 1, len(todo))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {}
+            for i in todo:
+                typ = pick_type(i, count, edge_cases)
+                # 降级类型：优先回退到 random，再尝试前几个 edge_case
+                fallback = ["random"] + [e for e in edge_cases[:3] if e != typ]
+                futures[executor.submit(_gen_one, i, typ, fallback)] = i
+            for fut in concurrent.futures.as_completed(futures):
+                results.append(fut.result())
 
     # 按索引顺序落盘，保证 .in/.out 文件名顺序稳定
     results.sort(key=lambda x: x[0])
@@ -274,6 +291,7 @@ def generate(range_json: dict, work_dir: str, out_dir: str, verbose: bool = True
         "count": count,
         "ok": ok,
         "bad": bad,
+        "reused": reused,
         "valid_rate": ok / count if count else 0,
         "elapsed_s": round(elapsed, 2),
         "failures": failures,

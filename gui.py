@@ -16,8 +16,10 @@ import tkinter as tk
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from tkinter import ttk, scrolledtext, filedialog, messagebox
+from tkinter import scrolledtext, filedialog, messagebox
 
+import ttkbootstrap as ttk
+from ttkbootstrap import ScrolledText
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -32,6 +34,9 @@ PROBLEM_TYPES = [
 ]
 LANGS = ["python", "cpp"]
 BUILTIN_CHECKER_OPTIONS = ["无", "lcmp", "wcmp", "rcmp4", "rcmp6", "rcmp9", "yesno"]
+
+# 使用 ttkbootstrap 主题，可选：darkly / flatly / litera / minty / pulse / superhero 等
+_DEFAULT_THEME = os.getenv("GUI_THEME", "flatly")
 
 
 def _pids_listening_on_port(port: int) -> set[int]:
@@ -107,83 +112,107 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title("ACM 出数据")
-        root.geometry("900x780")
-        root.minsize(720, 600)
+        root.geometry("1200x860")
+        root.minsize(960, 680)
 
-        # ---- 顶部：三块输入 ----
-        top = ttk.Frame(root)
-        top.pack(fill="both", expand=False, padx=8, pady=6)
+        # ---- 主工作区：左侧 Notebook 导航 + 右侧内容面板 ----
+        # 先创建主工作区，让它占据中间 expand 空间；控制面板将在主工作区之后创建并 pack 到 bottom
+        main = ttk.Frame(root)
+        main.pack(fill="both", expand=True, padx=8, pady=6)
+        main.columnconfigure(1, weight=1)
+        main.rowconfigure(0, weight=1)
 
-        nb = ttk.Notebook(top)
-        nb.pack(fill="both", expand=True)
+        # 左侧导航按钮
+        nav = ttk.Frame(main, padding=4, width=160)
+        nav.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        nav.grid_propagate(False)
+        ttk.Label(nav, text="导航", font=("Segoe UI", 10, "bold")).pack(pady=(0, 8))
+        self.nav_buttons = {}
+        self.nav_tabs = {}
+
+        # 右侧内容面板容器
+        content = ttk.Frame(main, padding=4)
+        content.grid(row=0, column=1, sticky="nsew")
+        content.rowconfigure(0, weight=1)
+        content.columnconfigure(0, weight=1)
+
+        def _build_tab(tab_name: str, tab_text: str) -> ttk.Frame:
+            """创建一个内容面板，并在左侧加一个导航按钮。"""
+            frame = ttk.Frame(content)
+            self.nav_tabs[tab_name] = frame
+
+            def switch():
+                self._show_tab(tab_name)
+
+            btn = ttk.Button(nav, text=tab_text, command=switch, bootstyle="outline-primary")
+            btn.pack(fill="x", pady=2)
+            self.nav_buttons[tab_name] = btn
+            return frame
+
+        self._current_tab = None
 
         # 1) 标程
-        tab_std = ttk.Frame(nb)
-        nb.add(tab_std, text="1. 标程 (std)")
+        tab_std = _build_tab("std", "1. 标程")
         bar = ttk.Frame(tab_std)
         bar.pack(fill="x", padx=4, pady=4)
         ttk.Label(bar, text="语言：").pack(side="left")
         self.lang = tk.StringVar(value="cpp")
-        ttk.OptionMenu(bar, self.lang, "cpp", *LANGS).pack(side="left", padx=4)
+        ttk.Combobox(bar, textvariable=self.lang, values=LANGS, width=8, state="readonly").pack(side="left", padx=4)
         ttk.Label(bar, text="题型：").pack(side="left", padx=(12, 0))
         self.ptype = tk.StringVar(value="自动")
-        ttk.OptionMenu(bar, self.ptype, "自动", *PROBLEM_TYPES).pack(side="left", padx=4)
-        ttk.Label(bar, text="（自动=按题面关键词选 few-shot）", foreground="#666").pack(side="left")
-        self.std_code = scrolledtext.ScrolledText(tab_std, height=12, font=("Consolas", 10), wrap="none")
+        ttk.Combobox(bar, textvariable=self.ptype, values=PROBLEM_TYPES, width=12, state="readonly").pack(side="left", padx=4)
+        ttk.Label(bar, text="（自动=按题面关键词选 few-shot）", bootstyle="secondary").pack(side="left")
+        self.std_code = ScrolledText(tab_std, height=16, font=("Consolas", 10), wrap="none", autohide=True)
         self.std_code.pack(fill="both", expand=True, padx=4, pady=(0, 4))
 
         # 2) 题面
-        tab_stmt = ttk.Frame(nb)
-        nb.add(tab_stmt, text="2. 题面")
+        tab_stmt = _build_tab("stmt", "2. 题面")
         tip2 = ttk.Frame(tab_stmt)
         tip2.pack(fill="x", padx=4, pady=2)
         ttk.Label(tip2, text="支持 Markdown / HTML / LaTeX；可先简化再出数据，或美化排版",
-                  foreground="#666").pack(side="left")
-        ttk.Button(tip2, text="美化",
+                  bootstyle="secondary").pack(side="left")
+        ttk.Button(tip2, text="美化", bootstyle="outline-info",
                    command=lambda: self.open_rewrite("beautify", "statement", self.statement)).pack(side="right", padx=2)
-        ttk.Button(tip2, text="简化",
+        ttk.Button(tip2, text="简化", bootstyle="outline-primary",
                    command=lambda: self.open_rewrite("simplify", "statement", self.statement)).pack(side="right", padx=2)
-        self.statement = scrolledtext.ScrolledText(tab_stmt, height=12, font=("Consolas", 10), wrap="word")
+        self.statement = ScrolledText(tab_stmt, height=16, font=("Consolas", 10), wrap="word", autohide=True)
         self.statement.pack(fill="both", expand=True, padx=4, pady=(0, 4))
 
         # 3) 输入描述
-        tab_range = ttk.Frame(nb)
-        nb.add(tab_range, text="3. 输入描述 / 数据范围")
+        tab_range = _build_tab("range", "3. 输入描述")
         tip3 = ttk.Frame(tab_range)
         tip3.pack(fill="x", padx=4, pady=2)
         ttk.Label(tip3, text="变量范围、边界；同样可简化 / 美化",
-                  foreground="#666").pack(side="left")
-        ttk.Button(tip3, text="美化",
+                  bootstyle="secondary").pack(side="left")
+        ttk.Button(tip3, text="美化", bootstyle="outline-info",
                    command=lambda: self.open_rewrite("beautify", "range", self.range_desc)).pack(side="right", padx=2)
-        ttk.Button(tip3, text="简化",
+        ttk.Button(tip3, text="简化", bootstyle="outline-primary",
                    command=lambda: self.open_rewrite("simplify", "range", self.range_desc)).pack(side="right", padx=2)
-        self.range_desc = scrolledtext.ScrolledText(tab_range, height=12, font=("Consolas", 10), wrap="word")
+        self.range_desc = ScrolledText(tab_range, height=16, font=("Consolas", 10), wrap="word", autohide=True)
         self.range_desc.pack(fill="both", expand=True, padx=4, pady=(0, 4))
 
         # 3.5) 输出描述
-        tab_output = ttk.Frame(nb)
-        nb.add(tab_output, text="3.5. 输出描述")
+        tab_output = _build_tab("output", "3.5. 输出描述")
         tip_output = ttk.Frame(tab_output)
         tip_output.pack(fill="x", padx=4, pady=2)
         ttk.Label(tip_output, text="输出格式、答案判定规则；Special Judge 时尤其重要",
-                  foreground="#666").pack(side="left")
-        ttk.Button(tip_output, text="美化",
+                  bootstyle="secondary").pack(side="left")
+        ttk.Button(tip_output, text="美化", bootstyle="outline-info",
                    command=lambda: self.open_rewrite("beautify", "output", self.output_desc)).pack(side="right", padx=2)
-        ttk.Button(tip_output, text="简化",
+        ttk.Button(tip_output, text="简化", bootstyle="outline-primary",
                    command=lambda: self.open_rewrite("simplify", "output", self.output_desc)).pack(side="right", padx=2)
-        self.output_desc = scrolledtext.ScrolledText(tab_output, height=12, font=("Consolas", 10), wrap="word")
+        self.output_desc = ScrolledText(tab_output, height=16, font=("Consolas", 10), wrap="word", autohide=True)
         self.output_desc.pack(fill="both", expand=True, padx=4, pady=(0, 4))
 
-        # 4) 数据方案 range（可视化，不直接甩 JSON）
-        tab_plan = ttk.Frame(nb)
-        nb.add(tab_plan, text="4. 数据方案")
+        # 4) 数据方案 range
+        tab_plan = _build_tab("plan", "4. 数据方案")
         tip4 = ttk.Frame(tab_plan)
         tip4.pack(fill="x", padx=4, pady=4)
         ttk.Label(tip4, text="先点「生成方案」用大模型只写 range；提交全流程时若已有方案则跳过写 range",
-                  foreground="#666").pack(side="left")
-        self.btn_propose = ttk.Button(tip4, text="用大模型生成方案", command=self.on_propose_range)
+                  bootstyle="secondary").pack(side="left")
+        self.btn_propose = ttk.Button(tip4, text="用大模型生成方案", bootstyle="success", command=self.on_propose_range)
         self.btn_propose.pack(side="right", padx=2)
-        ttk.Button(tip4, text="清空方案", command=self.clear_range_plan).pack(side="right", padx=2)
+        ttk.Button(tip4, text="清空方案", bootstyle="outline-secondary", command=self.clear_range_plan).pack(side="right", padx=2)
 
         plan_body = ttk.Frame(tab_plan)
         plan_body.pack(fill="both", expand=True, padx=4, pady=4)
@@ -195,12 +224,12 @@ class App:
         self.count_entry = ttk.Entry(row_c, textvariable=self.count_var, width=8)
         self.count_entry.pack(side="left", padx=6)
         self.plan_status = tk.StringVar(value="尚未生成方案 — 提交时将从「写 range」开始")
-        ttk.Label(row_c, textvariable=self.plan_status, foreground="#06c").pack(side="left", padx=12)
+        ttk.Label(row_c, textvariable=self.plan_status, bootstyle="info").pack(side="left", padx=12)
 
-        cons_frm = ttk.LabelFrame(plan_body, text="变量约束 constraints（变量 · 最小值 · 最大值）")
+        cons_frm = ttk.Labelframe(plan_body, text="变量约束 constraints")
         cons_frm.pack(fill="both", expand=True, pady=4)
         cols = ("name", "lo", "hi")
-        self.cons_tree = ttk.Treeview(cons_frm, columns=cols, show="headings", height=6)
+        self.cons_tree = ttk.Treeview(cons_frm, columns=cols, show="headings", height=6, bootstyle="info")
         self.cons_tree.heading("name", text="变量")
         self.cons_tree.heading("lo", text="最小值")
         self.cons_tree.heading("hi", text="最大值")
@@ -212,37 +241,37 @@ class App:
         cons_scroll.pack(side="right", fill="y")
         self.cons_tree.configure(yscrollcommand=cons_scroll.set)
 
-        edge_frm = ttk.LabelFrame(plan_body, text="边界类型 edge_cases（将作为 gen --type）")
+        edge_frm = ttk.Labelframe(plan_body, text="边界类型 edge_cases")
         edge_frm.pack(fill="both", expand=True, pady=4)
-        self.edge_list = tk.Listbox(edge_frm, height=5, font=("Consolas", 10))
+        self.edge_list = ttk.Treeview(edge_frm, height=5, show="tree", bootstyle="info")
         self.edge_list.pack(fill="both", expand=True, padx=4, pady=4)
 
-        self.range_data = None  # 当前方案 dict；None 表示未提供
+        self.range_data = None
 
         # 5) RAG 语料运营
-        tab_rag = ttk.Frame(nb)
-        nb.add(tab_rag, text="5. RAG 语料")
+        tab_rag = _build_tab("rag", "5. RAG 语料")
         tip_rag = ttk.Frame(tab_rag)
         tip_rag.pack(fill="x", padx=4, pady=4)
         ttk.Label(
             tip_rag,
             text="查看 / 禁用 / 删除范例；可合并 data/ 下别人贡献的 *.json",
-            foreground="#666",
+            bootstyle="secondary",
         ).pack(side="left")
-        ttk.Button(tip_rag, text="刷新列表", command=self.on_rag_refresh).pack(side="right", padx=2)
+        ttk.Button(tip_rag, text="刷新列表", bootstyle="outline-primary", command=self.on_rag_refresh).pack(side="right", padx=2)
 
         filt = ttk.Frame(tab_rag)
         filt.pack(fill="x", padx=4, pady=2)
         ttk.Label(filt, text="来源：").pack(side="left")
         self.rag_source = tk.StringVar(value="全部")
-        ttk.OptionMenu(filt, self.rag_source, "全部", "全部", "job", "template").pack(side="left", padx=4)
+        ttk.Combobox(filt, textvariable=self.rag_source, values=["全部", "job", "template"], width=8, state="readonly").pack(side="left", padx=4)
         ttk.Label(filt, text="题型：").pack(side="left", padx=(8, 0))
         self.rag_ptype = tk.StringVar(value="全部")
-        ttk.OptionMenu(
-            filt, self.rag_ptype, "全部",
-            "全部", "array", "tree", "graph", "string", "number_theory", "geometry",
-            "multi_test", "dp", "matrix", "range_query", "weighted_tree", "weighted_graph",
-            "interactive",
+        ttk.Combobox(
+            filt, textvariable=self.rag_ptype,
+            values=["全部", "array", "tree", "graph", "string", "number_theory", "geometry",
+                    "multi_test", "dp", "matrix", "range_query", "weighted_tree", "weighted_graph",
+                    "interactive"],
+            width=12, state="readonly",
         ).pack(side="left", padx=4)
         self.rag_show_disabled = tk.BooleanVar(value=True)
         ttk.Checkbutton(filt, text="显示已禁用", variable=self.rag_show_disabled).pack(side="left", padx=8)
@@ -253,7 +282,7 @@ class App:
         left = ttk.Frame(rag_body)
         left.pack(side="left", fill="both", expand=True)
         cols_rag = ("key", "source", "type", "rate", "disabled", "time")
-        self.rag_tree = ttk.Treeview(left, columns=cols_rag, show="headings", height=10)
+        self.rag_tree = ttk.Treeview(left, columns=cols_rag, show="headings", height=10, bootstyle="primary")
         self.rag_tree.heading("key", text="key")
         self.rag_tree.heading("source", text="来源")
         self.rag_tree.heading("type", text="题型")
@@ -275,71 +304,90 @@ class App:
         right = ttk.Frame(rag_body, width=280)
         right.pack(side="right", fill="both", padx=(6, 0))
         ttk.Label(right, text="摘要 / 内容预览", font=("Segoe UI", 9, "bold")).pack(anchor="w")
-        self.rag_preview = scrolledtext.ScrolledText(right, height=12, font=("Consolas", 9), wrap="word")
+        self.rag_preview = ScrolledText(right, height=12, font=("Consolas", 9), wrap="word", autohide=True)
         self.rag_preview.pack(fill="both", expand=True, pady=4)
         self.rag_preview.configure(state="disabled")
 
         rag_ops = ttk.Frame(tab_rag)
         rag_ops.pack(fill="x", padx=4, pady=4)
-        ttk.Button(rag_ops, text="查看详情", command=self.on_rag_view).pack(side="left", padx=2)
-        ttk.Button(rag_ops, text="禁用/启用", command=self.on_rag_toggle_disable).pack(side="left", padx=2)
-        ttk.Button(rag_ops, text="删除", command=self.on_rag_delete).pack(side="left", padx=2)
+        ttk.Button(rag_ops, text="查看详情", bootstyle="outline-info", command=self.on_rag_view).pack(side="left", padx=2)
+        ttk.Button(rag_ops, text="禁用/启用", bootstyle="outline-warning", command=self.on_rag_toggle_disable).pack(side="left", padx=2)
+        ttk.Button(rag_ops, text="删除", bootstyle="outline-danger", command=self.on_rag_delete).pack(side="left", padx=2)
         ttk.Separator(rag_ops, orient="vertical").pack(side="left", fill="y", padx=8)
-        ttk.Button(rag_ops, text="合并 data/*.json…", command=self.on_rag_merge).pack(side="left", padx=2)
-        ttk.Button(rag_ops, text="从文件导入…", command=self.on_rag_import_file).pack(side="left", padx=2)
+        ttk.Button(rag_ops, text="合并 data/*.json…", bootstyle="outline-secondary", command=self.on_rag_merge).pack(side="left", padx=2)
+        ttk.Button(rag_ops, text="从文件导入…", bootstyle="outline-secondary", command=self.on_rag_import_file).pack(side="left", padx=2)
         self.rag_status = tk.StringVar(value="请先启动服务器，再点「刷新列表」")
-        ttk.Label(rag_ops, textvariable=self.rag_status, foreground="#666").pack(side="left", padx=12)
-
-        # ---- 服务器控制栏 ----
-        srv = ttk.Frame(root)
-        srv.pack(fill="x", padx=8, pady=(2, 0))
-        ttk.Label(srv, text="后端服务器：", foreground="#666").pack(side="left")
-        self.btn_start_srv = ttk.Button(srv, text="启动服务器", command=self.on_start_server)
-        self.btn_start_srv.pack(side="left", padx=4)
-        # 始终可点：按端口强杀，不依赖本次 GUI 是否启动过
-        self.btn_kill_srv = ttk.Button(srv, text="杀死服务器", command=self.on_kill_server)
-        self.btn_kill_srv.pack(side="left", padx=4)
-        self.server_pid_var = tk.StringVar(value="未启动")
-        ttk.Label(srv, textvariable=self.server_pid_var, foreground="#666").pack(side="left", padx=8)
-
-        # ---- 操作栏 ----
-        ops = ttk.Frame(root)
-        ops.pack(fill="x", padx=8, pady=2)
-        self.btn_submit = ttk.Button(ops, text="提交生成", command=self.on_submit)
-        self.btn_submit.pack(side="left", padx=4)
-        self.btn_download = ttk.Button(ops, text="下载 zip", state="disabled", command=self.on_download)
-        self.btn_download.pack(side="left", padx=4)
-        self.btn_download_sources = ttk.Button(ops, text="下载源码", state="disabled", command=self.on_download_sources)
-        self.btn_download_sources.pack(side="left", padx=4)
-        self.btn_download_checker = ttk.Button(ops, text="下载 checker", state="disabled", command=self.on_download_checker)
-        self.btn_download_checker.pack(side="left", padx=4)
-        self.special_judge_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(ops, text="Special Judge", variable=self.special_judge_var).pack(side="left", padx=4)
-        ttk.Label(ops, text="内置Checker:").pack(side="left", padx=(8, 0))
-        self.builtin_checker = tk.StringVar(value="无")
-        ttk.OptionMenu(ops, self.builtin_checker, "无", *BUILTIN_CHECKER_OPTIONS).pack(side="left", padx=2)
-        self.status = tk.StringVar(value="待提交 — 可先在「4. 数据方案」生成方案，或直接提交（含写 range）")
-        ttk.Label(ops, textvariable=self.status).pack(side="left", padx=12)
+        ttk.Label(rag_ops, textvariable=self.rag_status, bootstyle="secondary").pack(side="left", padx=12)
 
         self.server_proc: subprocess.Popen | None = None
 
-        # ---- 阶段条 ----
-        stage_frm = ttk.LabelFrame(root, text="流程阶段")
-        stage_frm.pack(fill="x", padx=8, pady=4)
+        # 默认显示第一个标签
+        self._show_tab("std")
+
+        # ---- 控制面板：放在主内容下方、日志上方 ----
+        control_panel = ttk.Frame(root, padding=8)
+        control_panel.pack(fill="x", side="top", padx=8, pady=(0, 6))
+
+        # 直接在 control_panel 里重建顶部控制栏
+        topbar = ttk.Frame(control_panel)
+        topbar.pack(fill="x", pady=(0, 4))
+
+        # 左侧：提交 + 选项
+        ops_left = ttk.Frame(topbar)
+        ops_left.pack(side="left", fill="y")
+        self.btn_submit = ttk.Button(ops_left, text="提交生成", bootstyle="primary", command=self.on_submit)
+        self.btn_submit.pack(side="left", padx=4)
+        ttk.Separator(ops_left, orient="vertical").pack(side="left", fill="y", padx=8)
+        self.special_judge_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(ops_left, text="Special Judge", variable=self.special_judge_var).pack(side="left", padx=4)
+        ttk.Label(ops_left, text="内置Checker:").pack(side="left", padx=(8, 0))
+        self.builtin_checker = tk.StringVar(value="无")
+        ttk.Combobox(ops_left, textvariable=self.builtin_checker, values=BUILTIN_CHECKER_OPTIONS, width=8, state="readonly").pack(side="left", padx=2)
+
+        # 中间：服务器控制
+        srv_center = ttk.Frame(topbar)
+        srv_center.pack(expand=True, anchor="center")
+        ttk.Label(srv_center, text="后端服务器：", bootstyle="secondary").pack(side="left")
+        self.btn_start_srv = ttk.Button(srv_center, text="启动服务器", bootstyle="success", command=self.on_start_server)
+        self.btn_start_srv.pack(side="left", padx=4)
+        self.btn_kill_srv = ttk.Button(srv_center, text="杀死服务器", bootstyle="danger", command=self.on_kill_server)
+        self.btn_kill_srv.pack(side="left", padx=4)
+        self.server_pid_var = tk.StringVar(value="未启动")
+        ttk.Label(srv_center, textvariable=self.server_pid_var, bootstyle="secondary").pack(side="left", padx=8)
+
+        # 右侧：下载
+        ops_right = ttk.Frame(topbar)
+        ops_right.pack(side="right", fill="y")
+        self.btn_download = ttk.Button(ops_right, text="下载 zip", state="disabled", bootstyle="success", command=self.on_download)
+        self.btn_download.pack(side="left", padx=4)
+        self.btn_download_sources = ttk.Button(ops_right, text="下载源码", state="disabled", bootstyle="outline-info", command=self.on_download_sources)
+        self.btn_download_sources.pack(side="left", padx=4)
+        self.btn_download_checker = ttk.Button(ops_right, text="下载 checker", state="disabled", bootstyle="outline-info", command=self.on_download_checker)
+        self.btn_download_checker.pack(side="left", padx=4)
+
+        # 状态栏
+        status_bar = ttk.Frame(control_panel, padding=(0, 2))
+        status_bar.pack(fill="x", pady=(0, 4))
+        self.status = tk.StringVar(value="待提交 — 可先在「数据方案」生成方案，或直接提交（含写 range）")
+        ttk.Label(status_bar, textvariable=self.status, bootstyle="info").pack(side="left")
+
+        # 阶段条
+        stage_frm = ttk.Labelframe(control_panel, text="流程阶段")
+        stage_frm.pack(fill="x", pady=4)
         self.stage_vars = {}
         row = ttk.Frame(stage_frm)
         row.pack(fill="x", padx=6, pady=6)
         for i, (key, label) in enumerate(STAGES):
             if i:
-                ttk.Label(row, text="→").pack(side="left", padx=4)
+                ttk.Label(row, text="→", bootstyle="secondary").pack(side="left", padx=4)
             var = tk.StringVar(value=f"○ {label}")
             self.stage_vars[key] = var
             ttk.Label(row, textvariable=var, font=("Consolas", 9)).pack(side="left")
 
         # ---- 进度日志 ----
-        log_frm = ttk.LabelFrame(root, text="过程日志")
-        log_frm.pack(fill="both", expand=True, padx=8, pady=6)
-        self.progress = scrolledtext.ScrolledText(log_frm, height=16, font=("Consolas", 9), wrap="word")
+        log_frm = ttk.Labelframe(root, text="过程日志")
+        log_frm.pack(fill="both", side="bottom", expand=True, padx=8, pady=6)
+        self.progress = ScrolledText(log_frm, height=12, font=("Consolas", 9), wrap="word", autohide=True)
         self.progress.pack(fill="both", expand=True, padx=4, pady=4)
         self.progress.tag_configure("phase", foreground="#0a5")
         self.progress.tag_configure("ok", foreground="#060")
@@ -350,6 +398,19 @@ class App:
         self.job_id = None
         self._seen_progress = 0
         self._current_stage = None
+
+    def _show_tab(self, tab_name: str):
+        """切换左侧导航按钮对应的内容面板。"""
+        if self._current_tab == tab_name:
+            return
+        for name, btn in self.nav_buttons.items():
+            btn.config(bootstyle="solid-primary" if name == tab_name else "outline-primary")
+        for name, frame in self.nav_tabs.items():
+            if name == tab_name:
+                frame.grid(row=0, column=0, sticky="nsew")
+            else:
+                frame.grid_forget()
+        self._current_tab = tab_name
 
     def open_rewrite(self, mode: str, kind: str, widget):
         """mode: simplify|beautify；弹出审阅窗：保留 / 加提示词重生成 / 不保留。"""
@@ -367,36 +428,37 @@ class App:
 
         win = tk.Toplevel(self.root)
         win.title(title)
-        win.geometry("820x620")
+        win.geometry("1000x780")
+        win.minsize(900, 650)
         win.transient(self.root)
 
         hint_var = tk.StringVar(value="")
         status_var = tk.StringVar(value="正在调用大模型…")
 
-        top = ttk.Frame(win)
+        top = ttk.Frame(win, padding=6)
         top.pack(fill="x", padx=8, pady=6)
-        ttk.Label(top, textvariable=status_var, foreground="#06c").pack(side="left")
+        ttk.Label(top, textvariable=status_var, bootstyle="info").pack(side="left")
 
         paned = ttk.Panedwindow(win, orient="vertical")
         paned.pack(fill="both", expand=True, padx=8, pady=4)
 
-        f1 = ttk.LabelFrame(paned, text="原文")
-        f2 = ttk.LabelFrame(paned, text="改写结果（简化=纯文本无符号；美化=Markdown/LaTeX）")
+        f1 = ttk.Labelframe(paned, text="原文")
+        f2 = ttk.Labelframe(paned, text="改写结果（简化=纯文本无符号；美化=Markdown/LaTeX）")
         paned.add(f1, weight=1)
         paned.add(f2, weight=2)
-        src_box = scrolledtext.ScrolledText(f1, height=8, font=("Consolas", 9), wrap="word")
+        src_box = ScrolledText(f1, height=8, font=("Consolas", 9), wrap="word", autohide=True)
         src_box.pack(fill="both", expand=True, padx=4, pady=4)
         src_box.insert("1.0", src)
         src_box.configure(state="disabled")
-        out_box = scrolledtext.ScrolledText(f2, height=14, font=("Consolas", 10), wrap="word")
+        out_box = ScrolledText(f2, height=14, font=("Consolas", 10), wrap="word", autohide=True)
         out_box.pack(fill="both", expand=True, padx=4, pady=4)
 
-        hint_frm = ttk.LabelFrame(win, text="附加提示词（重新生成时生效）")
+        hint_frm = ttk.Labelframe(win, text="附加提示词（重新生成时生效）")
         hint_frm.pack(fill="x", padx=8, pady=4)
         hint_entry = ttk.Entry(hint_frm, textvariable=hint_var)
         hint_entry.pack(fill="x", padx=6, pady=6)
 
-        btns = ttk.Frame(win)
+        btns = ttk.Frame(win, padding=6)
         btns.pack(fill="x", padx=8, pady=8)
 
         state = {"busy": False, "base_text": src}
@@ -461,11 +523,11 @@ class App:
         def on_discard():
             win.destroy()
 
-        btn_keep = ttk.Button(btns, text="保留", command=on_keep)
+        btn_keep = ttk.Button(btns, text="保留", bootstyle="success", command=on_keep)
         btn_keep.pack(side="left", padx=4)
-        btn_regen = ttk.Button(btns, text="添加提示词后重新生成", command=on_regen)
+        btn_regen = ttk.Button(btns, text="添加提示词后重新生成", bootstyle="primary", command=on_regen)
         btn_regen.pack(side="left", padx=4)
-        btn_discard = ttk.Button(btns, text="不保留", command=on_discard)
+        btn_discard = ttk.Button(btns, text="不保留", bootstyle="outline-secondary", command=on_discard)
         btn_discard.pack(side="right", padx=4)
 
         run_gen(extra="", use_current_as_base=False)
@@ -476,7 +538,8 @@ class App:
         self.count_var.set("")
         for i in self.cons_tree.get_children():
             self.cons_tree.delete(i)
-        self.edge_list.delete(0, "end")
+        for i in self.edge_list.get_children():
+            self.edge_list.delete(i)
         self.plan_status.set("尚未生成方案 — 提交时将从「写 range」开始")
 
     def apply_range_plan(self, data: dict):
@@ -492,9 +555,10 @@ class App:
         for name, bounds in self.range_data["constraints"].items():
             lo, hi = bounds[0], bounds[1] if isinstance(bounds, (list, tuple)) and len(bounds) >= 2 else ("?", "?")
             self.cons_tree.insert("", "end", values=(name, lo, hi))
-        self.edge_list.delete(0, "end")
+        for i in self.edge_list.get_children():
+            self.edge_list.delete(i)
         for e in self.range_data["edge_cases"]:
-            self.edge_list.insert("end", f"  •  {e}")
+            self.edge_list.insert("", "end", text=f"  •  {e}")
         self.plan_status.set(
             f"已就绪：{self.range_data['count']} 组 · "
             f"{len(self.range_data['constraints'])} 个变量 · "
@@ -517,8 +581,8 @@ class App:
             except (TypeError, ValueError):
                 continue
         edges = []
-        for i in range(self.edge_list.size()):
-            t = self.edge_list.get(i).strip().lstrip("•").strip()
+        for item in self.edge_list.get_children():
+            t = self.edge_list.item(item, "text").strip().lstrip("•").strip()
             if t:
                 edges.append(t)
         if count <= 0 or not cons:
@@ -1041,7 +1105,7 @@ class App:
                     win = tk.Toplevel(self.root)
                     win.title(f"语料详情 — {key}")
                     win.geometry("720x520")
-                    box = scrolledtext.ScrolledText(win, font=("Consolas", 9), wrap="word")
+                    box = ScrolledText(win, font=("Consolas", 9), wrap="word", autohide=True)
                     box.pack(fill="both", expand=True, padx=8, pady=8)
                     box.insert("1.0", content)
                     box.configure(state="disabled")
@@ -1200,7 +1264,7 @@ class App:
 
 
 def main():
-    root = tk.Tk()
+    root = ttk.Window(title="ACM 出数据", themename=_DEFAULT_THEME, size=(980, 820), minsize=(760, 640))
     app = App(root)
     # 预填 A+B，方便直接测
     app.std_code.insert("1.0", """#include <bits/stdc++.h>

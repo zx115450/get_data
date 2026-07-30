@@ -58,6 +58,45 @@ REVIEWER_TOOL_SCHEMAS = [
 ]
 
 
+def _adaptive_steps(range_json: dict | None, problem_type: str, resume_info: dict | None) -> int:
+    """根据题目复杂度给 Gen Agent 自适应步数。"""
+    base = 50
+    if resume_info:
+        base += 10
+    if not range_json:
+        return base
+    constraints = range_json.get("constraints") or {}
+    max_val = 1
+    for v in constraints.values():
+        if isinstance(v, (list, tuple)) and len(v) >= 2:
+            try:
+                max_val = max(max_val, int(v[1]))
+            except (ValueError, TypeError):
+                pass
+    edge_cases = len(range_json.get("edge_cases") or [])
+    special = len(range_json.get("special_constraints") or [])
+    score = 0
+    if max_val > 100000:
+        score += 2
+    elif max_val > 10000:
+        score += 1
+    if edge_cases > 8:
+        score += 2
+    elif edge_cases > 5:
+        score += 1
+    if special > 2:
+        score += 2
+    elif special > 0:
+        score += 1
+    if problem_type in ("graph", "tree", "geometry", "interactive", "dp"):
+        score += 1
+    if problem_type in ("string", "matrix"):
+        score += 1
+    # 复杂度越高步数越多，最低不低于 50，最高不超过 100
+    steps = base + score * 10
+    return max(50, min(steps, 100))
+
+
 def _build_checker_task(
     stmt_plain: str,
     range_plain: str,
@@ -182,10 +221,45 @@ def _detect_artifacts(job_dir: Path) -> list[str]:
     return found
 
 
-def _copy_resume_artifacts(parent_dir: Path, job_dir: Path) -> list[str]:
-    """把父任务的可复用产物拷到当前目录。返回实际拷贝的列表。"""
+def _detect_good_artifacts(job_dir: Path) -> list[str]:
+    """列出通过校验的"好版本"产物（含 out.good 测例快照）。"""
+    found = []
+    for name in ("gen.cpp", "gen.py", "validator.cpp", "validate.py"):
+        good = name + ".good"
+        if (job_dir / good).is_file():
+            found.append(good)
+    for name in ("gen.exe", "validator.exe"):
+        good = name + ".good"
+        if (job_dir / good).is_file():
+            found.append(good)
+    if (job_dir / "out.good").is_dir():
+        found.append("out.good")
+    return found
+
+
+def _copy_resume_artifacts(parent_dir: Path, job_dir: Path, resume_info: dict | None = None) -> list[str]:
+    """把父任务的可复用产物拷到当前目录。返回实际拷贝的列表。
+
+    - gen/validator 的 .good 快照：始终复用（后续 Agent 可在好版本上修）
+    - out.good：始终复用（已通过 gen→validate→std 的测例对，即使后续 gen 改坏也保留）
+    - 普通源码产物：始终复用
+    """
     copied = []
+    # 好版本快照：不论失败阶段，合法 in/out 与通过校验的 gen 都应带走
+    for name in _detect_good_artifacts(parent_dir):
+        src = parent_dir / name
+        dst = job_dir / name
+        if src.is_dir():
+            if dst.exists():
+                shutil.rmtree(dst)
+            shutil.copytree(src, dst)
+        else:
+            shutil.copy2(src, dst)
+        copied.append(name)
+    # 普通产物（源码/规划文件等）始终复用
     for name in _detect_artifacts(parent_dir):
+        if name in copied:
+            continue
         src = parent_dir / name
         dst = job_dir / name
         shutil.copy2(src, dst)
@@ -200,6 +274,88 @@ def _copy_resume_artifacts(parent_dir: Path, job_dir: Path) -> list[str]:
     return copied
 
 
+def _save_good_snapshot(job_dir: Path, include_in_out: bool = False) -> None:
+    """把当前通过校验的 gen/validator 保存为 .good 快照；可选合并 out → out.good。"""
+    for name in ("gen.cpp", "gen.py", "validator.cpp", "validate.py"):
+        src = job_dir / name
+        if src.is_file():
+            shutil.copy2(src, job_dir / (name + ".good"))
+    if os.name == "nt":
+        for name in ("gen.exe", "validator.exe"):
+            src = job_dir / name
+            if src.is_file():
+                shutil.copy2(src, job_dir / (name + ".good"))
+    if include_in_out:
+        _merge_out_into_good(job_dir)
+
+
+def _pair_indices_in_dir(data_dir: Path) -> set[int]:
+    """扫描目录里成对的 {i}.in + {i}.out，返回已完整的索引集合（1-based）。"""
+    if not data_dir.is_dir():
+        return set()
+    ins = set()
+    outs = set()
+    for f in data_dir.iterdir():
+        if not f.is_file():
+            continue
+        name = f.name
+        if name.endswith(".in"):
+            stem = name[:-3]
+            if stem.isdigit():
+                ins.add(int(stem))
+        elif name.endswith(".out"):
+            stem = name[:-4]
+            if stem.isdigit():
+                outs.add(int(stem))
+    return ins & outs
+
+
+def _merge_out_into_good(job_dir: Path) -> int:
+    """把 out/ 里成对的合法测例合并进 out.good/，返回合并的组数。"""
+    out_dir = job_dir / "out"
+    good_dir = job_dir / "out.good"
+    good_dir.mkdir(parents=True, exist_ok=True)
+    merged = 0
+    for i in _pair_indices_in_dir(out_dir):
+        for suffix in (".in", ".out"):
+            src = out_dir / f"{i}{suffix}"
+            dst = good_dir / f"{i}{suffix}"
+            if src.is_file():
+                shutil.copy2(src, dst)
+        merged += 1
+    return merged
+
+
+def _restore_good_snapshot(job_dir: Path) -> None:
+    """把 .good 快照还原为正式产物（源码 + 已合法测例）。"""
+    for name in ("gen.cpp", "gen.py", "validator.cpp", "validate.py"):
+        good = job_dir / (name + ".good")
+        if good.is_file():
+            shutil.copy2(good, job_dir / name)
+    if os.name == "nt":
+        for name in ("gen.exe", "validator.exe"):
+            good = job_dir / (name + ".good")
+            if good.is_file():
+                shutil.copy2(good, job_dir / name)
+    good_dir = job_dir / "out.good"
+    out_dir = job_dir / "out"
+    if good_dir.is_dir():
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for i in _pair_indices_in_dir(good_dir):
+            for suffix in (".in", ".out"):
+                src = good_dir / f"{i}{suffix}"
+                if src.is_file():
+                    shutil.copy2(src, out_dir / f"{i}{suffix}")
+
+
+def _has_complete_in_out(job_dir: Path, range_json: dict, *, prefer_good: bool = False) -> bool:
+    """out/（或 out.good）是否已有完整的 count 组成对测例。"""
+    count = int(range_json.get("count") or 15)
+    data_dir = job_dir / ("out.good" if prefer_good else "out")
+    pairs = _pair_indices_in_dir(data_dir)
+    return all(i in pairs for i in range(1, count + 1))
+
+
 def _load_parent_failure_context(parent_dir: Path) -> dict[str, Any] | None:
     """读取父任务的 failure_context.json，若不存在或非法则返回 None。"""
     p = parent_dir / "failure_context.json"
@@ -212,6 +368,31 @@ def _load_parent_failure_context(parent_dir: Path) -> dict[str, Any] | None:
         return data
     except Exception:
         return None
+
+
+def _find_matching_parent_job(statement_hash: str, std_hash: str, lang: str) -> tuple[Path, dict[str, Any]] | None:
+    """扫描 jobs/ 下所有目录，找题面、标程、语言都一致的最新任务。"""
+    if not JOBS_DIR.is_dir():
+        return None
+    candidates = []
+    for d in JOBS_DIR.iterdir():
+        if not d.is_dir():
+            continue
+        ctx = _load_parent_failure_context(d)
+        if not ctx:
+            continue
+        if (
+            ctx.get("statement_hash") == statement_hash
+            and ctx.get("std_hash") == std_hash
+            and ctx.get("lang") == lang
+        ):
+            # 用目录名（时间戳）排序，越新越好
+            candidates.append((d.name, d, ctx))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    _, parent_dir, parent_ctx = candidates[0]
+    return parent_dir, parent_ctx
 
 
 def _build_resume_failure_block(resume_info: dict[str, Any]) -> str:
@@ -261,44 +442,41 @@ def _run_job_impl(
     sources_zip_path = job_dir / "sources.zip"
     checker_zip_path = job_dir / "checker.zip"
 
-    # 1.0) 失败续跑：先尝试同题校验与产物复用
+    # 1.0) 同题复用：自动扫描 jobs/ 下最新同题任务，不再依赖客户端 resume_context
+    stmt_hash = _text_hash(problem_statement or "")
+    std_hash = _text_hash(std_code or "")
     resume_info: dict[str, Any] | None = None
     resume_failure_block = ""
-    if resume_context:
-        parent_id = (resume_context.get("parent_job_id") or "").strip()
-        parent_dir = JOBS_DIR / parent_id if parent_id else None
-        parent_ctx = _load_parent_failure_context(parent_dir) if parent_dir else None
-        if parent_ctx is None:
+    auto_parent = _find_matching_parent_job(stmt_hash, std_hash, lang)
+    if auto_parent is None:
+        job_store.add_progress(
+            job,
+            "【复用】未找到同题历史任务，按新任务执行。"
+        )
+    else:
+        parent_dir, parent_ctx = auto_parent
+        parent_id = parent_dir.name
+        if not parent_dir.is_dir():
             job_store.add_progress(
                 job,
-                f"【续跑】提供的父任务 {parent_id!r} 无有效 failure_context，按新任务执行。"
+                f"【复用】父任务目录 {parent_dir} 不存在，按新任务执行。"
             )
         else:
-            # 同题校验：题面、标程、语言一致才算同题
-            stmt_hash = _text_hash(problem_statement or "")
-            std_hash = _text_hash(std_code or "")
-            parent_stmt_hash = parent_ctx.get("statement_hash", "")
-            parent_std_hash = parent_ctx.get("std_hash", "")
-            parent_lang = parent_ctx.get("lang", "")
-            if stmt_hash != parent_stmt_hash or std_hash != parent_std_hash or lang != parent_lang:
-                job_store.add_progress(
-                    job,
-                    "【续跑】父任务与当前提交不是同一题（题面/标程/lang 不同），按新任务执行。"
-                )
-            elif parent_dir and not parent_dir.is_dir():
-                job_store.add_progress(
-                    job,
-                    f"【续跑】父任务目录 {parent_dir} 不存在，按新任务执行。"
-                )
-            else:
-                copied = _copy_resume_artifacts(parent_dir, job_dir)
-                job_store.add_progress(
-                    job,
-                    f"【续跑】同题校验通过，复制 {len(copied)} 项产物: {copied}"
-                )
-                resume_info = dict(parent_ctx)
-                resume_info["parent_job_id"] = parent_id
-                resume_failure_block = _build_resume_failure_block(resume_info)
+            copied = _copy_resume_artifacts(parent_dir, job_dir, parent_ctx)
+            job_store.add_progress(
+                job,
+                f"【复用】同题校验通过（父任务 {parent_id}），复制 {len(copied)} 项产物: {copied}"
+            )
+            resume_info = dict(parent_ctx)
+            resume_info["parent_job_id"] = parent_id
+            resume_failure_block = _build_resume_failure_block(resume_info)
+
+    # 兼容旧前端：如果仍传了 resume_context，仅做日志记录，不再作为唯一依据
+    if resume_context:
+        job_store.add_progress(
+            job,
+            f"【复用】收到客户端 resume_context（已废弃，仅记录），父任务 {resume_context.get('parent_job_id')!r}"
+        )
 
     def on_event(step, name, args, preview):
         brief = {}
@@ -530,9 +708,15 @@ def _run_job_impl(
         summary = "checker 阶段续跑：跳过 gen/validator Agent"
         job_store.add_progress(job, f"Agent 结束: {summary}")
     else:
+        gen_steps = _adaptive_steps(range_json, eff_type, resume_info)
+        job_store.add_progress(job, f"Gen Agent 自适应步数: {gen_steps}")
+        # 如果已有好版本快照，先把源码还原为可复用版本，Agent 可在此基础上修复或验证
+        if (job_dir / "gen.cpp.good").is_file() or (job_dir / "gen.py.good").is_file():
+            _restore_good_snapshot(job_dir)
+            job_store.add_progress(job, "已还原 gen/validator 好版本快照")
         summary = agent_run(
             task,
-            max_steps=40,
+            max_steps=gen_steps,
             verbose=False,
             on_event=on_event,
             stage_prompts=stage_prompts,
@@ -602,7 +786,7 @@ def _run_job_impl(
             f"Agent summary: {summary!r}\n"
             f"最后几条进度:\n" + "\n".join(f"  {t}" for t in tail)
             + "\n常见原因：LLM 未调工具就返回文本（被当成 finish）、"
-            f"40 步预算用尽、或 write_gen/write_validate 编译失败循环。"
+            f"Gen Agent 步数预算用尽、或 write_gen/write_validate 编译失败循环。"
             f"完整日志见 {job_dir / 'agent_log.txt'}。"
         )
 
@@ -689,22 +873,54 @@ def _run_job_impl(
         job,
         f"产物 OK: count={produced.get('count')} edge_cases={produced.get('edge_cases')}",
     )
+    # gen/validator 已通过校验，保存源码快照；in/out 尚未生成，不存快照
+    _save_good_snapshot(job_dir, include_in_out=False)
+    job_store.add_progress(job, "已保存 gen/validator 好版本快照")
 
     # 4) pipeline 批量生成
-    job_store.add_progress(job, "【阶段 4/5】批量生成 .in / .out")
-    stats = gen_data.generate(produced, str(job_dir), str(out_dir), verbose=False)
-    job_store.add_progress(job, f"生成统计: {stats}")
-
-    if stats.get("bad", 0) > 0:
-        failures = stats.get("failures", [])
-        for f in failures:
-            job_store.add_progress(
-                job,
-                f"生成失败 #{f['index']} (planned_type={f['planned_type']}):\n{f['error']}",
-            )
-        raise RuntimeError(
-            f"批量生成有 {stats['bad']}/{stats['count']} 组失败，数据不完整，已中止打包"
+    # 先把父任务留下的合法测例（out.good）还原到 out/，再只补缺失组
+    if (job_dir / "out.good").is_dir() and _pair_indices_in_dir(job_dir / "out.good"):
+        n_good = len(_pair_indices_in_dir(job_dir / "out.good"))
+        _restore_good_snapshot(job_dir)
+        job_store.add_progress(
+            job,
+            f"已还原 out.good 中 {n_good} 组合法测例，将只补缺失组"
         )
+
+    if _has_complete_in_out(job_dir, produced):
+        job_store.add_progress(job, "【阶段 4/5】测例已齐全，跳过批量生成")
+        stats = {
+            "count": produced.get("count", 15),
+            "ok": produced.get("count", 15),
+            "bad": 0,
+            "reused": produced.get("count", 15),
+            "failures": [],
+            "restored": True,
+        }
+        _merge_out_into_good(job_dir)
+    else:
+        job_store.add_progress(job, "【阶段 4/5】批量生成 .in / .out（复用已有合法组）")
+        stats = gen_data.generate(
+            produced, str(job_dir), str(out_dir), verbose=False, reuse_existing=True
+        )
+        job_store.add_progress(job, f"生成统计: {stats}")
+
+        # 无论是否全部成功：把本轮通过 gen→validate→std 的组合并进 out.good
+        merged = _merge_out_into_good(job_dir)
+        if merged:
+            job_store.add_progress(job, f"已把 {merged} 组合法测例合并进 out.good")
+
+        if stats.get("bad", 0) > 0:
+            failures = stats.get("failures", [])
+            for f in failures:
+                job_store.add_progress(
+                    job,
+                    f"生成失败 #{f['index']} (planned_type={f['planned_type']}):\n{f['error']}",
+                )
+            raise RuntimeError(
+                f"批量生成有 {stats['bad']}/{stats['count']} 组失败，数据不完整，已中止打包"
+                f"（已成功的 {stats.get('ok', 0)} 组已写入 out.good，下次同题可复用）"
+            )
 
     # 5) 打包
     job_store.add_progress(job, "【阶段 5/5】打包 zip（仅 .in / .out）")
@@ -777,7 +993,10 @@ def _write_failure_context(
     review_report: str = "",
 ) -> None:
     """失败时把可携带的上下文写入 failure_context.json。"""
-    artifacts = _detect_artifacts(job_dir)
+    artifacts = _detect_artifacts(job_dir) + _detect_good_artifacts(job_dir)
+    # 去重保序
+    seen = set()
+    artifacts = [a for a in artifacts if not (a in seen or seen.add(a))]
     ctx = {
         "v": 1,
         "parent_job_id": job_id,
@@ -804,6 +1023,13 @@ def _write_failure_context(
         pass
 
 
+def _check_cancel(job: job_store.Job) -> None:
+    """如果客户端请求取消，抛出 RuntimeError 让任务进入 finally 落 failure_context。"""
+    with job.lock:
+        if job.cancel_requested:
+            raise RuntimeError("客户端请求取消")
+
+
 def run_job(job: job_store.Job, std_code: str, lang: str,
             problem_statement: str, data_range_desc: str,
             problem_type: str = "",
@@ -819,10 +1045,11 @@ def run_job(job: job_store.Job, std_code: str, lang: str,
     builtin_checker: 可选 lcmp/wcmp/rcmp4/rcmp6/rcmp9/yesno；
       - special_judge=True 时作为默认推荐（Agent 可用 use_builtin_checker）；
       - special_judge=False 时若指定，任务结束后自动安装并打包该内置 checker。
-    resume_context: 失败续跑上下文。若校验通过且同题，会复制父任务产物并注入失败摘要。
+    resume_context: 已废弃，保留仅作兼容；现在 runner 会自动扫描 jobs/ 下最新同题任务。
     """
     job_dir = JOBS_DIR / job.id
     range_file = job_dir / "range.json"
+    cancelled = False
     try:
         _run_job_impl(
             job, std_code, lang,
@@ -834,7 +1061,8 @@ def run_job(job: job_store.Job, std_code: str, lang: str,
             builtin_checker,
             resume_context,
         )
-    except Exception as e:
+    except (Exception, KeyboardInterrupt, SystemExit) as e:
+        cancelled = isinstance(e, (KeyboardInterrupt, SystemExit)) or "客户端请求取消" in str(e)
         stage = _infer_failure_stage(list(job.progress))
         review_report = ""
         try:
@@ -848,6 +1076,15 @@ def run_job(job: job_store.Job, std_code: str, lang: str,
             problem_statement, std_code, lang, range_file,
             review_report=review_report,
         )
+        if cancelled:
+            job_store.add_progress(job, "任务已取消，但 failure_context 已落盘，可同题续跑")
+            job_store.add_progress(job, f"取消原因: {e}")
         raise
+    finally:
+        # 正常完成时由 _run_job_impl 内部处理；异常/取消时上面已落盘。
+        # 这里确保 job 状态正确：若被 KeyboardInterrupt，重新抛出一个 RuntimeError 给上层。
+        if cancelled and not job.status.value == "error":
+            with job.lock:
+                job.status = job_store.JobStatus.CANCELLED
 
 

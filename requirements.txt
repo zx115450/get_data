@@ -4,3 +4,4 @@ fastapi>=0.110.0
 uvicorn[standard]>=0.27.0
 python-multipart>=0.0.9
 markdown>=3.5
+ttkbootstrap>=1.10.0
