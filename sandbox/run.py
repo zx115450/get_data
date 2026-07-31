@@ -21,6 +21,15 @@ EXIT_MEMORY = 126
 # Windows NTSTATUS：内存不足时进程常被终止为此码
 _STATUS_NO_MEMORY = 0xC0000017
 _STATUS_COMMITMENT_LIMIT = 0xC000012D
+# 栈溢出（递归过深等）；Python 子进程常以无符号 int 返回 3221225725
+STATUS_STACK_OVERFLOW = 0xC00000FD
+
+
+def is_stack_overflow(returncode: int) -> bool:
+    """是否为 Windows STATUS_STACK_OVERFLOW（含无符号包装）。"""
+    if returncode is None:
+        return False
+    return (returncode & 0xFFFFFFFF) == STATUS_STACK_OVERFLOW
 
 
 def _mb_to_bytes(mb: int) -> int:

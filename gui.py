@@ -328,7 +328,7 @@ class App:
             cfg, textvariable=self.ptype, values=PROBLEM_TYPES, width=12, state="readonly",
         ).pack(side="left", padx=4)
         ttk.Label(
-            cfg, text="（自动=按题面关键词选 few-shot）", bootstyle="secondary",
+            cfg, text="（自动=生成方案时由大模型判题型）", bootstyle="secondary",
         ).pack(side="left")
 
         code_frm = ttk.Labelframe(tab_std, text="标准程序代码", padding=4)
@@ -790,13 +790,18 @@ class App:
             self.edge_list.delete(i)
         self.plan_status.set("尚未生成方案 — 提交时将从「写 range」开始")
 
-    def apply_range_plan(self, data: dict):
-        """把 range dict 填到可视化控件。"""
+    def apply_range_plan(self, data: dict, problem_type: str = ""):
+        """把 range dict 填到可视化控件；若带 problem_type 则同步题型下拉框。"""
+        ptype = (problem_type or data.get("problem_type") or "").strip()
         self.range_data = {
             "count": int(data.get("count") or 15),
             "constraints": dict(data.get("constraints") or {}),
             "edge_cases": list(data.get("edge_cases") or []),
         }
+        if ptype:
+            self.range_data["problem_type"] = ptype
+            if ptype in PROBLEM_TYPES:
+                self.ptype.set(ptype)
         self.count_var.set(str(self.range_data["count"]))
         for i in self.cons_tree.get_children():
             self.cons_tree.delete(i)
@@ -807,10 +812,11 @@ class App:
             self.edge_list.delete(i)
         for e in self.range_data["edge_cases"]:
             self.edge_list.insert("", "end", text=f"  •  {e}")
+        type_s = f" · 题型 {ptype}" if ptype else ""
         self.plan_status.set(
             f"已就绪：{self.range_data['count']} 组 · "
             f"{len(self.range_data['constraints'])} 个变量 · "
-            f"{len(self.range_data['edge_cases'])} 种边界 — 提交将跳过写 range"
+            f"{len(self.range_data['edge_cases'])} 种边界{type_s} — 提交将跳过写 range"
         )
 
     def collect_range_from_ui(self):
@@ -835,7 +841,13 @@ class App:
                 edges.append(t)
         if count <= 0 or not cons:
             return None
-        return {"count": count, "constraints": cons, "edge_cases": edges}
+        out = {"count": count, "constraints": cons, "edge_cases": edges}
+        ptype = self.ptype.get()
+        if ptype and ptype != "自动":
+            out["problem_type"] = ptype
+        elif isinstance(self.range_data, dict) and self.range_data.get("problem_type"):
+            out["problem_type"] = self.range_data["problem_type"]
+        return out
 
     def on_propose_range(self):
         stmt = self.statement.get("1.0", "end").strip()
@@ -868,8 +880,12 @@ class App:
             r = urllib.request.urlopen(req, timeout=180)
             payload = json.loads(r.read())
             rj = payload.get("range_json") or {}
-            self.root_after(lambda: self.apply_range_plan(rj))
-            self.root_after(lambda: self.status.set("数据方案已生成 — 可在「5. 数据方案」查看，再点提交生成"))
+            ptype = payload.get("problem_type") or rj.get("problem_type") or ""
+            self.root_after(lambda: self.apply_range_plan(rj, ptype))
+            msg = "数据方案已生成 — 可在「5. 数据方案」查看，再点提交生成"
+            if ptype:
+                msg = f"数据方案已生成（题型={ptype}）— 可在「5. 数据方案」查看，再点提交生成"
+            self.root_after(lambda m=msg: self.status.set(m))
         except Exception as e:
             self.root_after(lambda: messagebox.showerror("生成方案失败", str(e)))
             self.root_after(lambda: self.status.set(f"生成方案失败: {e}"))
@@ -957,6 +973,40 @@ class App:
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _format_elapsed(self, elapsed_ms) -> str:
+        try:
+            ms = int(elapsed_ms or 0)
+        except (TypeError, ValueError):
+            return "-"
+        total_s = max(0, ms) / 1000.0
+        if total_s < 60:
+            return f"{total_s:.1f}s"
+        m = int(total_s // 60)
+        s = total_s - m * 60
+        if m < 60:
+            return f"{m}m{s:04.1f}s"
+        h = m // 60
+        m = m % 60
+        return f"{h}h{m}m{s:04.1f}s"
+
+    def _format_tokens(self, usage: dict | None) -> str:
+        if not usage:
+            return "tokens=-"
+        prompt = int(usage.get("prompt_tokens") or 0)
+        completion = int(usage.get("completion_tokens") or 0)
+        total = int(usage.get("total_tokens") or 0)
+        calls = int(usage.get("chat_calls") or 0)
+        embed = int(usage.get("embedding_tokens") or 0)
+        text = f"tokens={total} (in {prompt} / out {completion}, calls={calls})"
+        if embed:
+            text += f" embed={embed}"
+        return text
+
+    def _stats_suffix(self, st: dict) -> str:
+        elapsed = self._format_elapsed(st.get("elapsed_ms"))
+        tokens = self._format_tokens(st.get("token_usage") or {})
+        return f"耗时 {elapsed} · {tokens}"
+
     def _render(self, st):
         lines = st.get("progress") or []
         # 增量追加新日志
@@ -967,8 +1017,9 @@ class App:
 
         err = st.get("error") or ""
         status = st["status"]
+        stats = self._stats_suffix(st)
         if status == "done":
-            self.status.set("完成 — 可下载测例 zip / 源码包")
+            self.status.set(f"完成 — {stats} — 可下载测例 zip / 源码包")
             self._set_stage("pack", "done")
             self.btn_download.config(state="normal")
             if st.get("has_sources_zip"):
@@ -977,12 +1028,14 @@ class App:
                 self.btn_download_checker.config(state="normal")
             self.btn_submit.config(state="normal")
         elif status == "error":
-            self.status.set(f"失败: {err[:120]}")
+            self.status.set(f"失败: {err[:120]} — {stats}")
             if self._current_stage:
                 self._set_stage(self._current_stage, "error")
             self.btn_submit.config(state="normal")
         else:
-            self.status.set(f"运行中  job={self.job_id}  已收到 {len(lines)} 条进度")
+            self.status.set(
+                f"运行中  job={self.job_id}  已收到 {len(lines)} 条进度 — {stats}"
+            )
             self.root_after(self._poll, 1200)
 
     def _append_log(self, msg: str):
@@ -990,6 +1043,8 @@ class App:
         display = msg
         if msg.startswith("【阶段"):
             tag = "phase"
+        elif msg.startswith("【统计】"):
+            tag = "ok"
         elif "ERROR" in msg or msg.startswith("ERROR"):
             tag = "err"
         elif msg.startswith("[step"):

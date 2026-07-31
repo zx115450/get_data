@@ -77,10 +77,22 @@ def _run_range_only_agent(
     std_code: str,
     eff_type: str,
     on_event,
-) -> dict:
-    """真正跑一轮 range-only Agent，写出并校验 range.json，返回 dict。"""
+) -> tuple[dict, str]:
+    """真正跑一轮 range-only Agent，写出并校验 range.json。
+
+    返回 (range_dict, problem_type)。若未给定题型，先单独 LLM 判型再写 range。
+    """
     from pipeline.gen_data import normalize_range_json, validate_range_json
+    from server.few_shots import classify_problem_type_llm, normalize_problem_type
     from server.range_agent import _build_type_hint_block
+
+    typ = normalize_problem_type(eff_type)
+    if not typ:
+        job_store.add_progress(job, "【Range】单独调用大模型判断题型…")
+        typ = classify_problem_type_llm(stmt_plain, range_plain, std_code)
+        job_store.add_progress(job, f"【Range】题型(LLM): {typ}")
+    else:
+        job_store.add_progress(job, f"【Range】题型(用户指定): {typ}")
 
     struct_hint_block = scan_structural_hints(stmt_plain) or ""
     pre_titles = scan_structural_titles(stmt_plain) or []
@@ -105,7 +117,8 @@ def _run_range_only_agent(
         f"【题面】\n{stmt_plain}\n\n"
         f"【数据范围描述】\n{range_plain}\n"
         f"{std_hint}"
-        f"{_build_type_hint_block(eff_type)}"
+        f"\n【已判定题型】{typ}\n"
+        f"{_build_type_hint_block(typ)}"
         f"{pre_titles_block}"
         f"{struct_hint_block}"
         f"\ncount 默认 15。constraints 覆盖题面中的规模变量（如 n、T、m）。"
@@ -134,6 +147,7 @@ def _run_range_only_agent(
 
     data = normalize_range_json(dict(data))
     data.pop("std_cmd", None)
+    data["problem_type"] = typ
     errs = validate_range_json(data)
     if errs:
         raise RuntimeError(
@@ -143,9 +157,36 @@ def _run_range_only_agent(
     job_store.add_progress(
         job,
         f"【Range】已写入 range.json: count={data.get('count')} "
-        f"edge_cases={data.get('edge_cases')}",
+        f"type={typ} edge_cases={data.get('edge_cases')}",
     )
-    return data
+    return data, typ
+
+
+def _build_few_shot_block(
+    job: job_store.Job,
+    problem_type: str,
+    stmt_plain: str,
+    range_plain: str,
+    std_code: str,
+) -> str:
+    """按题型取 few-shot，写进度日志，返回可拼进 task 的文本块（可能为空）。"""
+    few_shot_block, few_shot_summary = get_few_shot_rag(
+        problem_type, stmt_plain, range_plain, std_code, top_k=2
+    )
+    if few_shot_summary.startswith("RAG 召回"):
+        short = few_shot_summary.replace("RAG 召回 2 个模板: ", "")
+        job_store.add_progress(job, f"few-shot RAG: {short}")
+    else:
+        job_store.add_progress(job, f"few-shot: {few_shot_summary}")
+    if not few_shot_block:
+        return ""
+    return (
+        f"\n\n{few_shot_block}\n\n"
+        "请参照上面 RAG 召回范例的写法风格（校验严格度、--type 分支方式），"
+        "为本次题目写 gen.cpp 和 validator.cpp。"
+        "树/图：必须 t.gen(); cout << t 或 for (auto &e : t.edges())；"
+        "禁止 get_edges() / t.shuffle()。"
+    )
 
 
 def prepare_prompts(
@@ -217,19 +258,11 @@ def prepare_prompts(
     if struct_hint_block:
         job_store.add_progress(job, "检测到题面特殊结构约束，已注入针对性提醒")
 
-    few_shot_block, few_shot_summary = get_few_shot_rag(
-        problem_type, stmt_plain, range_plain, std_code, top_k=2
-    )
-    if few_shot_summary.startswith("RAG 召回"):
-        short = few_shot_summary.replace("RAG 召回 2 个模板: ", "")
-        job_store.add_progress(job, f"few-shot RAG: {short}")
-    else:
-        job_store.add_progress(job, f"few-shot: {few_shot_summary}")
-    if few_shot_block:
-        few_shot_block = (
-            f"\n\n{few_shot_block}\n\n"
-            "请参照上面 RAG 召回范例的写法风格（校验严格度、--type 分支方式），"
-            "为本次题目写 gen.cpp 和 validator.cpp。"
+    # 题型未定时先不注入 few-shot（等 Range 阶段 LLM 判型后再补）
+    few_shot_block = ""
+    if problem_type:
+        few_shot_block = _build_few_shot_block(
+            job, problem_type, stmt_plain, range_plain, std_code,
         )
 
     preset = None
@@ -246,6 +279,7 @@ def prepare_prompts(
         job_store.add_progress(
             job,
             f"【跳过写 range】使用 GUI 已给方案: count={preset.get('count')} "
+            f"type={preset.get('problem_type') or '-'} "
             f"edge_cases={preset.get('edge_cases')}",
         )
         sp_note = ""
@@ -415,8 +449,16 @@ def run_gen_agent(
     stmt_plain: str = "",
     std_code: str = "",
     resume_failure_block: str = "",
-) -> str:
-    """启动 Range/Gen Agent。Plan-and-Execute：先写 gen_plan.md，再按 plan 写代码。返回 Agent summary。"""
+) -> tuple[str, str]:
+    """启动 Range/Gen Agent。Plan-and-Execute：先写 gen_plan.md，再按 plan 写代码。
+
+    返回 (Agent summary, 生效题型)。
+    """
+    from server.few_shots import (
+        classify_problem_type_llm,
+        normalize_problem_type,
+    )
+
     range_plain = _extract_range_plain(task)
     range_path = job_dir / "range.json"
 
@@ -427,7 +469,10 @@ def run_gen_agent(
     resume_stage = resume_info.get("stage") if resume_info else None
     if resume_stage == "checker" and range_path.is_file() and has_gen_val_at_resume(job_dir):
         job_store.add_progress(job, "【续跑】父任务 checker 阶段失败，跳过 gen/validator Agent")
-        return "checker 阶段续跑：跳过 gen/validator Agent"
+        typ = normalize_problem_type(eff_type) or normalize_problem_type(
+            str((range_json or {}).get("problem_type") or "")
+        ) or "array"
+        return "checker 阶段续跑：跳过 gen/validator Agent", typ
 
     need_range_stage = range_json is None
     if resume_info and range_path.is_file() and not need_range_stage:
@@ -437,16 +482,47 @@ def run_gen_agent(
         stage_keys = ["gen"]
     else:
         stage_keys = ["range", "gen"]
-    job_store.add_progress(
-        job,
-        f"Agent prompt stages: {stage_keys} | type={eff_type}"
-    )
 
-    # ---- Range 阶段：未提供方案且磁盘无合法 range.json 时，真正跑一轮 range-only Agent ----
+    typ = normalize_problem_type(eff_type)
+    if not typ and isinstance(range_json, dict):
+        typ = normalize_problem_type(str(range_json.get("problem_type") or ""))
+
+    # ---- Range 阶段：未提供方案时先判题型再写 range.json ----
     if need_range_stage:
-        range_json = _run_range_only_agent(
-            job, job_dir, stmt_plain, range_plain, std_code, eff_type, on_event,
+        job_store.add_progress(
+            job,
+            f"Agent prompt stages: {stage_keys} | type={typ or '(待 LLM 判定)'}"
         )
+        range_json, typ = _run_range_only_agent(
+            job, job_dir, stmt_plain, range_plain, std_code, typ, on_event,
+        )
+        # prepare_prompts 时若无题型会跳过 few-shot，此处补上
+        if "【参考范例" not in task and "few-shot" not in task.lower():
+            task = task + _build_few_shot_block(
+                job, typ, stmt_plain, range_plain, std_code,
+            )
+    else:
+        # 已有 range 但题型仍空：单独 LLM 判一次，并写回 range.json
+        if not typ:
+            job_store.add_progress(job, "【题型】方案已有但未含 problem_type，单独调用大模型判断…")
+            typ = classify_problem_type_llm(stmt_plain, range_plain, std_code)
+            if isinstance(range_json, dict):
+                range_json = dict(range_json)
+                range_json["problem_type"] = typ
+                range_path.write_text(
+                    json.dumps(range_json, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+            job_store.add_progress(job, f"【题型】LLM: {typ}")
+            if "【参考范例" not in task:
+                task = task + _build_few_shot_block(
+                    job, typ, stmt_plain, range_plain, std_code,
+                )
+        job_store.add_progress(
+            job,
+            f"Agent prompt stages: {stage_keys} | type={typ}"
+        )
+
+    typ = typ or "array"
 
     if (job_dir / "gen.cpp.good").is_file() or (job_dir / "gen.py.good").is_file():
         restore_good_snapshot(job_dir)
@@ -461,7 +537,7 @@ def run_gen_agent(
         system_prompt, user_prompt = _build_planner_task(
             stmt_plain,
             range_plain,
-            "", "", range_json or {}, eff_type,
+            "", "", range_json or {}, typ,
         )
         job_store.add_progress(job, "【Plan】启动 Planner 单次生成 gen_plan.md")
         try:
@@ -495,7 +571,7 @@ def run_gen_agent(
     # ---- Execute 阶段：Coder 一次编码 + Gen Fixer 最多 4 轮 + 可选 Coder 重写 1 次 ----
     job_store.add_progress(job, "【Execute】Coder 第 1/1 轮：写 gen/validator")
     coder_task = _build_coder_task(
-        stmt_plain, range_plain, "", "", range_json or {}, eff_type,
+        stmt_plain, range_plain, "", "", range_json or {}, typ,
         resume_failure_block,
     )
     coder_task = f"{task}\n\n【额外要求：Plan-and-Execute】\n{coder_task}"
@@ -505,7 +581,7 @@ def run_gen_agent(
         max_steps=12,
         verbose=False,
         on_event=on_event,
-        system_prompt=prompts.build_coder_prompt(),
+        system_prompt=prompts.build_coder_prompt(typ),
         tool_schemas=CODER_TOOL_SCHEMAS,
         write_check_discipline=True,
         self_check_fast=True,
@@ -556,7 +632,7 @@ def run_gen_agent(
                 max_steps=12,
                 verbose=False,
                 on_event=on_event,
-                system_prompt=prompts.build_coder_rewrite_prompt(),
+                system_prompt=prompts.build_coder_rewrite_prompt(typ),
                 tool_schemas=CODER_TOOL_SCHEMAS,
                 write_check_discipline=True,
                 self_check_fast=True,
@@ -583,7 +659,7 @@ def run_gen_agent(
                     max_steps=12,
                     verbose=False,
                     on_event=on_event,
-                    system_prompt=prompts.build_gen_fixer_prompt(),
+                    system_prompt=prompts.build_gen_fixer_prompt(typ),
                     tool_schemas=GEN_FIXER_TOOL_SCHEMAS,
                     write_check_discipline=True,
                     self_check_fast=True,
@@ -628,9 +704,7 @@ def run_gen_agent(
 
     if isinstance(self_check_result, str) and self_check_result.startswith("OK"):
         ok, full_msg = _full_gate(self_check_result, "Coder")
-        if ok:
-            return full_msg
-        return full_msg
+        return full_msg, typ
 
     # Coder 快速自检失败：保存当前产物为 .fixer_bak 基线，不破坏已有的 .good 快照
     save_good_snapshot(job_dir, include_in_out=False, suffix=".fixer_bak")
@@ -657,7 +731,7 @@ def run_gen_agent(
             max_steps=12,
             verbose=False,
             on_event=on_event,
-            system_prompt=prompts.build_gen_fixer_prompt(),
+            system_prompt=prompts.build_gen_fixer_prompt(typ),
             tool_schemas=GEN_FIXER_TOOL_SCHEMAS,
             write_check_discipline=True,
             self_check_fast=True,
@@ -670,9 +744,7 @@ def run_gen_agent(
 
         if isinstance(self_check_result, str) and self_check_result.startswith("OK"):
             ok, full_msg = _full_gate(self_check_result, f"Fixer 第 {attempt} 轮")
-            if ok:
-                return full_msg
-            return full_msg
+            return full_msg, typ
 
         if attempt >= max_fixer_attempts:
             job_store.add_progress(
@@ -696,7 +768,7 @@ def run_gen_agent(
             max_steps=12,
             verbose=False,
             on_event=on_event,
-            system_prompt=prompts.build_coder_rewrite_prompt(),
+            system_prompt=prompts.build_coder_rewrite_prompt(typ),
             tool_schemas=CODER_TOOL_SCHEMAS,
             write_check_discipline=True,
             self_check_fast=True,
@@ -709,20 +781,18 @@ def run_gen_agent(
 
         if isinstance(self_check_result, str) and self_check_result.startswith("OK"):
             ok, full_msg = _full_gate(self_check_result, "Coder Rewrite")
-            if ok:
-                return full_msg
-            return full_msg
+            return full_msg, typ
 
         # Rewrite 仍失败：回退 .fixer_bak 基线
         restore_good_snapshot(job_dir, suffix=".fixer_bak")
         final_summary = f"Coder Rewrite 后快速自检仍失败: {self_check_result[:500]}"
         job_store.add_progress(job, final_summary)
         job_store.add_progress(job, f"Agent 结束: {final_summary}")
-        return final_summary
+        return final_summary, typ
 
     # 未触发重写（理论上不会到这里，但兜底）
     restore_good_snapshot(job_dir, suffix=".fixer_bak")
     final_summary = f"Coder + Fixer 用尽 {max_fixer_attempts} 轮，快速自检仍失败: {self_check_result[:500]}"
     job_store.add_progress(job, final_summary)
     job_store.add_progress(job, f"Agent 结束: {final_summary}")
-    return final_summary
+    return final_summary, typ

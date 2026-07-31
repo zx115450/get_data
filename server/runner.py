@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent import prompts, tools
 from server import job_store
-from server.few_shots import detected_type
+from server.few_shots import normalize_problem_type
 from server.runners import agent, batch, failure, resume, review, scaffold, snapshot
 from server.runners.snapshot import has_gen_val_at_resume
 from utils.markup import to_plain_for_llm
@@ -79,30 +79,42 @@ def _run_job_impl(
     job_store.add_progress(job, f"【阶段 1/5】准备标程 (lang={lang})")
     std_cmd = scaffold.compile_std(job_dir, std_code, lang)
     job_store.add_progress(job, f"标程就绪: {std_cmd}")
+    if lang == "cpp" and os.name == "nt":
+        job_store.add_progress(job, "标程编译已加大栈(16MB)")
 
     # 统一设置工具上下文，避免后续 Agent / 自检读写错目录
     tools.set_context(str(job_dir), std_cmd)
 
-    # 1.5) 预置 generator.h
+    # 1.5) 校验 sandbox 公共头文件（编译用 -I，不向 job 拷贝）
     try:
         tools.prewarm_generator_headers()
-        job_store.add_progress(job, "已预置 generator.h（含 ACM-generator 封装）")
+        job_store.add_progress(
+            job,
+            "头文件就绪: sandbox/testlib.h + generator.h（编译 -I，不落盘到 job）",
+        )
     except Exception as e:
-        job_store.add_progress(job, f"预置 generator.h 失败（可忽略）: {e}")
+        job_store.add_progress(job, f"校验 sandbox 头文件失败: {e}")
 
     # 2) 准备 Prompts 并启动 Agent
-    stmt_plain, task, preset, output_plain, std_for_prompt = agent.prepare_prompts(
-        problem_statement, data_range_desc, output_desc, std_code, lang,
-        problem_type, problem_type, range_json, resume_failure_block, job_dir, job,
-    )
+    # 题型优先级：用户显式 > range.json.problem_type；仍空则在 Range 阶段单独 LLM 判定
     range_plain = to_plain_for_llm(data_range_desc or "")
-    eff_type = detected_type(problem_type, stmt_plain, to_plain_for_llm(data_range_desc or ""), std_code)
+    eff_type = normalize_problem_type(problem_type)
+    if not eff_type and isinstance(range_json, dict):
+        eff_type = normalize_problem_type(str(range_json.get("problem_type") or ""))
+    type_note = "用户指定" if normalize_problem_type(problem_type) else (
+        "来自 range.json" if eff_type else "待 Range 阶段 LLM 判定"
+    )
     job_store.add_progress(
         job,
-        f"题型: {eff_type}" + ("" if problem_type else " (自动检测)")
-        + f" | 题面 {len(stmt_plain)} 字 | 范围描述 {len(to_plain_for_llm(data_range_desc or ''))} 字 | std {len(std_code)} 字",
+        f"题型: {eff_type or '(未定)'} ({type_note})"
+        + f" | 题面 {len(to_plain_for_llm(problem_statement or ''))} 字"
+        + f" | 范围描述 {len(range_plain)} 字 | std {len(std_code)} 字",
     )
-    summary = agent.run_gen_agent(
+    stmt_plain, task, preset, output_plain, std_for_prompt = agent.prepare_prompts(
+        problem_statement, data_range_desc, output_desc, std_code, lang,
+        eff_type, eff_type, range_json, resume_failure_block, job_dir, job,
+    )
+    summary, eff_type = agent.run_gen_agent(
         job, job_dir, task, eff_type, range_json or preset, resume_info, on_event,
         stmt_plain=stmt_plain, std_code=std_code, resume_failure_block=resume_failure_block,
     )
@@ -119,7 +131,12 @@ def _run_job_impl(
         raise RuntimeError(f"Agent 产出的 range.json 不是合法 JSON: {e}")
     if preset is not None:
         produced = dict(preset)
+        # 保留流水线判定的题型（GUI 方案可能未带 problem_type）
+        if eff_type and not produced.get("problem_type"):
+            produced["problem_type"] = eff_type
         range_file.write_text(json.dumps(produced, ensure_ascii=False, indent=2), encoding="utf-8")
+    if eff_type:
+        produced["problem_type"] = produced.get("problem_type") or eff_type
     produced["std_cmd"] = std_cmd
     produced = normalize_range_json(produced)
     errs = validate_range_json(produced)

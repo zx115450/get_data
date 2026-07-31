@@ -9,6 +9,7 @@ write_gen / write_validate 源码参数从历史里换成摘要。
 """
 import json
 import os
+import threading
 from dataclasses import dataclass
 from typing import Any
 
@@ -25,6 +26,116 @@ class Action:
     args: dict           # 参数
     tool_call_id: str = ""   # 对应 assistant tool_calls 的 id，回传 tool 消息时要用
     raw_content: str = ""
+
+
+@dataclass
+class TokenUsage:
+    """单次任务内累计的 token 用量（按线程隔离）。"""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    embedding_tokens: int = 0
+    chat_calls: int = 0
+    embedding_calls: int = 0
+
+    def add_chat(self, usage: Any) -> None:
+        if usage is None:
+            return
+        pt = int(getattr(usage, "prompt_tokens", None) or 0)
+        ct = int(getattr(usage, "completion_tokens", None) or 0)
+        tt = getattr(usage, "total_tokens", None)
+        if tt is None:
+            tt = pt + ct
+        else:
+            tt = int(tt or 0)
+        self.prompt_tokens += pt
+        self.completion_tokens += ct
+        self.total_tokens += tt
+        self.chat_calls += 1
+
+    def add_embedding(self, usage: Any) -> None:
+        if usage is None:
+            return
+        # embedding 通常只有 prompt_tokens / total_tokens
+        pt = int(getattr(usage, "prompt_tokens", None)
+                 or getattr(usage, "total_tokens", None)
+                 or 0)
+        self.embedding_tokens += pt
+        self.embedding_calls += 1
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+            "embedding_tokens": self.embedding_tokens,
+            "chat_calls": self.chat_calls,
+            "embedding_calls": self.embedding_calls,
+        }
+
+    def format_brief(self) -> str:
+        parts = [
+            f"prompt={self.prompt_tokens}",
+            f"completion={self.completion_tokens}",
+            f"total={self.total_tokens}",
+            f"calls={self.chat_calls}",
+        ]
+        if self.embedding_tokens or self.embedding_calls:
+            parts.append(f"embed={self.embedding_tokens}(calls={self.embedding_calls})")
+        return " ".join(parts)
+
+
+_usage_local = threading.local()
+
+
+def reset_token_usage() -> None:
+    """清空当前线程的 token 累计（每个 Job worker 启动时调用）。"""
+    _usage_local.usage = TokenUsage()
+    _usage_local.sink = None
+
+
+def set_token_usage_sink(callback) -> None:
+    """设置用量变更回调（例如把累计写回 Job），传 None 取消。"""
+    _usage_local.sink = callback
+
+
+def get_token_usage() -> dict[str, int]:
+    """返回当前线程累计用量的快照。"""
+    usage = getattr(_usage_local, "usage", None)
+    if usage is None:
+        return TokenUsage().as_dict()
+    return usage.as_dict()
+
+
+def format_token_usage(usage: dict | None = None) -> str:
+    """把用量 dict 格式化成一行可读摘要。"""
+    u = usage if usage is not None else get_token_usage()
+    tu = TokenUsage(
+        prompt_tokens=int(u.get("prompt_tokens") or 0),
+        completion_tokens=int(u.get("completion_tokens") or 0),
+        total_tokens=int(u.get("total_tokens") or 0),
+        embedding_tokens=int(u.get("embedding_tokens") or 0),
+        chat_calls=int(u.get("chat_calls") or 0),
+        embedding_calls=int(u.get("embedding_calls") or 0),
+    )
+    return tu.format_brief()
+
+
+def _current_usage() -> TokenUsage:
+    usage = getattr(_usage_local, "usage", None)
+    if usage is None:
+        usage = TokenUsage()
+        _usage_local.usage = usage
+    return usage
+
+
+def _notify_usage() -> None:
+    sink = getattr(_usage_local, "sink", None)
+    if callable(sink):
+        try:
+            sink(get_token_usage())
+        except Exception:
+            pass
 
 
 def _openai_client(prefix: str = "") -> OpenAI:
@@ -261,6 +372,9 @@ def chat(messages: list[dict], tool_schemas: list[dict]) -> list[Action]:
             ) from e
         raise
 
+    _current_usage().add_chat(getattr(resp, "usage", None))
+    _notify_usage()
+
     msg = resp.choices[0].message
 
     # 把 assistant 这条消息原样塞回上下文（保留 tool_calls 结构）
@@ -296,6 +410,8 @@ def chat_text(system: str, user: str, temperature: float = 0.3) -> str:
         ],
         temperature=temperature,
     )
+    _current_usage().add_chat(getattr(resp, "usage", None))
+    _notify_usage()
     return (resp.choices[0].message.content or "").strip()
 
 
@@ -315,4 +431,6 @@ def embed_text(text: str) -> list[float]:
     except Exception as e:
         err = str(e)
         raise RuntimeError(f"embedding 调用失败 (model={_EMBEDDING_MODEL}): {err[:300]}") from e
+    _current_usage().add_embedding(getattr(resp, "usage", None))
+    _notify_usage()
     return resp.data[0].embedding

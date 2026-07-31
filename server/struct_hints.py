@@ -99,7 +99,8 @@ _STRUCT_CONSTRAINT_HINTS = [
         "hint": (
             "题面要求图是树（n-1 条边、连通、无环）。优先用 generator.h："
             "unweight::Tree / Chain（链）/ Flower（菊花）/ FlowerChain / MaxSonTree。"
-            "cout << tree 默认输出 n 与边列表。validator 用 ensuref 校验边数=n-1、无自环、无重边、连通、无环。"
+            "正确：t.gen(); cout << t（默认输出 n 与边）；自定义顺序用 for (auto &e : t.edges())。"
+            "严禁 get_edges() / t.shuffle()。validator 用 ensuref 校验边数=n-1、无自环、无重边、连通、无环。"
         ),
     },
     {

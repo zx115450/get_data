@@ -142,7 +142,10 @@ def propose_range(req: RangeProposeRequest):
         )
     except Exception as e:
         raise HTTPException(500, f"{type(e).__name__}: {e}") from e
-    return {"range_json": data}
+    return {
+        "range_json": data,
+        "problem_type": data.get("problem_type") or "",
+    }
 
 
 @app.post("/jobs")
@@ -161,6 +164,7 @@ def submit(req: JobRequest):
     job = job_store.create_job()
 
     def worker():
+        job_store.mark_job_started(job)
         try:
             job.status = job_store.JobStatus.RUNNING
             runner.run_job(
@@ -178,6 +182,8 @@ def submit(req: JobRequest):
             job.status = job_store.JobStatus.ERROR
             job.error = f"{type(e).__name__}: {e}"
             job_store.add_progress(job, f"ERROR: {job.error}")
+        finally:
+            job_store.mark_job_finished(job)
 
     threading.Thread(target=worker, daemon=True).start()
     return {"job_id": job.id}

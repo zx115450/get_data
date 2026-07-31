@@ -8,9 +8,23 @@ import os
 import zipfile
 from pathlib import Path
 
+_SANDBOX = Path(__file__).resolve().parent.parent / "sandbox"
+
 
 def _exe(base: str) -> str:
     return base + (".exe" if os.name == "nt" else "")
+
+
+def _resolve_pack_file(work: Path, name: str) -> Path | None:
+    """优先用 job 目录文件；头文件可回退到公共 sandbox。"""
+    local = work / name
+    if local.is_file():
+        return local
+    if name in ("testlib.h", "generator.h"):
+        shared = _SANDBOX / name
+        if shared.is_file():
+            return shared
+    return None
 
 
 def pack(out_dir: str, zip_path: str, meta: dict = None) -> str:
@@ -34,22 +48,18 @@ def pack(out_dir: str, zip_path: str, meta: dict = None) -> str:
 def pack_checker(work_dir: str, checker_zip_path: str) -> str:
     """把 work_dir 下的 checker 相关产物打包成 checker.zip，返回 zip 路径。
 
-    包含：checker.cpp、编译好的 checker 二进制、testlib.h（若存在）。
+    包含：checker.cpp、编译好的 checker 二进制、testlib.h（job 无则取 sandbox）。
     """
     work = Path(work_dir)
     checker_zip_path = Path(checker_zip_path)
     checker_zip_path.parent.mkdir(parents=True, exist_ok=True)
 
-    candidates = [
-        work / "checker.cpp",
-        work / _exe("checker"),
-        work / "testlib.h",
-    ]
-
+    names = ["checker.cpp", _exe("checker"), "testlib.h"]
     with zipfile.ZipFile(checker_zip_path, "w", zipfile.ZIP_DEFLATED) as z:
-        for f in candidates:
-            if f.exists() and f.is_file():
-                z.write(f, f.name)
+        for name in names:
+            f = _resolve_pack_file(work, name)
+            if f is not None:
+                z.write(f, name)
 
     return str(checker_zip_path)
 
@@ -58,7 +68,7 @@ def pack_sources(work_dir: str, sources_zip_path: str) -> str:
     """打包生成器/校验器源码与 range.json，便于二次修改。
 
     尽量包含：range.json、gen.cpp、validator.cpp、checker.cpp（若有）、
-    testlib.h / generator.h（若有）。不含 .exe 与测例。
+    testlib.h / generator.h（job 无则从 sandbox 取）。不含 .exe 与测例。
     """
     work = Path(work_dir)
     sources_zip_path = Path(sources_zip_path)
@@ -78,8 +88,8 @@ def pack_sources(work_dir: str, sources_zip_path: str) -> str:
     ]
     with zipfile.ZipFile(sources_zip_path, "w", zipfile.ZIP_DEFLATED) as z:
         for name in names:
-            f = work / name
-            if f.exists() and f.is_file():
-                z.write(f, f.name)
+            f = _resolve_pack_file(work, name)
+            if f is not None:
+                z.write(f, name)
 
     return str(sources_zip_path)

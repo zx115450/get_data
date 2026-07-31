@@ -18,8 +18,10 @@ def compile_std(job_dir: Path, std_code: str, lang: str) -> str:
     if lang == "cpp":
         (job_dir / "std.cpp").write_text(std_code, encoding="utf-8")
         out_name = "std.exe" if os.name == "nt" else "std"
+        # Windows MinGW 默认栈约 1MB，递归树/图标程在链上易炸；对齐常见 OJ 加大到 16MB
+        stack_flags = " -Wl,--stack,16777216" if os.name == "nt" else ""
         rc, _, err = safe_run(
-            f"g++ -O2 -std=c++17 -o {out_name} std.cpp",
+            f"g++ -O2 -std=c++17{stack_flags} -o {out_name} std.cpp",
             timeout=30,
             cwd=str(job_dir),
         )

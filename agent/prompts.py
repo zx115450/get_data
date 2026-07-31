@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 COMMON_CORE = """你是一个能调用工具的 Agent，任务是为一道算法题生成测试数据。
-生成器和校验器用 C++ + testlib（testlib.h 已自动提供）。
+生成器和校验器用 C++ + testlib（testlib.h / generator.h 经编译 -I 自动提供，无需拷贝到工作目录）。
 
 【以标程为准】用户会同时给题面、数据范围描述和标程源码。标程的输入读取顺序就是输入格式的唯一真相来源——
 先读标程，确认：是否第一行是测试组数 T、每行几个数、分隔符是空格还是换行、变量类型与范围、输出格式。
@@ -27,8 +27,8 @@ RANGE_ONLY_CORE = """你是出题数据规划助手。任务：根据题面与�
 
 TOOLS_FULL = """可用工具：
 - write_range(content): 写 range.json（含 count/constraints/edge_cases）
-- write_gen(content): 写 gen.cpp（testlib 或 generator.h），自动拷头文件并 g++ 编译成 gen
-- write_validate(content): 写 validator.cpp（testlib 校验器），自动拷 testlib.h 并 g++ 编译成 validator
+- write_gen(content): 写 gen.cpp（testlib 或 generator.h），自动 -I sandbox 并 g++ 编译成 gen
+- write_validate(content): 写 validator.cpp（testlib 校验器），自动 -I sandbox 并 g++ 编译成 validator
 - write_checker(content): 写自定义 checker.cpp（仅答案不唯一/需额外判定时）
 - use_builtin_checker(name): 安装内置 checker（lcmp/wcmp/rcmp4/rcmp6/rcmp9/yesno），答案唯一时优先用
 - run_gen(seed, type): 跑编译好的 gen 二进制生成一组输入，返回输入文本
@@ -136,14 +136,23 @@ BASE_GEN_RULES = """gen.cpp 必须满足（testlib / ACM-generator 写法）：
   - 【从 range.json 读取全部必要参数】写 gen.cpp 前务必 read_file("range.json")，读取 constraints 对象里的所有变量名（如 n、m、a、b、k 等）。每个变量名必须在 gen.cpp 中通过 opt<T>("name") 注册并用于生成本组数据；固定参数 index、count、type 也必须注册。若某个变量名在算法里不需要直接使用，也须用 opt<T>(...) 消费掉，避免 testlib 报 "unused key" 错误。
   - 【禁止输出摘要占位符】调用 write_gen / write_validate / write_checker 时，content 必须是完整可编译的 C++ 源码。禁止输出 `__OMITTED_SOURCE__`、`已写入`、源码片段节选等对话压缩摘要。若需要查看上一版，先调 read_file("gen.cpp") 再重写完整内容。
 
-ACM-generator（generator.h）常用速查（using namespace generator::all）：
-  - 树：unweight::Tree t(n); t.gen(); cout << t << endl;            // 默认输出 n 与边
-        unweight::Chain / Flower / FlowerChain / TreeLink 同理
-  - 图：unweight::Graph g(n,m); g.gen(); cout << g << endl;
-        BipartiteGraph / DAG / CycleGraph / WheelGraph / GridGraph
-  - 几何：ConvexHull<int> / SimplePolygon<int> / RandomPoints<int>，先用 set_xy_limit 限制坐标范围
-  - 带权：weight::Tree / weight::Graph；用 set_weight_limit(l,r) 限制边权
-  - 数组/排列/字符串：继续使用 testlib 的 rnd.next(l,r) / rnd.perm(n) / rnd.next("[a-z]+") 等
+ACM-generator（generator.h）硬性契约（using namespace generator::all）——写错会直接编不过：
+  【正确 · 默认输出格式就是「n + 边列表」时】
+      unweight::Tree t(n);   // 或 Chain / Flower / FlowerChain
+      t.gen();               // 必须先 gen()
+      cout << t << "\\n";    // 推荐：直接输出
+  【正确 · 需要自定义输出顺序（先打印别的字段再打印边）时】
+      unweight::Tree t(n);
+      t.gen();
+      for (auto &e : t.edges()) { int u = e.u(), v = e.v(); /* 自行 printf */ }
+  【严禁 · 以下写法不存在或不可用，write_gen 会被静态拒绝】
+      t.get_edges();   // ❌ 没有此方法（正确是 edges()）
+      t.shuffle();     // ❌ Tree/Chain/Flower 没有 shuffle
+      直接读 _edges    // ❌ 受保护成员
+  - 图同理：unweight::Graph g(n,m); g.gen(); cout << g; 或 for (auto &e : g.edges()) ...
+  - 几何：ConvexHull<int> / SimplePolygon<int> / RandomPoints<int>，先 set_xy_limit 再 gen()，cout << obj
+  - 带权：weight::Tree / weight::Graph；set_weight_limit 或 set_edges_weight_function 后 gen()
+  - 数组/排列/字符串：可用 Sequence / Permutation / String，或 testlib 的 rnd.next / rnd.perm
 """
 
 BASE_VAL_RULES = """validator.cpp 必须满足（testlib 写法）：
@@ -159,14 +168,18 @@ RULES = """规则：
 1. 完成任务必须调 finish，不要只输出文字就停下。
 2. 调用工具时参数要完整、合法。
 3. 看到工具返回 ERROR 要修正后再继续，不要无视。
+4. 【空输出合法】若标程仅在查询类操作时打印答案，则「全更新」类测例的空 .out 是正确答案；不要为过检伪造查询去破坏 *_update 等边界语义。多数 random / 混合操作测例仍应含查询，保证套件里至少有一部分非空答案。
 """
 
 TYPE_TREE = """【树图题型模块 — tree / weighted_tree】
-树/图/几何题优先用 ACM-generator（#include "generator.h"，已自动提供；它包含 testlib.h）：
+树/图/几何题优先用 ACM-generator（#include "generator.h"，经 -I 自动提供；它包含 testlib.h）：
   using namespace generator::all;
   常用：unweight::Tree / Chain / Flower / FlowerChain / MaxSonTree，
         weight::Tree / weight::Graph（带权树图）。
-  用法示例：unweight::Tree t(n); t.gen(); cout << t << endl;  // 默认输出 n 与边列表
+  【唯一正确用法】
+      unweight::Tree t(n); t.gen(); cout << t << "\\n";
+      // 或自定义边输出：t.gen(); for (auto &e : t.edges()) printf("%d %d\\n", e.u(), e.v());
+  【严禁】t.get_edges() / t.shuffle() / 访问 _edges（会编译失败）。
   仍须 registerGen(argc,argv,1) 与 --seed/--type/--index/--count 契约；不要用 fill_inputs/hack。
 
 树图默认按「无自环、无重边」处理：生成器用 v>u 或 u≠v 的池子，validator 用 ensuref(u!=v) 并检查重复边。
@@ -177,12 +190,15 @@ TYPE_TREE = """【树图题型模块 — tree / weighted_tree】
 """
 
 TYPE_GRAPH = """【图题型模块 — graph / weighted_graph】
-树/图/几何题优先用 ACM-generator（#include "generator.h"，已自动提供；它包含 testlib.h）：
+树/图/几何题优先用 ACM-generator（#include "generator.h"，经 -I 自动提供；它包含 testlib.h）：
   using namespace generator::all;
   常用：unweight::Graph / BipartiteGraph / DAG / CycleGraph / WheelGraph / GridGraph，
         unweight::Tree / Chain / Flower / FlowerChain / MaxSonTree，
         weight::Tree / weight::Graph。
-  用法示例：unweight::Graph g(n, m); g.gen(); cout << g << endl;
+  【唯一正确用法】
+      unweight::Graph g(n, m); g.gen(); cout << g << "\\n";
+      // 树骨架作连通图：unweight::Tree t(n); t.gen(); for (auto &e : t.edges()) ...
+  【严禁】get_edges() / Tree::shuffle() / 访问 _edges。
   仍须 registerGen(argc,argv,1) 与 --seed/--type/--index/--count 契约；不要用 fill_inputs/hack。
 
 图题默认按「无自环、无重边」处理：生成器用 v>u 或 u≠v 的池子，validator 用 ensuref(u!=v) 并检查重复边。
@@ -363,6 +379,9 @@ PLANNER_PROMPT = """你是算法竞赛测试数据生成器设计专家。任务
    - 3. 多测与 sum 约束（若有，写明如何处理；若无不测写 "无多测"）
    - 4. 规模分层（random 分支如何用 index/count 覆盖 [L,R] 大小端）
    - 5. edge_cases 映射（每个 edge_case 名字对应的分支构造策略）
+       * 树/图结构题：写明用 generator.h 的 unweight::Tree/Chain/Flower 等；
+         默认格式写「t.gen(); cout << t」；自定义输出顺序写「t.gen(); for (auto &e : t.edges())」；
+         严禁在计划里写 get_edges() / Tree::shuffle()（这两个 API 不存在）。
    - 6. validator 校验点（必须明确二选一，写进计划）：
        * 若有结构性质（树/图无重边、DAG、二分图、special_constraints 等）→ 列出每条要用 ensuref 校验的点；
        * 若只有范围/格式约束 → 明确写「无结构性质，validator 顶部加 // no-structural-constraints」；
@@ -401,6 +420,19 @@ int main(int argc, char* argv[]) {
 """
 
 
+_GEN_API_GATE = """【generator.h 树/图 API 硬性契约 — 写错 write_gen 会被静态拒绝或编译失败】
+正确（默认输出 n+边）：
+  unweight::Tree t(n); t.gen(); cout << t << "\\n";
+正确（自定义输出顺序，先打别的字段再打边）：
+  unweight::Tree t(n); t.gen();
+  for (auto &e : t.edges()) { int u = e.u(), v = e.v(); /* printf */ }
+严禁（不存在）：
+  t.get_edges();   // ❌ 正确是 edges()
+  t.shuffle();     // ❌ Tree/Chain/Flower 没有 shuffle
+  访问 _edges      // ❌
+图同理：g.gen(); cout << g; 或 for (auto &e : g.edges()) ...
+"""
+
 CODER_PROMPT = """你是 ACM 数据生成器 / 校验器编码专家。任务：根据当前工作目录的 gen_plan.md 和 range.json，写出完整可编译的 gen.cpp 与 validator.cpp。
 
 可用工具：
@@ -410,18 +442,20 @@ CODER_PROMPT = """你是 ACM 数据生成器 / 校验器编码专家。任务：
 - run_self_check(): 快速自检（系统也会在写入成功后自动跑；通过后才能 finish）
 - finish(summary): 自检通过后调用
 
+""" + _GEN_API_GATE + """
 """ + _VALIDATOR_GATE + """
 工作规则：
 1. 第一步必须 read_file("gen_plan.md") 和 read_file("range.json")，按 plan 与范围实现代码。
 2. gen.cpp 必须 #include "testlib.h" 或 "generator.h"，main 里 registerGen(argc, argv, 1)。
 3. 必须解析所有 opt：seed、type、index、count，以及 range.json 中所有 constraints 变量名，避免 "unused key" 错误。
-4. write_validate 前务必满足上方【validator 编译前门禁】（ensuref 或 // no-structural-constraints + readEof）。
-5. 【硬门禁】只允许写一轮完整 gen.cpp + validator.cpp（可同轮并行 write_gen + write_validate）。
+4. 树/图结构必须遵守上方【generator.h API 硬性契约】：先 gen()，再用 cout << t 或 t.edges()；禁止 get_edges/shuffle。
+5. write_validate 前务必满足上方【validator 编译前门禁】（ensuref 或 // no-structural-constraints + readEof）。
+6. 【硬门禁】只允许写一轮完整 gen.cpp + validator.cpp（可同轮并行 write_gen + write_validate）。
    写入编译成功后，系统会自动跑 run_self_check(fast)；不要在未自检前连续多次 write。
-6. 自动/手动自检返回 OK → 立刻 finish；返回 ERROR → 只允许再修正一轮（写完整源码），写完后再次自动自检；若仍失败，finish 并说明原因。
-7. 自检 OK 后禁止再 write_gen / write_validate。
-8. 任何情况下禁止把 __OMITTED_SOURCE__ 等历史摘要写回文件；如需查看旧版，先 read_file。
-9. 【骨架重写模式】如果 task 明确提示"骨架错误/需重写"：先 read_file 现有 gen.cpp/validator.cpp 了解问题，然后按 plan 输出完整新版代码，不要只改局部。"""
+7. 自动/手动自检返回 OK → 立刻 finish；返回 ERROR → 只允许再修正一轮（写完整源码），写完后再次自动自检；若仍失败，finish 并说明原因。
+8. 自检 OK 后禁止再 write_gen / write_validate。
+9. 任何情况下禁止把 __OMITTED_SOURCE__ 等历史摘要写回文件；如需查看旧版，先 read_file。
+10. 【骨架重写模式】如果 task 明确提示"骨架错误/需重写"：先 read_file 现有 gen.cpp/validator.cpp 了解问题，然后按 plan 输出完整新版代码，不要只改局部。"""
 
 
 CODER_REWRITE_PROMPT = """你是 ACM 数据生成器 / 校验器编码专家。当前第一版 gen.cpp / validator.cpp 的骨架存在结构性问题，需按 gen_plan.md 重新写出完整新版。
@@ -433,6 +467,7 @@ CODER_REWRITE_PROMPT = """你是 ACM 数据生成器 / 校验器编码专家。�
 - run_self_check(): 快速自检（系统也会在写入成功后自动跑；通过后才能 finish）
 - finish(summary): 自检通过后调用
 
+""" + _GEN_API_GATE + """
 """ + _VALIDATOR_GATE + """
 工作规则：
 1. 先 read_file("gen_plan.md") 和 read_file("range.json")，重新理解题意与范围。
@@ -442,21 +477,34 @@ CODER_REWRITE_PROMPT = """你是 ACM 数据生成器 / 校验器编码专家。�
    - gen TIMEOUT / MEMORY（O(n^2) 枚举或预建大池子）；
    - 输入格式与标程读入顺序不匹配；
    - 连续多轮 Fixer 无法收敛的同类错误；
-   - write_validate 因缺 ensuref / 缺 // no-structural-constraints 被拒。
-4. 【硬门禁】只写一轮完整 gen.cpp / validator.cpp（可同轮并行），写入成功后系统自动跑快速自检；禁止未自检连续改写。
-5. 自检 OK → finish；自检 FAIL → 只允许再修正一轮，写完再次自动自检。
-6. 禁止把 __OMITTED_SOURCE__ 等历史摘要写回文件；如需查看旧版，先 read_file。
-7. 自检通过后 finish，说明本次重写针对的根因与改动。"""
+   - write_validate 因缺 ensuref / 缺 // no-structural-constraints 被拒；
+   - write_gen 因 get_edges()/shuffle() 被静态拒绝或编译失败。
+4. 树/图必须遵守【generator.h API 硬性契约】：t.gen(); cout << t 或 t.edges()；禁止 get_edges/shuffle。
+5. 【硬门禁】只写一轮完整 gen.cpp / validator.cpp（可同轮并行），写入成功后系统自动跑快速自检；禁止未自检连续改写。
+6. 自检 OK → finish；自检 FAIL → 只允许再修正一轮，写完再次自动自检。
+7. 禁止把 __OMITTED_SOURCE__ 等历史摘要写回文件；如需查看旧版，先 read_file。
+8. 自检通过后 finish，说明本次重写针对的根因与改动。"""
 
 
-def build_coder_prompt() -> str:
+def _with_type_modules(base_parts: list[str], problem_type: str = "") -> str:
+    """在通用规则后追加题型模块（tree/graph 等）。"""
+    parts = list(base_parts)
+    type_module = _TYPE_MODULES.get(problem_type or "", "")
+    if type_module:
+        parts.append(type_module)
+    return "\n\n".join(parts)
+
+
+def build_coder_prompt(problem_type: str = "") -> str:
     """返回 Coder 阶段（硬自检）的 System Prompt。"""
-    return CODER_PROMPT
+    return _with_type_modules([CODER_PROMPT, BASE_GEN_RULES, BASE_VAL_RULES], problem_type)
 
 
-def build_coder_rewrite_prompt() -> str:
+def build_coder_rewrite_prompt(problem_type: str = "") -> str:
     """返回 Coder Rewrite（骨架重写）阶段的 System Prompt。"""
-    return CODER_REWRITE_PROMPT
+    return _with_type_modules(
+        [CODER_REWRITE_PROMPT, BASE_GEN_RULES, BASE_VAL_RULES], problem_type
+    )
 
 
 CHECKER_CORE = """你是 Special Judge 编写助手。任务：为本题写一个 checker.cpp，用来判定选手输出是否合法/正确。
@@ -600,7 +648,8 @@ FIXER_WORKFLOW = """修复流程：
 FIXER_RULES = """规则：
 1. 只写 gen.cpp，不要改 range.json / validator.cpp / checker.cpp。
 2. write_gen 时 content 必须是完整源码，禁止摘要。
-3. 写一次 → 等自动快速自检 → 再 finish；禁止空转连写。
+3. 树/图：t.gen(); cout << t 或 for (auto &e : t.edges())；禁止 get_edges()/t.shuffle()。
+4. 写一次 → 等自动快速自检 → 再 finish；禁止空转连写。
 """
 
 
@@ -633,10 +682,12 @@ GEN_FIXER_TOOLS = """可用工具：
 GEN_FIXER_WORKFLOW = """修复流程：
 1. 先 read_file("gen.cpp") 和 read_file("validator.cpp")，并阅读自检失败日志。
 2. 判断根因：
+   - write_gen / 编译报 get_edges / shuffle / private _edges：改成 t.gen(); cout << t 或 for (auto &e : t.edges())。
    - write_validate 报「缺 ensuref」：有结构性质则补 ensuref；仅范围/格式则在顶部加 // no-structural-constraints。
    - gen TIMEOUT / MEMORY / rc != 0：生成器算法或规模控制问题，修 gen.cpp。
    - validate FAILED：gen 输出违反约束；优先修 gen.cpp，必要时再调整 validator.cpp（不能为了过校验而牺牲正确性）。
-   - std FAILED / TIMEOUT / MEMORY：数据规模对标程太大或输入格式不匹配；修 gen.cpp 降低规模 / 对齐格式。
+   - std FAILED / TIMEOUT / MEMORY / STACK_OVERFLOW：数据规模对标程太大、格式不匹配或栈溢出；修 gen.cpp 降低规模 / 对齐格式（勿把单组空 stdout 当失败——全更新无查询时为空合法）。
+   - 全部测例 stdout 为空：套件级失败——补 random/混合测例的查询操作，或检查标程是否写了输出；不要破坏 *_update 边界语义。
    - 缺分支 / 覆盖不全：补 edge_case 分支或完善 random 分层。
 3. 【硬门禁】每轮只允许写一次（可同轮 write_gen + write_validate）。写入编译成功后，系统会自动跑 run_self_check(fast)；禁止未自检连续改写。
 4. 自检 OK → finish；自检 FAIL → 本轮结束，由外层决定是否进入下一轮 Fixer（不要在同一会话里连写多版）。
@@ -646,20 +697,27 @@ GEN_FIXER_WORKFLOW = """修复流程：
 GEN_FIXER_RULES = """规则：
 1. 只修改 gen.cpp 和/或 validator.cpp，不要改 range.json、checker.cpp、标程。
 2. write_gen / write_validate 时 content 必须是完整源码，禁止摘要或占位符。
-3. validator 必须满足：有结构用 ensuref；仅范围/格式则顶部加 // no-structural-constraints；并 readEof。
-4. 不要为修一个问题引入新 bug；优先小范围改动，避免推翻整个 plan。
-5. 写一次 → 等自动快速自检 → 再决定 finish 或结束本轮；禁止空转连写。
+3. 树/图：t.gen(); cout << t 或 t.edges()；禁止 get_edges()/t.shuffle()/访问 _edges。
+4. validator 必须满足：有结构用 ensuref；仅范围/格式则顶部加 // no-structural-constraints；并 readEof。
+5. 不要为修一个问题引入新 bug；优先小范围改动，避免推翻整个 plan。
+6. 写一次 → 等自动快速自检 → 再决定 finish 或结束本轮；禁止空转连写。
+7. 【空输出合法】单组 std stdout 为空不一定是错误（全更新无查询时答案本就为空）。若失败摘要写「全部测例 stdout 为空」，再补查询/混合操作或检查标程；不要为过检给 *_update 边界硬塞查询。
 """
 
 
-def build_gen_fixer_prompt() -> str:
+def build_gen_fixer_prompt(problem_type: str = "") -> str:
     """返回阶段 2（Gen Agent 自检失败后）Fixer Agent 的 System Prompt。"""
-    return "\n\n".join([
-        GEN_FIXER_CORE,
-        GEN_FIXER_TOOLS,
-        GEN_FIXER_WORKFLOW,
-        GEN_FIXER_RULES,
-    ])
+    return _with_type_modules(
+        [
+            GEN_FIXER_CORE,
+            _GEN_API_GATE,
+            GEN_FIXER_TOOLS,
+            GEN_FIXER_WORKFLOW,
+            GEN_FIXER_RULES,
+            BASE_GEN_RULES,
+        ],
+        problem_type,
+    )
 
 
 # 兼容旧入口：默认的完整 prompt（≈原 SYSTEM_PROMPT）

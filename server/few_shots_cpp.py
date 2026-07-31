@@ -82,7 +82,9 @@ CPP_TREE_EXAMPLE = r"""
 输入格式：第 1 行 n；接下来 n-1 行每行两个整数 u v 表示一条边（节点编号 1..n）。
 输出格式：一个整数。
 数据范围：n in [2,1e5]，默认 15 组，覆盖链、菊花、随机树、平衡二叉树、n=2；其余组 n 按 index 在 [2,1e5] 分层。
-说明：树结构优先用 generator.h（Chain/Flower/Tree），仍须 registerGen 与 --seed/--type/--index/--count。
+说明：树结构优先用 generator.h（Chain/Flower/Tree）：必须先 .gen()，再 cout << tree；
+自定义输出用 tree.edges()（不是 get_edges）；严禁 .shuffle()。
+仍须 registerGen 与 --seed/--type/--index/--count。
 
 range.json:
 {
@@ -167,7 +169,8 @@ int main(int argc, char* argv[]) {
 CPP_GRAPH_EXAMPLE = r"""
 【参考范例：一道图题的标准写法（C++ + ACM-generator）】
 题面：给定 n 个点 m 条边的无向图（无自环无重边），判断是否连通。
-说明：树/链/菊花优先用 generator.h；稀疏随机边用 unordered_set 采样。严禁枚举 O(n^2) 边池。
+说明：树/链/菊花优先用 generator.h：先 .gen()，再 .edges() 取边（不是 get_edges，也没有 .shuffle）。
+稀疏随机边用 unordered_set 采样。严禁枚举 O(n^2) 边池。
 输入格式：第 1 行 n m；接下来 m 行每行 u v。
 输出格式：YES 或 NO。
 数据范围：n in [1,1000]，m in [0,n*(n-1)/2]，15 组，覆盖连通树、不连通、完全图、链、菊花、随机稀疏。

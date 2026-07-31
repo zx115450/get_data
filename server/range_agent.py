@@ -157,12 +157,24 @@ def propose_range_json(
     std_code: str = "",
     lang: str = "cpp",
 ) -> dict:
-    """调 LLM 只生成 range.json，返回清洗并校验后的 dict（不含 std_cmd）。"""
+    """调 LLM 只生成 range.json，返回清洗并校验后的 dict（不含 std_cmd）。
+
+    若未显式指定 problem_type：先单独调用一次大模型判题型，再写 range；
+    结果写入 range.json 的 problem_type 字段。
+    """
+    from server.few_shots import classify_problem_type_llm, normalize_problem_type
+
     stmt = to_plain_for_llm(problem_statement)
     rng = to_plain_for_llm(data_range_desc)
     work = Path(tempfile.gettempdir()) / f"acm_range_{uuid.uuid4().hex[:10]}"
     work.mkdir(parents=True, exist_ok=True)
     tools.set_context(str(work), std_cmd="")
+
+    typ = normalize_problem_type(problem_type)
+    type_source = "user"
+    if not typ:
+        typ = classify_problem_type_llm(stmt, rng, std_code)
+        type_source = "llm"
 
     std_hint = ""
     if std_code and std_code.strip():
@@ -190,12 +202,14 @@ def propose_range_json(
         f"【题面】\n{stmt}\n\n"
         f"【数据范围描述】\n{rng}\n"
         f"{std_hint}"
-        f"{_build_type_hint_block(problem_type)}"
+        f"\n【已判定题型】{typ}（来源: {type_source}）\n"
+        f"{_build_type_hint_block(typ)}"
         f"{pre_titles_block}"
         f"{struct_hint_block}"
         f"\ncount 默认 15。constraints 覆盖题面中的规模变量（如 n、T、m）。"
         f"edge_cases 用简短英文标识符。写完 write_range 后 finish。"
         f"务必填写 special_constraints 字段（即使为空数组也要写）。\n"
+        f"不要改写 problem_type（系统会写入）；只需按上述题型建议设计 edge_cases。\n"
     )
     summary = agent_run(
         task,
@@ -214,6 +228,7 @@ def propose_range_json(
 
     data = normalize_range_json(dict(data))
     data.pop("std_cmd", None)
+    data["problem_type"] = typ
     errs = validate_range_json(data)
     if errs:
         raise RuntimeError("range.json 不合法:\n" + "\n".join(f"  - {e}" for e in errs))
