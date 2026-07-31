@@ -18,7 +18,7 @@ from server.runners.snapshot import (
     restore_good_snapshot,
     save_good_snapshot,
 )
-from server.struct_hints import scan_structural_hints
+from server.struct_hints import scan_structural_hints, scan_structural_titles
 from server.text_agent import simplify_text
 from utils.markup import to_plain_for_llm
 
@@ -42,6 +42,110 @@ GEN_FIXER_TOOL_SCHEMAS = [
 GEN_TOOL_SCHEMAS = GEN_FIXER_TOOL_SCHEMAS
 
 PLAN_FILE = "gen_plan.md"
+
+
+def _extract_range_plain(task: str) -> str:
+    """从完整 task 文本里抽出【数据范围描述】段落。"""
+    if "【数据范围描述】\n" not in task:
+        return ""
+    return task.split("【数据范围描述】\n")[1].split("\n\n【")[0]
+
+
+def _load_range_json(job_dir: Path) -> dict | None:
+    """读取并规范化 job_dir/range.json；不存在或非法时返回 None。"""
+    path = job_dir / "range.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(data, dict) or not data.get("constraints"):
+        return None
+    from pipeline.gen_data import normalize_range_json
+
+    data = normalize_range_json(dict(data))
+    data.pop("std_cmd", None)
+    return data
+
+
+def _run_range_only_agent(
+    job: job_store.Job,
+    job_dir: Path,
+    stmt_plain: str,
+    range_plain: str,
+    std_code: str,
+    eff_type: str,
+    on_event,
+) -> dict:
+    """真正跑一轮 range-only Agent，写出并校验 range.json，返回 dict。"""
+    from pipeline.gen_data import normalize_range_json, validate_range_json
+    from server.range_agent import _build_type_hint_block
+
+    struct_hint_block = scan_structural_hints(stmt_plain) or ""
+    pre_titles = scan_structural_titles(stmt_plain) or []
+    pre_titles_block = ""
+    if pre_titles:
+        pre_titles_block = (
+            "\n\n【预扫描到的特殊结构约束（请据此填写 special_constraints）】\n"
+            + "\n".join(f"- {t}" for t in pre_titles)
+            + "\n请确认这些约束确实出现在题面里（不要凭空加），"
+            "并补充题面里其它未被预扫描到的隐含约束。每条都要在 edge_cases 里加对应边界。\n"
+        )
+
+    std_hint = ""
+    if std_code and std_code.strip():
+        code = std_code.strip()
+        if len(code) > 4000:
+            code = code[:2000] + "\n/* ... */\n" + code[-1500:]
+        std_hint = f"\n\n【标程片段，仅供推断是否有多测 T】\n```\n{code}\n```\n"
+
+    range_task = (
+        f"请只产出 range.json。\n\n"
+        f"【题面】\n{stmt_plain}\n\n"
+        f"【数据范围描述】\n{range_plain}\n"
+        f"{std_hint}"
+        f"{_build_type_hint_block(eff_type)}"
+        f"{pre_titles_block}"
+        f"{struct_hint_block}"
+        f"\ncount 默认 15。constraints 覆盖题面中的规模变量（如 n、T、m）。"
+        f"edge_cases 用简短英文标识符。写完 write_range 后 finish。"
+        f"务必填写 special_constraints 字段（即使为空数组也要写）。\n"
+    )
+
+    job_store.add_progress(job, "【Range】启动 range-only Agent 写 range.json")
+    summary = agent_run(
+        range_task,
+        max_steps=8,
+        verbose=False,
+        on_event=on_event,
+        system_prompt=prompts.build_range_prompt(),
+        tool_schemas=RANGE_TOOL_SCHEMAS,
+    )
+    job_store.add_progress(job, f"【Range】结束: {summary}")
+
+    path = job_dir / "range.json"
+    if not path.is_file():
+        raise RuntimeError(f"Range Agent 未产出 range.json（summary={summary!r}）")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Range Agent 产出的 range.json 不是合法 JSON: {e}") from e
+
+    data = normalize_range_json(dict(data))
+    data.pop("std_cmd", None)
+    errs = validate_range_json(data)
+    if errs:
+        raise RuntimeError(
+            "Range Agent 产出的 range.json 不合法:\n" + "\n".join(f"  - {e}" for e in errs)
+        )
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    job_store.add_progress(
+        job,
+        f"【Range】已写入 range.json: count={data.get('count')} "
+        f"edge_cases={data.get('edge_cases')}",
+    )
+    return data
 
 
 def prepare_prompts(
@@ -313,37 +417,36 @@ def run_gen_agent(
     resume_failure_block: str = "",
 ) -> str:
     """启动 Range/Gen Agent。Plan-and-Execute：先写 gen_plan.md，再按 plan 写代码。返回 Agent summary。"""
-    full_prompt = prompts.build_full_prompt(
-        eff_type,
-        range_json=range_json,
-        problem_statement=stmt_plain,
-        std_code=std_code,
-    )
+    range_plain = _extract_range_plain(task)
+    range_path = job_dir / "range.json"
+
+    # 续跑 / 磁盘已有方案时，把 range.json 读进内存，供后续 Plan/Coder 使用
+    if range_json is None and range_path.is_file():
+        range_json = _load_range_json(job_dir)
+
     resume_stage = resume_info.get("stage") if resume_info else None
-    if resume_stage == "checker" and (job_dir / "range.json").is_file() and has_gen_val_at_resume(job_dir):
+    if resume_stage == "checker" and range_path.is_file() and has_gen_val_at_resume(job_dir):
         job_store.add_progress(job, "【续跑】父任务 checker 阶段失败，跳过 gen/validator Agent")
         return "checker 阶段续跑：跳过 gen/validator Agent"
 
-    if resume_info and (job_dir / "range.json").is_file():
-        stage_prompts = {"gen": full_prompt}
-        stage_tool_schemas = {"gen": GEN_TOOL_SCHEMAS}
+    need_range_stage = range_json is None
+    if resume_info and range_path.is_file() and not need_range_stage:
+        stage_keys = ["gen"]
         job_store.add_progress(job, "【续跑】已有 range.json，直接进入 gen/validator 修复阶段")
-    elif range_json is not None:
-        stage_prompts = {"gen": full_prompt}
-        stage_tool_schemas = {"gen": GEN_TOOL_SCHEMAS}
+    elif not need_range_stage:
+        stage_keys = ["gen"]
     else:
-        stage_prompts = {
-            "range": prompts.build_range_prompt(),
-            "gen": full_prompt,
-        }
-        stage_tool_schemas = {
-            "range": RANGE_TOOL_SCHEMAS,
-            "gen": GEN_TOOL_SCHEMAS,
-        }
+        stage_keys = ["range", "gen"]
     job_store.add_progress(
         job,
-        f"Agent prompt stages: {list(stage_prompts.keys())} | type={eff_type}"
+        f"Agent prompt stages: {stage_keys} | type={eff_type}"
     )
+
+    # ---- Range 阶段：未提供方案且磁盘无合法 range.json 时，真正跑一轮 range-only Agent ----
+    if need_range_stage:
+        range_json = _run_range_only_agent(
+            job, job_dir, stmt_plain, range_plain, std_code, eff_type, on_event,
+        )
 
     if (job_dir / "gen.cpp.good").is_file() or (job_dir / "gen.py.good").is_file():
         restore_good_snapshot(job_dir)
@@ -357,7 +460,7 @@ def run_gen_agent(
     else:
         system_prompt, user_prompt = _build_planner_task(
             stmt_plain,
-            task.split("【数据范围描述】\n")[1].split("\n\n【")[0] if "【数据范围描述】" in task else "",
+            range_plain,
             "", "", range_json or {}, eff_type,
         )
         job_store.add_progress(job, "【Plan】启动 Planner 单次生成 gen_plan.md")
@@ -391,10 +494,6 @@ def run_gen_agent(
 
     # ---- Execute 阶段：Coder 一次编码 + Gen Fixer 最多 4 轮 + 可选 Coder 重写 1 次 ----
     job_store.add_progress(job, "【Execute】Coder 第 1/1 轮：写 gen/validator")
-    range_plain = (
-        task.split("【数据范围描述】\n")[1].split("\n\n【")[0]
-        if "【数据范围描述】" in task else ""
-    )
     coder_task = _build_coder_task(
         stmt_plain, range_plain, "", "", range_json or {}, eff_type,
         resume_failure_block,

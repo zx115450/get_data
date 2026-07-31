@@ -1,6 +1,6 @@
 """ACM 出数据 —— 桌面 GUI（tkinter）。
 
-三块输入：标程(std) / 题面 / 输入描述(数据范围)；题面与范围可「简化」「美化」。
+三块输入：标程(std) / 题面 / 输入描述 / 输出描述；题面、范围与输出可「美化」。
 第四 Tab：数据方案（range）可视化。
 
 用法：
@@ -230,6 +230,11 @@ class App:
         # 主要操作
         act_box = ttk.Frame(header)
         act_box.pack(side="right", fill="y")
+        self.btn_beautify_all = ttk.Button(
+            act_box, text="一键美化", bootstyle="outline-info", command=self.on_beautify_all,
+        )
+        self.btn_beautify_all.pack(side="left", padx=3)
+        ToolTip(self.btn_beautify_all, "一键美化题面、输入描述、输出描述，直接保留")
         self.btn_submit = ttk.Button(
             act_box, text="提交生成", bootstyle="primary", command=self.on_submit,
         )
@@ -338,16 +343,12 @@ class App:
         tip2 = ttk.Frame(tab_stmt)
         tip2.pack(fill="x", padx=4, pady=(4, 8))
         ttk.Label(
-            tip2, text="支持 Markdown / HTML / LaTeX；可先简化再出数据，或美化排版",
+            tip2, text="支持 Markdown / HTML / LaTeX；可美化排版",
             bootstyle="secondary",
         ).pack(side="left")
         ttk.Button(
             tip2, text="美化", bootstyle="outline-info",
             command=lambda: self.open_rewrite("beautify", "statement", self.statement),
-        ).pack(side="right", padx=2)
-        ttk.Button(
-            tip2, text="简化", bootstyle="outline-primary",
-            command=lambda: self.open_rewrite("simplify", "statement", self.statement),
         ).pack(side="right", padx=2)
         self.statement = ScrolledText(
             tab_stmt, height=16, font=("Consolas", 10), wrap="word", autohide=True,
@@ -359,16 +360,12 @@ class App:
         tip3 = ttk.Frame(tab_range)
         tip3.pack(fill="x", padx=4, pady=(4, 8))
         ttk.Label(
-            tip3, text="变量范围、边界；同样可简化 / 美化",
+            tip3, text="支持 Markdown / HTML / LaTeX；可美化排版",
             bootstyle="secondary",
         ).pack(side="left")
         ttk.Button(
             tip3, text="美化", bootstyle="outline-info",
             command=lambda: self.open_rewrite("beautify", "range", self.range_desc),
-        ).pack(side="right", padx=2)
-        ttk.Button(
-            tip3, text="简化", bootstyle="outline-primary",
-            command=lambda: self.open_rewrite("simplify", "range", self.range_desc),
         ).pack(side="right", padx=2)
         self.range_desc = ScrolledText(
             tab_range, height=16, font=("Consolas", 10), wrap="word", autohide=True,
@@ -380,16 +377,12 @@ class App:
         tip_output = ttk.Frame(tab_output)
         tip_output.pack(fill="x", padx=4, pady=(4, 8))
         ttk.Label(
-            tip_output, text="输出格式、答案判定规则；Special Judge 时尤其重要",
+            tip_output, text="支持 Markdown / HTML / LaTeX；可美化排版",
             bootstyle="secondary",
         ).pack(side="left")
         ttk.Button(
             tip_output, text="美化", bootstyle="outline-info",
             command=lambda: self.open_rewrite("beautify", "output", self.output_desc),
-        ).pack(side="right", padx=2)
-        ttk.Button(
-            tip_output, text="简化", bootstyle="outline-primary",
-            command=lambda: self.open_rewrite("simplify", "output", self.output_desc),
         ).pack(side="right", padx=2)
         self.output_desc = ScrolledText(
             tab_output, height=16, font=("Consolas", 10), wrap="word", autohide=True,
@@ -604,6 +597,31 @@ class App:
         color = "#28a745" if running else "#adb5bd"
         self._srv_dot.config(foreground=color)
 
+    def _call_text_rewrite(self, text: str, kind: str, mode: str, extra_hint: str = "") -> str:
+        """调用 /text/simplify 或 /text/beautify，返回改写后的文本。"""
+        endpoint = "/text/simplify" if mode == "simplify" else "/text/beautify"
+        body = {"text": text, "kind": kind, "extra_hint": extra_hint or ""}
+        data = json.dumps(body).encode()
+        req = urllib.request.Request(
+            f"{BASE}{endpoint}", data=data,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            r = urllib.request.urlopen(req, timeout=120)
+            return json.loads(r.read()).get("result") or ""
+        except urllib.error.HTTPError as e:
+            detail = ""
+            try:
+                raw = e.read().decode("utf-8", errors="replace")
+                payload = json.loads(raw) if raw else {}
+                detail = payload.get("detail") or raw
+            except Exception:
+                detail = ""
+            if isinstance(detail, list):
+                detail = "; ".join(str(x) for x in detail)
+            msg = f"HTTP Error {e.code}: {detail or e.reason or 'Bad Request'}"
+            raise RuntimeError(msg) from e
+
     def open_rewrite(self, mode: str, kind: str, widget):
         """mode: simplify|beautify；弹出审阅窗：保留 / 加提示词重生成 / 不保留。"""
         src = widget.get("1.0", "end").strip()
@@ -662,28 +680,7 @@ class App:
             out_box.configure(state="normal")
 
         def call_api(extra: str, base: str):
-            endpoint = "/text/simplify" if mode == "simplify" else "/text/beautify"
-            body = {"text": base, "kind": kind, "extra_hint": extra or ""}
-            data = json.dumps(body).encode()
-            req = urllib.request.Request(
-                f"{BASE}{endpoint}", data=data,
-                headers={"Content-Type": "application/json"},
-            )
-            try:
-                r = urllib.request.urlopen(req, timeout=120)
-                return json.loads(r.read()).get("result") or ""
-            except urllib.error.HTTPError as e:
-                detail = ""
-                try:
-                    raw = e.read().decode("utf-8", errors="replace")
-                    payload = json.loads(raw) if raw else {}
-                    detail = payload.get("detail") or raw
-                except Exception:
-                    detail = ""
-                if isinstance(detail, list):
-                    detail = "; ".join(str(x) for x in detail)
-                msg = f"HTTP Error {e.code}: {detail or e.reason or 'Bad Request'}"
-                raise RuntimeError(msg) from e
+            return self._call_text_rewrite(base, kind, mode, extra)
 
         def run_gen(extra="", use_current_as_base=False):
             if state["busy"]:
@@ -737,6 +734,51 @@ class App:
         btn_discard.pack(side="right", padx=4)
 
         run_gen(extra="", use_current_as_base=False)
+
+    def on_beautify_all(self):
+        """一键美化题面、输入描述、输出描述，直接保留，不弹确认对话框。"""
+        fields = [
+            ("statement", self.statement, "题面"),
+            ("range", self.range_desc, "输入描述"),
+            ("output", self.output_desc, "输出描述"),
+        ]
+        texts = [
+            (kind, widget, label, widget.get("1.0", "end").strip())
+            for kind, widget, label in fields
+        ]
+        if not any(t for _, _, _, t in texts):
+            messagebox.showwarning("提示", "题面、输入描述、输出描述均为空")
+            return
+
+        self.status.set("正在一键美化题面、输入描述、输出描述…")
+        self.btn_beautify_all.config(state="disabled")
+        threading.Thread(target=self._beautify_all_worker, args=(texts,), daemon=True).start()
+
+    def _beautify_all_worker(self, texts):
+        """在后台线程串行调用 /text/beautify，完成后在主线程写回编辑区。"""
+        results = {}
+        errors = []
+        for kind, widget, label, text in texts:
+            if not text:
+                continue
+            try:
+                result = self._call_text_rewrite(text, kind, "beautify")
+                results[kind] = (widget, result)
+            except Exception as e:
+                errors.append(f"{label}: {e}")
+
+        def apply():
+            for widget, result in results.values():
+                widget.delete("1.0", "end")
+                widget.insert("1.0", result)
+            self.btn_beautify_all.config(state="normal")
+            if errors:
+                self.status.set("一键美化部分失败: " + "; ".join(errors))
+                messagebox.showerror("一键美化失败", "\n".join(errors))
+            else:
+                self.status.set("已一键美化并保留 — 提交生成将使用当前编辑区文本")
+
+        self.root_after(apply)
 
     # ---- 数据方案（range）----
     def clear_range_plan(self):
@@ -847,7 +889,7 @@ class App:
             messagebox.showwarning("提示", "请填写「2. 题面」")
             return
         if not rng:
-            messagebox.showwarning("提示", "请填写「3. 输入描述 / 数据范围」")
+            messagebox.showwarning("提示", "请填写「3. 输入描述」")
             return
 
         ptype = self.ptype.get()
