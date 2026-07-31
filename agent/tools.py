@@ -305,6 +305,82 @@ def write_validate(content: str) -> str:
     return f"OK: wrote & compiled validator ({len(content)} chars)"
 
 
+def ensure_self_check_prereqs(
+    skip_recompile: set[str] | frozenset[str] | None = None,
+) -> tuple[bool, str]:
+    """自检前确保 gen / validator 可执行文件就绪。
+
+    - 若 exe 已存在：直接通过
+    - 若 exe 缺失但对应 .cpp 在磁盘上：尝试用现有源码重编译
+      （除非 skip_recompile 含该名字——本步 write_* 刚编译失败时不要用同一份坏源码再编一次）
+    - 若源码也不存在 / 跳过重编译：返回缺失项，由调用方提示 Agent 先 write_*
+
+    skip_recompile: 可选 {"gen", "validator"}，表示本步已确认编译失败，禁止重试。
+
+    返回 (ready, message)。
+    """
+    skip = set(skip_recompile or ())
+    notes: list[str] = []
+    missing: list[str] = []
+    just_failed: list[str] = []
+
+    gen_exe = WORK_DIR / _exe("gen")
+    val_exe = WORK_DIR / _exe("validator")
+    gen_src = WORK_DIR / "gen.cpp"
+    val_src = WORK_DIR / "validator.cpp"
+
+    if not gen_exe.exists():
+        if "gen" in skip:
+            missing.append("gen")
+            just_failed.append("gen")
+        elif gen_src.is_file():
+            try:
+                content = gen_src.read_text(encoding="utf-8")
+            except Exception as e:
+                return False, f"读取 gen.cpp 失败: {type(e).__name__}: {e}"
+            msg = write_gen(content)
+            if not str(msg).startswith("OK"):
+                return False, f"尝试重编译 gen.cpp 失败: {msg}"
+            notes.append("已从磁盘重编译 gen")
+        else:
+            missing.append("gen")
+
+    if not val_exe.exists():
+        if "validator" in skip:
+            missing.append("validator")
+            just_failed.append("validator")
+        elif val_src.is_file():
+            try:
+                content = val_src.read_text(encoding="utf-8")
+            except Exception as e:
+                return False, f"读取 validator.cpp 失败: {type(e).__name__}: {e}"
+            msg = write_validate(content)
+            if not str(msg).startswith("OK"):
+                return False, f"尝试重编译 validator.cpp 失败: {msg}"
+            notes.append("已从磁盘重编译 validator")
+        else:
+            missing.append("validator")
+
+    if missing:
+        hints = []
+        if "gen" in missing:
+            if "gen" in just_failed:
+                hints.append("本步 write_gen 已编译失败，请修复 gen.cpp 后重新 write_gen（勿用同一份坏源码空转）")
+            else:
+                hints.append("请先 write_gen 写出完整可编译的 gen.cpp")
+        if "validator" in missing:
+            if "validator" in just_failed:
+                hints.append(
+                    "本步 write_validate 已失败，请修复 validator.cpp 后重新 write_validate"
+                    "（缺 ensuref 时加 // no-structural-constraints 或补 ensuref）"
+                )
+            else:
+                hints.append("请先 write_validate 写出完整可编译的 validator.cpp")
+        return False, "缺少已编译产物: " + "、".join(missing) + "。" + "；".join(hints)
+
+    return True, ("；".join(notes) if notes else "gen/validator 已就绪")
+
+
 def write_checker(content: str) -> str:
     """把 special judge 的 C++ 源码写到 work_dir/checker.cpp，拷 testlib.h，编译成 checker(.exe)。"""
     if _looks_like_omitted_stub(content):
@@ -638,34 +714,66 @@ def _triple_check(
     count: int,
     std_timeout: int,
     mem_mb=None,
-) -> str:
-    """单组 gen→validate→std，成功返回 OK 行，失败返回 ERROR 详情。"""
+) -> tuple[str, str, str]:
+    """单组 gen→validate→std。
+
+    返回 (msg, input_text, output_text)。
+    成功时 msg 以 OK 开头，input/output 为可落盘内容；失败时后两者为空。
+    """
     gen_out = run_gen(seed=seed, type=typ, index=index, count=count)
     if isinstance(gen_out, str) and gen_out.startswith("ERROR"):
-        return f"FAIL type={typ} seed={seed}: {gen_out}"
+        return f"FAIL type={typ} seed={seed}: {gen_out}", "", ""
     val = run_validate(gen_out)
     if not val.startswith("OK"):
-        return f"FAIL type={typ} seed={seed} validate: {val}"
+        return f"FAIL type={typ} seed={seed} validate: {val}", "", ""
     # 直接调 safe_run 以便用 std_timeout（run_std 会再读 range，此处统一）
     rc, out, err = safe_run(
         STD_CMD, stdin=gen_out, timeout=std_timeout, memory_limit_mb=mem_mb
     )
     if rc != 0:
         if rc == 124:
-            return f"FAIL type={typ} seed={seed}: std TIMEOUT after {std_timeout}s"
+            return f"FAIL type={typ} seed={seed}: std TIMEOUT after {std_timeout}s", "", ""
         if rc == EXIT_MEMORY:
-            return f"FAIL type={typ} seed={seed}: std MEMORY_LIMIT ({mem_mb} MB)"
-        return f"FAIL type={typ} seed={seed}: std rc={rc} {(err or '').strip()}"
+            return f"FAIL type={typ} seed={seed}: std MEMORY_LIMIT ({mem_mb} MB)", "", ""
+        return f"FAIL type={typ} seed={seed}: std rc={rc} {(err or '').strip()}", "", ""
     if not (out or "").strip():
-        return f"FAIL type={typ} seed={seed}: std empty output"
-    return f"OK type={typ} seed={seed} index={index} in_chars={len(gen_out)} out_chars={len(out)}"
+        return f"FAIL type={typ} seed={seed}: std empty output", "", ""
+    inp = (gen_out or "").rstrip("\n") + "\n"
+    ans = out if out.endswith("\n") else (out + "\n")
+    msg = (
+        f"OK type={typ} seed={seed} index={index} "
+        f"in_chars={len(inp)} out_chars={len(ans)}"
+    )
+    return msg, inp, ans
 
 
-def run_self_check() -> str:
-    """按 range.json 做强化自检：每个 edge_type + 最大规模 + 多测 sum 相关边界。
+def _clear_out_pairs(out_dir: Path, count: int) -> None:
+    """清空 out/ 下 1..count 的成对测例，避免复用过期数据。"""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for i in range(1, count + 1):
+        for suffix in (".in", ".out"):
+            p = out_dir / f"{i}{suffix}"
+            if p.is_file():
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
+
+
+def run_self_check(fast_mode: bool = False, tiny_mode: bool = False) -> str:
+    """按 range.json 做强化自检。
+
+    默认完整模式（交付对齐）：
+      1) 按批量同一调度跑 i=0..count-1（seed=i, type=pick_type(i), index=i），
+         成功则写入 out/{i+1}.in/.out，供阶段 4 批量 reuse_existing 复用；
+      2) 再对每个 edge_case 补一次 index=count-1 的最大档压测（不落盘）。
+    fast_mode=True：减少组数并使用中等规模，用于修复循环中间轮次；不写 out/。
+    tiny_mode=True：只跑最小档，用于完整自检失败后的返工轮；不写 out/。
 
     通过返回以 OK 开头的摘要；任一失败返回 ERROR/... 详情，供 Agent 修改后重试。
     """
+    from pipeline.gen_data import normalize_range_json, pick_type
+
     p = WORK_DIR / "range.json"
     if not p.exists():
         return "ERROR: range.json not found，请先 write_range"
@@ -678,55 +786,94 @@ def run_self_check() -> str:
     except json.JSONDecodeError as e:
         return f"ERROR: range.json 非法: {e}"
 
+    rj = normalize_range_json(dict(rj))
     count = int(rj.get("count") or 15)
     edge_cases = list(rj.get("edge_cases") or [])
     constraints = rj.get("constraints") or {}
     std_timeout = _std_timeout_s(rj)
     mem_mb = _memory_limit_mb(rj)
 
-    checks: list[tuple[str, int, int]] = []  # type, seed, index
-    # 1) 每个 edge_type 一组
-    for i, typ in enumerate(edge_cases):
-        checks.append((typ, 1000 + i, min(i, max(0, count - 1))))
-    # 2) random 分层：最小档 + 最大档（逼近上界）
-    checks.append(("random", 2000, 0))
-    checks.append(("random", 2001, max(0, count - 1)))
-    # 3) 若有明确 nmax / edge_nmax 类型，再加一次（可能已在 edge_cases）
-    for name in ("edge_nmax", "nmax", "edge_n_max", "max_n"):
-        if name in edge_cases:
-            checks.append((name, 3000, count - 1))
-            break
-    # 4) 多测 sum：优先跑已有边界名；否则用 random 两端
     multi_hints = [
         "big_T_small_n", "small_T_big_n", "edge_Tmax", "edge_T1",
         "sum_full", "single_max_case",
     ]
-    for name in multi_hints:
-        if name in edge_cases:
-            checks.append((name, 4000 + hash(name) % 100, count // 2))
 
-    # 去重保序
+    # checks: (type, seed, index, persist_slot|None)
+    # persist_slot 为 1-based 文件号；None 表示仅压测不落盘
+    checks: list[tuple[str, int, int, int | None]] = []
+    if tiny_mode:
+        for i, typ in enumerate(edge_cases):
+            checks.append((typ, 1000 + i, 0, None))
+        checks.append(("random", 2000, 0, None))
+        for name in multi_hints:
+            if name in edge_cases:
+                checks.append((name, 4000 + hash(name) % 100, 0, None))
+    elif fast_mode:
+        mid_index = max(1, count // 2)
+        for i, typ in enumerate(edge_cases):
+            checks.append((typ, 1000 + i, min(i, mid_index), None))
+        checks.append(("random", 2000, 0, None))
+        checks.append(("random", 2001, mid_index, None))
+        for name in multi_hints:
+            if name in edge_cases:
+                checks.append((name, 4000 + hash(name) % 100, mid_index, None))
+    else:
+        # 完整模式：与批量生成同一调度，成功则写入 out/ 供后续复用
+        out_dir = WORK_DIR / "out"
+        _clear_out_pairs(out_dir, count)
+        for i in range(count):
+            typ = pick_type(i, count, edge_cases)
+            checks.append((typ, i, i, i + 1))
+        # 额外最大档压测：每个 edge（及必要的 random max）再跑一次，不落盘
+        max_idx = max(0, count - 1)
+        for i, typ in enumerate(edge_cases):
+            checks.append((typ, 10000 + i, max_idx, None))
+        has_max_case = any(
+            name in edge_cases for name in ("edge_nmax", "nmax", "edge_n_max", "max_n")
+        )
+        if not has_max_case:
+            checks.append(("random", 10000 + len(edge_cases), max_idx, None))
+        for name in multi_hints:
+            if name in edge_cases:
+                checks.append((name, 11000 + hash(name) % 100, max_idx, None))
+
+    # 去重保序：交付组按 persist_slot 优先；压测按 (type, index, seed)
     seen = set()
-    uniq = []
-    for typ, seed, idx in checks:
-        key = (typ, idx)
+    uniq: list[tuple[str, int, int, int | None]] = []
+    for typ, seed, idx, slot in checks:
+        key = ("slot", slot) if slot is not None else ("stress", typ, idx, seed)
         if key in seen:
             continue
         seen.add(key)
-        uniq.append((typ, seed, idx))
+        uniq.append((typ, seed, idx, slot))
 
     limit_note = f"std_timeout={std_timeout}s"
     if mem_mb:
         limit_note += f" memory_limit_mb={mem_mb}"
-    lines = [f"self_check start: count={count} edges={edge_cases} {limit_note}"]
+    mode_note = "tiny" if tiny_mode else ("fast" if fast_mode else "full")
+    lines = [f"self_check start: mode={mode_note} count={count} edges={edge_cases} {limit_note}"]
+    if not fast_mode and not tiny_mode:
+        lines.append("full: aligned with batch schedule; OK cases written to out/ for reuse")
     if isinstance(constraints, dict) and constraints:
         lines.append(f"constraints_keys={list(constraints.keys())}")
     fails = []
-    for typ, seed, idx in uniq:
-        msg = _triple_check(seed, typ, idx, count, std_timeout, mem_mb=mem_mb)
-        lines.append(msg)
+    written = 0
+    out_dir = WORK_DIR / "out"
+    for typ, seed, idx, slot in uniq:
+        msg, inp, ans = _triple_check(seed, typ, idx, count, std_timeout, mem_mb=mem_mb)
+        if slot is not None:
+            tag = f" [out/{slot}.in]"
+        else:
+            tag = " [stress]"
+        lines.append(msg + tag)
         if msg.startswith("FAIL") or msg.startswith("ERROR"):
             fails.append(msg)
+            continue
+        if slot is not None and inp and ans:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / f"{slot}.in").write_text(inp, encoding="utf-8")
+            (out_dir / f"{slot}.out").write_text(ans, encoding="utf-8")
+            written += 1
 
     if fails:
         return (
@@ -734,6 +881,8 @@ def run_self_check() -> str:
             + "\n".join(lines)
             + "\n请根据 FAIL 修复 gen/validator 后重新 write_* 再 run_self_check。"
         )
+    if not fast_mode and not tiny_mode:
+        lines.append(f"persisted {written}/{count} pairs to out/ for batch reuse")
     return "OK: self_check passed\n" + "\n".join(lines)
 
 
@@ -806,8 +955,20 @@ TOOL_SCHEMAS = [
     ),
     _schema(
         "write_validate",
-        "把【完整】校验器 C++ 源码写到工作目录 validator.cpp 并 g++ 编译。content 必须是完整源码，禁止摘要。用 readInt/readSpace/readEoln/readEof 严格校验。",
-        {"content": {"type": "string", "description": "完整 validator.cpp（#include \"testlib.h\"，registerValidation()）"}},
+        "把【完整】校验器 C++ 源码写到工作目录 validator.cpp 并 g++ 编译。"
+        "content 必须是完整源码，禁止摘要。必须 registerValidation + readEof。"
+        "结构性质用 ensuref；若只有范围/格式约束，文件顶部必须加注释 "
+        "`// no-structural-constraints`（否则静态检查会 ERROR）。",
+        {
+            "content": {
+                "type": "string",
+                "description": (
+                    "完整 validator.cpp。"
+                    "有结构约束：ensuref + readEof；"
+                    "仅范围/格式：顶部写 // no-structural-constraints，再用 read* + readEof。"
+                ),
+            }
+        },
         ["content"],
     ),
     _schema(
@@ -878,8 +1039,10 @@ TOOL_SCHEMAS = [
     ),
     _schema(
         "run_self_check",
-        "强化自检：对每个 edge_type + random 最小/最大档（逼近规模上界）+ 多测相关边界，"
-        "执行 gen→validate→std。全部通过才返回 OK；失败返回 ERROR 详情。finish 前必须调用且通过。",
+        "强化自检：执行 gen→validate→std。"
+        "完整模式按批量同一调度生成 count 组并写入 out/（供后续打包复用），"
+        "另对每个 edge 补最大档压测；快速/微小模式不落盘。"
+        "全部通过才返回 OK；失败返回 ERROR 详情。finish 前必须调用且通过。",
         {},
         [],
     ),

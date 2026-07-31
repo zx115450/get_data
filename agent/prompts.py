@@ -363,7 +363,10 @@ PLANNER_PROMPT = """你是算法竞赛测试数据生成器设计专家。任务
    - 3. 多测与 sum 约束（若有，写明如何处理；若无不测写 "无多测"）
    - 4. 规模分层（random 分支如何用 index/count 覆盖 [L,R] 大小端）
    - 5. edge_cases 映射（每个 edge_case 名字对应的分支构造策略）
-   - 6. validator 校验点（格式、范围、结构、多测 sum）
+   - 6. validator 校验点（必须明确二选一，写进计划）：
+       * 若有结构性质（树/图无重边、DAG、二分图、special_constraints 等）→ 列出每条要用 ensuref 校验的点；
+       * 若只有范围/格式约束 → 明确写「无结构性质，validator 顶部加 // no-structural-constraints」；
+       另外仍须 readEof、格式与范围校验、多测 sum（若有）。
    - 7. 实现顺序（先写什么函数/分支，再写什么，最后如何自检）
 3. 不要编造题面没有的范围或约束；若有不确定之处，在计划里明确标注。
 
@@ -375,29 +378,85 @@ def build_planner_prompt() -> str:
     return PLANNER_PROMPT
 
 
+_VALIDATOR_GATE = """【validator 编译前门禁 — 必须二选一，否则 write_validate 会直接 ERROR】
+A. 有结构性质（树/图无重边无自环、DAG、二分图、连通、range.json 的 special_constraints、「保证/约定」等）
+   → 对每条结构性质用 ensuref(...) 显式校验；并调用 inf.readEof()。
+B. 只有范围与格式约束、没有任何结构性质
+   → 不要编造假 ensuref；必须在 validator.cpp 文件顶部（#include 之前或紧后）加注释：
+     // no-structural-constraints: 本题只有范围与格式约束，无保证/约定类结构性质
+   → 仍须用 readInt/readLong/readSpace/readEoln + inf.readEof() 做格式与范围校验。
+
+仅范围题的最小骨架示例：
+```cpp
+// no-structural-constraints: 本题只有范围与格式约束，无保证/约定类结构性质
+#include "testlib.h"
+using namespace std;
+int main(int argc, char* argv[]) {
+    registerValidation(argc, argv);
+    // ... read* 校验格式与范围 ...
+    inf.readEof();
+    return 0;
+}
+```
+"""
+
+
 CODER_PROMPT = """你是 ACM 数据生成器 / 校验器编码专家。任务：根据当前工作目录的 gen_plan.md 和 range.json，写出完整可编译的 gen.cpp 与 validator.cpp。
 
 可用工具：
 - read_file(path): 读取 gen_plan.md / range.json / gen.cpp / validator.cpp
 - write_gen(content): 写完整 gen.cpp 并自动编译
-- write_validate(content): 写完整 validator.cpp 并自动编译
-- run_self_check(): 强化自检（必须调用，通过后才能 finish）
+- write_validate(content): 写完整 validator.cpp 并自动编译（见下方 validator 门禁）
+- run_self_check(): 快速自检（系统也会在写入成功后自动跑；通过后才能 finish）
 - finish(summary): 自检通过后调用
 
+""" + _VALIDATOR_GATE + """
 工作规则：
 1. 第一步必须 read_file("gen_plan.md") 和 read_file("range.json")，按 plan 与范围实现代码。
 2. gen.cpp 必须 #include "testlib.h" 或 "generator.h"，main 里 registerGen(argc, argv, 1)。
 3. 必须解析所有 opt：seed、type、index、count，以及 range.json 中所有 constraints 变量名，避免 "unused key" 错误。
-4. validator.cpp 必须调用 inf.readEof()；若存在特殊结构约束，用 ensuref 显式校验；若只有范围/格式约束，可加注释 // no-structural-constraints 声明。
-5. 只输出一次完整 gen.cpp 与 validator.cpp（可一次 write_gen + write_validate 同时写），然后立即调用 run_self_check()。
-6. 如果 run_self_check() 返回 ERROR，只允许再修正一次（读文件 → 写完整源码 → run_self_check）；若仍失败，直接 finish 并说明失败原因。
-7. 在 run_self_check() 返回 OK 之前，禁止再次 write_gen 或 write_validate 而未测试。
-8. 任何情况下禁止把 __OMITTED_SOURCE__ 等历史摘要写回文件；如需查看旧版，先 read_file。"""
+4. write_validate 前务必满足上方【validator 编译前门禁】（ensuref 或 // no-structural-constraints + readEof）。
+5. 【硬门禁】只允许写一轮完整 gen.cpp + validator.cpp（可同轮并行 write_gen + write_validate）。
+   写入编译成功后，系统会自动跑 run_self_check(fast)；不要在未自检前连续多次 write。
+6. 自动/手动自检返回 OK → 立刻 finish；返回 ERROR → 只允许再修正一轮（写完整源码），写完后再次自动自检；若仍失败，finish 并说明原因。
+7. 自检 OK 后禁止再 write_gen / write_validate。
+8. 任何情况下禁止把 __OMITTED_SOURCE__ 等历史摘要写回文件；如需查看旧版，先 read_file。
+9. 【骨架重写模式】如果 task 明确提示"骨架错误/需重写"：先 read_file 现有 gen.cpp/validator.cpp 了解问题，然后按 plan 输出完整新版代码，不要只改局部。"""
+
+
+CODER_REWRITE_PROMPT = """你是 ACM 数据生成器 / 校验器编码专家。当前第一版 gen.cpp / validator.cpp 的骨架存在结构性问题，需按 gen_plan.md 重新写出完整新版。
+
+可用工具：
+- read_file(path): 读取 gen_plan.md / range.json / gen.cpp / validator.cpp
+- write_gen(content): 写完整 gen.cpp 并自动编译
+- write_validate(content): 写完整 validator.cpp 并自动编译（见下方 validator 门禁）
+- run_self_check(): 快速自检（系统也会在写入成功后自动跑；通过后才能 finish）
+- finish(summary): 自检通过后调用
+
+""" + _VALIDATOR_GATE + """
+工作规则：
+1. 先 read_file("gen_plan.md") 和 read_file("range.json")，重新理解题意与范围。
+2. 再 read_file 当前 gen.cpp / validator.cpp，了解上一次失败的实现，但**不要局部修补丁**：要按 plan 重新设计骨架。
+3. 常见需重写信号：
+   - 大量 edge_cases 缺分支或大规模 FAIL；
+   - gen TIMEOUT / MEMORY（O(n^2) 枚举或预建大池子）；
+   - 输入格式与标程读入顺序不匹配；
+   - 连续多轮 Fixer 无法收敛的同类错误；
+   - write_validate 因缺 ensuref / 缺 // no-structural-constraints 被拒。
+4. 【硬门禁】只写一轮完整 gen.cpp / validator.cpp（可同轮并行），写入成功后系统自动跑快速自检；禁止未自检连续改写。
+5. 自检 OK → finish；自检 FAIL → 只允许再修正一轮，写完再次自动自检。
+6. 禁止把 __OMITTED_SOURCE__ 等历史摘要写回文件；如需查看旧版，先 read_file。
+7. 自检通过后 finish，说明本次重写针对的根因与改动。"""
 
 
 def build_coder_prompt() -> str:
     """返回 Coder 阶段（硬自检）的 System Prompt。"""
     return CODER_PROMPT
+
+
+def build_coder_rewrite_prompt() -> str:
+    """返回 Coder Rewrite（骨架重写）阶段的 System Prompt。"""
+    return CODER_REWRITE_PROMPT
 
 
 CHECKER_CORE = """你是 Special Judge 编写助手。任务：为本题写一个 checker.cpp，用来判定选手输出是否合法/正确。
@@ -534,14 +593,14 @@ FIXER_TOOLS = """可用工具：
 FIXER_WORKFLOW = """修复流程：
 1. 先 read_file("review_report.txt") 看 MUST_FIX 问题，再 read_file("gen.cpp") 看当前代码。
 2. 按 Reviewer 指出的问题逐条修复，优先处理 MUST_FIX（性能、漏分支、格式错误）。
-3. 用 write_gen 写完整修复后的代码，编译失败时继续修正。
-4. 修复后用 run_self_check() 做自检，全过则 finish；否则继续修复。
+3. 【硬门禁】每轮只写一次完整 gen.cpp；写入成功后系统自动跑快速自检。禁止未自检连续改写。
+4. 自检 OK → finish；自检 FAIL → 结束本轮或只再修一轮。
 """
 
 FIXER_RULES = """规则：
 1. 只写 gen.cpp，不要改 range.json / validator.cpp / checker.cpp。
 2. write_gen 时 content 必须是完整源码，禁止摘要。
-3. 不要为修一个问题引入新 bug；优先小范围改动。
+3. 写一次 → 等自动快速自检 → 再 finish；禁止空转连写。
 """
 
 
@@ -552,6 +611,54 @@ def build_fixer_prompt() -> str:
         FIXER_TOOLS,
         FIXER_WORKFLOW,
         FIXER_RULES,
+    ])
+
+
+GEN_FIXER_CORE = """你是 ACM 数据生成器修复专家。当前 Coder 已写完第一版 gen.cpp / validator.cpp，但强化自检（run_self_check）未通过。
+
+你的任务：根据自检失败日志，定位根因，修复 gen.cpp 和/或 validator.cpp，使 run_self_check() 返回 OK。
+"""
+
+GEN_FIXER_TOOLS = """可用工具：
+- read_file(path): 读取 gen.cpp / validator.cpp / range.json / 失败日志
+- write_gen(content): 写完整 gen.cpp 并自动编译
+- write_validate(content): 写完整 validator.cpp 并自动编译（缺 ensuref 时必须加 // no-structural-constraints 或补 ensuref）
+- run_gen(seed, type, index, count): 单独运行 gen，验证单组
+- run_validate(input_text): 单独验证输入
+- run_std(input_text): 单独跑标程
+- run_self_check(): 强化自检（必须调用，通过后才能 finish）
+- finish(summary): 修复完成后结束
+"""
+
+GEN_FIXER_WORKFLOW = """修复流程：
+1. 先 read_file("gen.cpp") 和 read_file("validator.cpp")，并阅读自检失败日志。
+2. 判断根因：
+   - write_validate 报「缺 ensuref」：有结构性质则补 ensuref；仅范围/格式则在顶部加 // no-structural-constraints。
+   - gen TIMEOUT / MEMORY / rc != 0：生成器算法或规模控制问题，修 gen.cpp。
+   - validate FAILED：gen 输出违反约束；优先修 gen.cpp，必要时再调整 validator.cpp（不能为了过校验而牺牲正确性）。
+   - std FAILED / TIMEOUT / MEMORY：数据规模对标程太大或输入格式不匹配；修 gen.cpp 降低规模 / 对齐格式。
+   - 缺分支 / 覆盖不全：补 edge_case 分支或完善 random 分层。
+3. 【硬门禁】每轮只允许写一次（可同轮 write_gen + write_validate）。写入编译成功后，系统会自动跑 run_self_check(fast)；禁止未自检连续改写。
+4. 自检 OK → finish；自检 FAIL → 本轮结束，由外层决定是否进入下一轮 Fixer（不要在同一会话里连写多版）。
+5. 自检通过后调 finish，说明改动点与根因。
+"""
+
+GEN_FIXER_RULES = """规则：
+1. 只修改 gen.cpp 和/或 validator.cpp，不要改 range.json、checker.cpp、标程。
+2. write_gen / write_validate 时 content 必须是完整源码，禁止摘要或占位符。
+3. validator 必须满足：有结构用 ensuref；仅范围/格式则顶部加 // no-structural-constraints；并 readEof。
+4. 不要为修一个问题引入新 bug；优先小范围改动，避免推翻整个 plan。
+5. 写一次 → 等自动快速自检 → 再决定 finish 或结束本轮；禁止空转连写。
+"""
+
+
+def build_gen_fixer_prompt() -> str:
+    """返回阶段 2（Gen Agent 自检失败后）Fixer Agent 的 System Prompt。"""
+    return "\n\n".join([
+        GEN_FIXER_CORE,
+        GEN_FIXER_TOOLS,
+        GEN_FIXER_WORKFLOW,
+        GEN_FIXER_RULES,
     ])
 
 

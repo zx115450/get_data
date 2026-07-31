@@ -60,17 +60,17 @@ def pair_indices_in_dir(data_dir: Path) -> set[int]:
     return ins & outs
 
 
-def save_good_snapshot(job_dir: Path, include_in_out: bool = False) -> None:
-    """把当前通过校验的 gen/validator 保存为 .good 快照；可选合并 out → out.good。"""
+def save_good_snapshot(job_dir: Path, include_in_out: bool = False, suffix: str = ".good") -> None:
+    """把当前 gen/validator 保存为带后缀的快照；默认 .good，可选合并 out → out.good。"""
     for name in ("gen.cpp", "gen.py", "validator.cpp", "validate.py"):
         src = job_dir / name
         if src.is_file():
-            shutil.copy2(src, job_dir / (name + ".good"))
+            shutil.copy2(src, job_dir / (name + suffix))
     if os.name == "nt":
         for name in ("gen.exe", "validator.exe"):
             src = job_dir / name
             if src.is_file():
-                shutil.copy2(src, job_dir / (name + ".good"))
+                shutil.copy2(src, job_dir / (name + suffix))
     if include_in_out:
         merge_out_into_good(job_dir)
 
@@ -91,15 +91,15 @@ def merge_out_into_good(job_dir: Path) -> int:
     return merged
 
 
-def restore_good_snapshot(job_dir: Path) -> None:
-    """把 .good 快照还原为正式产物（源码 + 已合法测例）。"""
+def restore_good_snapshot(job_dir: Path, suffix: str = ".good") -> None:
+    """把带后缀的快照还原为正式产物（源码 + 已合法测例）；默认 .good。"""
     for name in ("gen.cpp", "gen.py", "validator.cpp", "validate.py"):
-        good = job_dir / (name + ".good")
+        good = job_dir / (name + suffix)
         if good.is_file():
             shutil.copy2(good, job_dir / name)
     if os.name == "nt":
         for name in ("gen.exe", "validator.exe"):
-            good = job_dir / (name + ".good")
+            good = job_dir / (name + suffix)
             if good.is_file():
                 shutil.copy2(good, job_dir / name)
     good_dir = job_dir / "out.good"

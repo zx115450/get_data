@@ -104,7 +104,7 @@ def _run_job_impl(
     )
     summary = agent.run_gen_agent(
         job, job_dir, task, eff_type, range_json or preset, resume_info, on_event,
-        stmt_plain=stmt_plain, std_code=std_code,
+        stmt_plain=stmt_plain, std_code=std_code, resume_failure_block=resume_failure_block,
     )
     scaffold.ensure_agent_log(job, job_dir)
 
@@ -148,14 +148,6 @@ def _run_job_impl(
             f"Gen Agent 步数预算用尽、或 write_gen/write_validate 编译失败循环。"
             f"完整日志见 {job_dir / 'agent_log.txt'}。"
         )
-
-    # 3.5) Reviewer / Fixer（Fixer 后强制自检）
-    review_ok, review_msg = review.run_review_and_fix(
-        job, job_dir, stmt_plain, range_plain, produced, summary, on_event,
-        hard_self_check=True,
-    )
-    if not review_ok:
-        raise RuntimeError(f"Fixer 后自检未通过: {review_msg}")
 
     # 3.5) Checker
     review.run_checker(

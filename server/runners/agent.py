@@ -12,10 +12,11 @@ from agent.llm import chat_text
 from server import job_store
 from server.few_shots import get_few_shot_rag
 from server.runners.adaptive import adaptive_steps
-from server.runners.prompts import build_std_block
+from server.runners.prompts import build_coder_rewrite_task, build_gen_fixer_task, build_std_block
 from server.runners.snapshot import (
     has_gen_val_at_resume,
     restore_good_snapshot,
+    save_good_snapshot,
 )
 from server.struct_hints import scan_structural_hints
 from server.text_agent import simplify_text
@@ -31,10 +32,14 @@ CODER_TOOL_SCHEMAS = [
         "read_file", "read_range", "write_gen", "write_validate", "run_self_check", "finish"
     }
 ]
-RANGE_TOOL_SCHEMAS = [
+GEN_FIXER_TOOL_SCHEMAS = [
     s for s in tools.TOOL_SCHEMAS
-    if s["function"]["name"] in {"write_range", "read_file", "read_range", "finish"}
+    if s["function"]["name"] in {
+        "read_file", "read_range", "write_gen", "write_validate", "run_gen", "run_validate", "run_std",
+        "run_self_check", "finish",
+    }
 ]
+GEN_TOOL_SCHEMAS = GEN_FIXER_TOOL_SCHEMAS
 
 PLAN_FILE = "gen_plan.md"
 
@@ -238,6 +243,63 @@ def _build_coder_task(
     )
 
 
+def _classify_self_check_error(self_check_result: str) -> str:
+    """判断自检失败属于局部问题还是结构性问题。
+
+    返回："local" 或 "structural"
+    """
+    text = (self_check_result or "").lower()
+
+    structural_signals = [
+        "timeout",
+        "memory_limit",
+        "unused key",
+        "registergen",
+        "read eof",
+        "ensuref",
+        "missing",
+        "no edge",
+        "edge_case",
+    ]
+    local_signals = [
+        "off-by-one",
+        "range error",
+        "wrong format",
+        "trailing",
+        "space",
+        "expected",
+    ]
+    structural_score = sum(1 for s in structural_signals if s in text)
+    local_score = sum(1 for s in local_signals if s in text)
+
+    # 大量 FAIL 行也视为结构性
+    fail_count = text.count("fail")
+    if fail_count >= 6:
+        structural_score += 1
+    if structural_score > local_score:
+        return "structural"
+    return "local"
+
+
+def _needs_coder_rewrite(
+    self_check_result: str,
+    fixer_attempts: int,
+    max_fixer_attempts: int,
+) -> bool:
+    """是否应带提示重开 Coder 重写骨架。
+
+    触发条件：
+    - 已用尽 Fixer 次数；或
+    - 自检错误被判定为结构性问题（且 Fixer 至少已尝试 2 次）。
+    """
+    if fixer_attempts >= max_fixer_attempts:
+        return True
+    cls = _classify_self_check_error(self_check_result)
+    if cls == "structural" and fixer_attempts >= 2:
+        return True
+    return False
+
+
 def run_gen_agent(
     job: job_store.Job,
     job_dir: Path,
@@ -248,6 +310,7 @@ def run_gen_agent(
     on_event,
     stmt_plain: str = "",
     std_code: str = "",
+    resume_failure_block: str = "",
 ) -> str:
     """启动 Range/Gen Agent。Plan-and-Execute：先写 gen_plan.md，再按 plan 写代码。返回 Agent summary。"""
     full_prompt = prompts.build_full_prompt(
@@ -326,53 +389,241 @@ def run_gen_agent(
             plan_summary = "Planner 未生成 gen_plan.md，Coder 将直接按原 task 生成"
             job_store.add_progress(job, plan_summary)
 
-    # ---- Execute 阶段：Coder 硬自检循环（写 → 自检 → 限轮修复）----
-    max_coder_attempts = 2
-    coder_summary = ""
-    for attempt in range(1, max_coder_attempts + 1):
-        job_store.add_progress(job, f"【Execute】Coder 第 {attempt}/{max_coder_attempts} 轮：写 gen/validator")
-        coder_task = _build_coder_task(
-            stmt_plain,
-            task.split("【数据范围描述】\n")[1].split("\n\n【")[0] if "【数据范围描述】" in task else "",
-            "", "", range_json or {}, eff_type,
-            resume_failure_block if attempt == 1 else "",
-        )
-        # 第一轮用原始 task 补充上下文；第二轮只给失败摘要
-        if attempt == 1:
-            coder_task = f"{task}\n\n【额外要求：Plan-and-Execute】\n{coder_task}"
+    # ---- Execute 阶段：Coder 一次编码 + Gen Fixer 最多 4 轮 + 可选 Coder 重写 1 次 ----
+    job_store.add_progress(job, "【Execute】Coder 第 1/1 轮：写 gen/validator")
+    range_plain = (
+        task.split("【数据范围描述】\n")[1].split("\n\n【")[0]
+        if "【数据范围描述】" in task else ""
+    )
+    coder_task = _build_coder_task(
+        stmt_plain, range_plain, "", "", range_json or {}, eff_type,
+        resume_failure_block,
+    )
+    coder_task = f"{task}\n\n【额外要求：Plan-and-Execute】\n{coder_task}"
 
-        coder_summary = agent_run(
-            coder_task,
-            max_steps=15,
-            verbose=False,
-            on_event=on_event,
-            system_prompt=prompts.build_coder_prompt(),
-            tool_schemas=CODER_TOOL_SCHEMAS,
-        )
-        job_store.add_progress(job, f"Coder 第 {attempt} 轮结束: {coder_summary}")
+    coder_summary = agent_run(
+        coder_task,
+        max_steps=12,
+        verbose=False,
+        on_event=on_event,
+        system_prompt=prompts.build_coder_prompt(),
+        tool_schemas=CODER_TOOL_SCHEMAS,
+        write_check_discipline=True,
+        self_check_fast=True,
+    )
+    job_store.add_progress(job, f"Coder 结束: {coder_summary}")
 
-        # 真跑一遍自检，不依赖模型是否记得调用
-        job_store.add_progress(job, "【Execute】强制跑 run_self_check 验证 Coder 产物")
-        self_check_result = tools.run_self_check()
+    max_fixer_attempts = 4
+    fixer_summary = ""
+
+    def _full_gate(self_check_result: str, prefix: str) -> tuple[bool, str]:
+        """Gen Agent 唯一大数据/抗压门禁：完整自检。
+
+        通过返回 (True, 摘要)；失败则进入一次 tiny 修复 + 再次完整自检，
+        整次 Gen Agent 最多 2 次完整自检。
+        """
+        # 第 1 次完整自检
+        job_store.add_progress(
+            job, f"{prefix} 强制跑 run_self_check(fast_mode=False) 做交付前完整自检"
+        )
+        self_check_result = tools.run_self_check(fast_mode=False)
         job_store.add_progress(job, f"自检结果: {self_check_result[:500]}")
 
         if isinstance(self_check_result, str) and self_check_result.startswith("OK"):
-            coder_summary = f"Coder 自检通过 ({attempt}/{max_coder_attempts})"
-            job_store.add_progress(job, coder_summary)
-            break
+            save_good_snapshot(job_dir, include_in_out=False)
+            msg = f"{prefix} 完整自检通过"
+            job_store.add_progress(job, msg)
+            job_store.add_progress(job, f"Agent 结束: {msg}")
+            return True, msg
 
-        if attempt >= max_coder_attempts:
-            coder_summary = f"Coder 用尽 {max_coder_attempts} 轮，自检仍失败: {self_check_result[:500]}"
-            job_store.add_progress(job, coder_summary)
-            break
-
-        job_store.add_progress(job, f"【Execute】自检失败，进入第 {attempt + 1} 轮修复")
-        # 下一轮把失败摘要喂给 Coder，让它读文件后再写一次
-        resume_failure_block = (
-            "\n\n【上一轮自检失败】\n"
-            f"{self_check_result[:1500]}\n"
-            "请重新读取 gen.cpp 和 validator.cpp，针对失败原因修复后再次 write_gen + write_validate，然后 run_self_check。"
+        # 完整自检失败：按错误类型分流，用 tiny 模式快速迭代修复，再完整一次
+        job_store.add_progress(
+            job,
+            f"{prefix} 完整自检失败（大数据/抗压未通过），进入 tiny 修复轮: "
+            f"{self_check_result[:500]}"
         )
 
-    job_store.add_progress(job, f"Agent 结束: {coder_summary}")
-    return coder_summary
+        is_structural = _classify_self_check_error(self_check_result) == "structural"
+        if is_structural:
+            # 性能/骨架问题：直接 Rewrite
+            job_store.add_progress(job, "【完整自检失败】结构性/性能问题，启动 Coder Rewrite")
+            retry_task = build_coder_rewrite_task(
+                stmt_plain, range_plain, range_json or {},
+                self_check_result,
+                f"Coder 摘要: {coder_summary}\nFixer 摘要: {fixer_summary}",
+            )
+            retry_summary = agent_run(
+                retry_task,
+                max_steps=12,
+                verbose=False,
+                on_event=on_event,
+                system_prompt=prompts.build_coder_rewrite_prompt(),
+                tool_schemas=CODER_TOOL_SCHEMAS,
+                write_check_discipline=True,
+                self_check_fast=True,
+            )
+            job_store.add_progress(job, f"Coder Rewrite (tiny 修复) 结束: {retry_summary}")
+            tiny_result = tools.run_self_check(tiny_mode=True)
+            job_store.add_progress(job, f"tiny 自检结果: {tiny_result[:500]}")
+            if not isinstance(tiny_result, str) or not tiny_result.startswith("OK"):
+                restore_good_snapshot(job_dir, suffix=".fixer_bak")
+                msg = f"{prefix} 完整自检失败后 Rewrite + tiny 仍失败"
+                job_store.add_progress(job, msg)
+                return False, msg
+        else:
+            # 局部/大数据边界问题：用 Gen Fixer tiny 最多 2 轮
+            job_store.add_progress(job, "【完整自检失败】局部问题，启动 Gen Fixer (tiny 模式)")
+            retry_ok = False
+            for attempt in range(1, 3):
+                retry_task = build_gen_fixer_task(
+                    stmt_plain, range_plain, range_json or {},
+                    self_check_result, attempt, 2,
+                )
+                retry_summary = agent_run(
+                    retry_task,
+                    max_steps=12,
+                    verbose=False,
+                    on_event=on_event,
+                    system_prompt=prompts.build_gen_fixer_prompt(),
+                    tool_schemas=GEN_FIXER_TOOL_SCHEMAS,
+                    write_check_discipline=True,
+                    self_check_fast=True,
+                )
+                job_store.add_progress(
+                    job, f"Fixer tiny 第 {attempt}/2 轮结束: {retry_summary}"
+                )
+                tiny_result = tools.run_self_check(tiny_mode=True)
+                job_store.add_progress(job, f"tiny 自检结果: {tiny_result[:500]}")
+                if isinstance(tiny_result, str) and tiny_result.startswith("OK"):
+                    retry_ok = True
+                    break
+            if not retry_ok:
+                restore_good_snapshot(job_dir, suffix=".fixer_bak")
+                msg = f"{prefix} 完整自检失败后 Fixer tiny 用尽仍失败"
+                job_store.add_progress(job, msg)
+                return False, msg
+
+        # 第 2 次完整自检
+        job_store.add_progress(
+            job, f"{prefix} 修复后再次跑 run_self_check(fast_mode=False) 完整自检"
+        )
+        self_check_result = tools.run_self_check(fast_mode=False)
+        job_store.add_progress(job, f"自检结果: {self_check_result[:500]}")
+
+        if isinstance(self_check_result, str) and self_check_result.startswith("OK"):
+            save_good_snapshot(job_dir, include_in_out=False)
+            msg = f"{prefix} 完整自检（第 2 次）通过"
+            job_store.add_progress(job, msg)
+            job_store.add_progress(job, f"Agent 结束: {msg}")
+            return True, msg
+
+        restore_good_snapshot(job_dir, suffix=".fixer_bak")
+        msg = f"{prefix} 完整自检第 2 次仍失败: {self_check_result[:500]}"
+        job_store.add_progress(job, msg)
+        return False, msg
+
+    # Coder 第一版：快速自检，只验证结构/中小数据
+    job_store.add_progress(job, "【Execute】Coder 后跑 run_self_check(fast_mode=True) 做结构验证")
+    self_check_result = tools.run_self_check(fast_mode=True)
+    job_store.add_progress(job, f"自检结果: {self_check_result[:500]}")
+
+    if isinstance(self_check_result, str) and self_check_result.startswith("OK"):
+        ok, full_msg = _full_gate(self_check_result, "Coder")
+        if ok:
+            return full_msg
+        return full_msg
+
+    # Coder 快速自检失败：保存当前产物为 .fixer_bak 基线，不破坏已有的 .good 快照
+    save_good_snapshot(job_dir, include_in_out=False, suffix=".fixer_bak")
+    job_store.add_progress(job, "Coder 快速自检失败，已保存 .fixer_bak 基线")
+
+    # Gen Fixer 循环：全部用快速自检，避免大数据压测反复跑
+    for attempt in range(1, max_fixer_attempts + 1):
+        # 判断是否需要进入骨架重写
+        if _needs_coder_rewrite(self_check_result, attempt - 1, max_fixer_attempts):
+            job_store.add_progress(
+                job,
+                f"【Fixer】第 {attempt} 轮触发结构性重写：错误类型为 {_classify_self_check_error(self_check_result)}，"
+                "或 Fixer 次数已用尽，启动 Coder Rewrite"
+            )
+            break
+
+        job_store.add_progress(job, f"【Fixer】第 {attempt}/{max_fixer_attempts} 轮：根据自检失败日志修复")
+        fixer_task = build_gen_fixer_task(
+            stmt_plain, range_plain, range_json or {},
+            self_check_result, attempt, max_fixer_attempts,
+        )
+        fixer_summary = agent_run(
+            fixer_task,
+            max_steps=12,
+            verbose=False,
+            on_event=on_event,
+            system_prompt=prompts.build_gen_fixer_prompt(),
+            tool_schemas=GEN_FIXER_TOOL_SCHEMAS,
+            write_check_discipline=True,
+            self_check_fast=True,
+        )
+        job_store.add_progress(job, f"Fixer 第 {attempt} 轮结束: {fixer_summary}")
+
+        job_store.add_progress(job, "【Fixer】强制跑 run_self_check(fast_mode=True) 验证修复产物")
+        self_check_result = tools.run_self_check(fast_mode=True)
+        job_store.add_progress(job, f"自检结果: {self_check_result[:500]}")
+
+        if isinstance(self_check_result, str) and self_check_result.startswith("OK"):
+            ok, full_msg = _full_gate(self_check_result, f"Fixer 第 {attempt} 轮")
+            if ok:
+                return full_msg
+            return full_msg
+
+        if attempt >= max_fixer_attempts:
+            job_store.add_progress(
+                job,
+                f"Fixer 用尽 {max_fixer_attempts} 轮，快速自检仍失败: {self_check_result[:500]}"
+            )
+            break
+
+        job_store.add_progress(job, f"【Fixer】第 {attempt} 轮自检失败，进入下一轮修复")
+
+    # 若 Fixer 次数用尽或结构性错误，进入一次 Coder Rewrite
+    if _needs_coder_rewrite(self_check_result, max_fixer_attempts, max_fixer_attempts):
+        job_store.add_progress(job, "【Coder Rewrite】骨架重写：按失败摘要重新设计 gen/validator")
+        rewrite_task = build_coder_rewrite_task(
+            stmt_plain, range_plain, range_json or {},
+            self_check_result,
+            f"Coder 摘要: {coder_summary}\nFixer 摘要: {fixer_summary}",
+        )
+        rewrite_summary = agent_run(
+            rewrite_task,
+            max_steps=12,
+            verbose=False,
+            on_event=on_event,
+            system_prompt=prompts.build_coder_rewrite_prompt(),
+            tool_schemas=CODER_TOOL_SCHEMAS,
+            write_check_discipline=True,
+            self_check_fast=True,
+        )
+        job_store.add_progress(job, f"Coder Rewrite 结束: {rewrite_summary}")
+
+        job_store.add_progress(job, "【Coder Rewrite】强制跑 run_self_check(fast_mode=True) 验证重写产物")
+        self_check_result = tools.run_self_check(fast_mode=True)
+        job_store.add_progress(job, f"自检结果: {self_check_result[:500]}")
+
+        if isinstance(self_check_result, str) and self_check_result.startswith("OK"):
+            ok, full_msg = _full_gate(self_check_result, "Coder Rewrite")
+            if ok:
+                return full_msg
+            return full_msg
+
+        # Rewrite 仍失败：回退 .fixer_bak 基线
+        restore_good_snapshot(job_dir, suffix=".fixer_bak")
+        final_summary = f"Coder Rewrite 后快速自检仍失败: {self_check_result[:500]}"
+        job_store.add_progress(job, final_summary)
+        job_store.add_progress(job, f"Agent 结束: {final_summary}")
+        return final_summary
+
+    # 未触发重写（理论上不会到这里，但兜底）
+    restore_good_snapshot(job_dir, suffix=".fixer_bak")
+    final_summary = f"Coder + Fixer 用尽 {max_fixer_attempts} 轮，快速自检仍失败: {self_check_result[:500]}"
+    job_store.add_progress(job, final_summary)
+    job_store.add_progress(job, f"Agent 结束: {final_summary}")
+    return final_summary

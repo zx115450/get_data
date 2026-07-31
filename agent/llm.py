@@ -61,13 +61,38 @@ def embedding_configured() -> bool:
     """
     return bool((os.getenv("EMBEDDING_API_KEY") or "").strip())
 
-# 网关 413 防护：单字段 / 整包大致上限（字符）
-_MAX_TOOL_RESULT = 2500
-_MAX_ARG_CONTENT = 400
-_MAX_INPUT_TEXT_IN_HISTORY = 400
-# 写入类工具：参数里的大段源码只需保留在「最近一轮」，更早的改成摘要
-_WRITE_TOOLS = {"write_gen", "write_validate", "write_range", "write_file"}
+# 网关 413 防护：按场景配置不同工具结果的上下文占用上限（字符）
+# tool 结果：按工具类型决定保留多少（关键信息多的多留，大输出少留）
+_TOOL_RESULT_LIMITS = {
+    "write_gen": 0,          # 只保留成功/失败状态，源码已写盘，0 表示后续压缩成 stub
+    "write_validate": 0,
+    "write_checker": 0,
+    "write_range": 800,      # 保留 range.json 整体，因为内容不大且常被参考
+    "write_file": 0,
+    "run_gen": 400,          # 成功输出只需典型头尾+统计
+    "run_validate": 1200,    # 失败时 stderr 要保留，成功可很短
+    "run_std": 1200,         # 同上
+    "run_self_check": 2500,  # 修复刚需，保留相对完整
+    "run_checker": 1200,
+    "run_checker_self_check": 2000,
+    "read_file": 3000,       # 读文件结果，可保留较完整，但大文件仍由工具层截断
+    "read_range": 1200,
+    "finish": 500,
+    "use_builtin_checker": 300,
+    "use_checker_template": 300,
+}
+_DEFAULT_TOOL_RESULT_LIMIT = 2500
+
+# 写入类工具参数里的大段源码：超过限额就换成 stub，禁止回写
+_WRITE_TOOLS = {"write_gen", "write_validate", "write_checker", "write_range", "write_file"}
+_WRITE_ARG_CONTENT_LIMIT = 400  # 超过此长度就 stub
+
+# 输入类参数（run_validate/run_std 的 input_text）通常体积大，仅保留引用
 _INPUT_TOOLS = {"run_validate", "run_std"}
+_INPUT_TEXT_LIMIT = 400
+
+# 折叠阈值：当历史超过此轮数，早期成功步只保留一行摘要
+_HISTORY_FOLD_AFTER_STEPS = 6
 
 
 def _truncate(s: str, limit: int) -> str:
@@ -75,29 +100,60 @@ def _truncate(s: str, limit: int) -> str:
         return ""
     if len(s) <= limit:
         return s
-    head = limit // 2
-    tail = limit - head - 30
+    # 修复类关键信息（ERROR / 行号）常在尾部，保留更多尾部
+    if "ERROR" in s or "FAIL" in s or "failed" in s:
+        head = max(0, limit // 4 - 30)
+        tail = limit - head - 30
+    else:
+        head = limit // 2 - 15
+        tail = limit - head - 30
     return f"{s[:head]}\n...[{len(s)} chars truncated]...\n{s[-tail:]}"
 
 
-def compact_messages(messages: list[dict]) -> list[dict]:
-    """压缩历史，降低 413 风险。原地修改 messages 并返回。
+def _fold_old_steps(messages: list[dict]) -> list[dict]:
+    """把早期成功/不关键的 tool 交互折叠成一行，保留最近轮次的完整消息。"""
+    # 只保留 system + 最近 user；中间步数超过阈值则折叠为摘要
+    # 简化：扫描非系统/非最近 user 的 tool 消息，如果长度大且不含 ERROR，可只留一行
+    result = []
+    for msg in messages:
+        role = msg.get("role")
+        if role == "system":
+            result.append(msg)
+            continue
+        if role == "user":
+            result.append(msg)
+            continue
+        # tool 消息：如果内容超长且无错误，只保留一行
+        if role == "tool":
+            c = msg.get("content") or ""
+            if len(c) > 600 and not any(k in c for k in ("ERROR", "FAIL", "MUST_FIX", "必须修")):
+                msg = dict(msg)
+                msg["content"] = f"[step result] {len(c)} chars (success/non-error, folded)"
+        result.append(msg)
+    return result
 
-    - tool 结果过长 → 截断
-    - 已执行过的 write_* 工具参数里的 content → 改成「已写入 N 字符」摘要
+
+def compact_messages(messages: list[dict]) -> list[dict]:
+    """按场景压缩历史，降低 413 风险。原地修改 messages 并返回。
+
+    策略：
+    - tool 结果按工具类型定额截断（ERROR 优先保留，尾部多留）
+    - 已执行过的 write_* 工具参数里的 content → 改成 stub（保留磁盘指针）
     - 已执行过的 run_validate/run_std 的 input_text → 截断
+    - 历史步数过多时，折叠早期非 ERROR 成功消息
 
     调用时机：每轮发 LLM 请求之前。此时上一轮的 tool_calls 早已执行完毕，
     Action.args 已解析在内存里，历史里的完整源码可以安全换成摘要。
     """
+    # 1. 折叠早期成功步（只保留摘要，不丢太多细节，因为磁盘是权威）
+    # 注：这里对步数做轻量折叠，不删除；后续错误信息仍保留
+    tool_count = sum(1 for m in messages if m.get("role") == "tool")
+    if tool_count > _HISTORY_FOLD_AFTER_STEPS * 2:
+        messages = _fold_old_steps(messages)
+
+    # 2. 处理 assistant tool_calls：源码参数 stub + input_text 截断
     for msg in messages:
         role = msg.get("role")
-        if role == "tool":
-            c = msg.get("content") or ""
-            if len(c) > _MAX_TOOL_RESULT:
-                msg["content"] = _truncate(c, _MAX_TOOL_RESULT)
-            continue
-
         if role != "assistant" or not msg.get("tool_calls"):
             continue
 
@@ -116,10 +172,11 @@ def compact_messages(messages: list[dict]) -> list[dict]:
             changed = False
             if name in _WRITE_TOOLS and "content" in args:
                 content = args.get("content") or ""
-                if len(content) > _MAX_ARG_CONTENT:
+                if len(content) > _WRITE_ARG_CONTENT_LIMIT:
                     path_hint = {
                         "write_gen": "gen.cpp",
                         "write_validate": "validator.cpp",
+                        "write_checker": "checker.cpp",
                         "write_range": "range.json",
                         "write_file": args.get("path", "file"),
                     }.get(name, "file")
@@ -129,13 +186,13 @@ def compact_messages(messages: list[dict]) -> list[dict]:
                         f"__OMITTED_SOURCE__ file={path_hint} chars={len(content)}; "
                         f"head={head}...; "
                         f"FULL file is on disk — call read_file(\"{path_hint}\") to recover. "
-                        f"Never pass this stub back to write_gen/write_validate."
+                        f"Never pass this stub back to any write_* tool."
                     )
                     changed = True
             if name in _INPUT_TOOLS and "input_text" in args:
                 t = args.get("input_text") or ""
-                if len(t) > _MAX_INPUT_TEXT_IN_HISTORY:
-                    args["input_text"] = _truncate(t, _MAX_INPUT_TEXT_IN_HISTORY)
+                if len(t) > _INPUT_TEXT_LIMIT:
+                    args["input_text"] = _truncate(t, _INPUT_TEXT_LIMIT)
                     changed = True
             if changed:
                 fn["arguments"] = json.dumps(args, ensure_ascii=False)
@@ -143,6 +200,33 @@ def compact_messages(messages: list[dict]) -> list[dict]:
             new_tcs.append(tc)
         msg["tool_calls"] = new_tcs
 
+    # 3. 处理 tool 结果：按工具类型定额截断
+    for msg in messages:
+        if msg.get("role") != "tool":
+            continue
+        c = msg.get("content") or ""
+        # 从相邻 assistant tool_calls 推断工具名；找不到则用默认
+        name = ""
+        # 简单推断：tool_call_id 匹配上一个 assistant 消息
+        tc_id = msg.get("tool_call_id")
+        if tc_id:
+            for prev in reversed(messages):
+                if prev.get("role") == "assistant" and prev.get("tool_calls"):
+                    for tc in prev["tool_calls"]:
+                        if tc.get("id") == tc_id:
+                            name = (tc.get("function") or {}).get("name", "")
+                            break
+                    if name:
+                        break
+        limit = _TOOL_RESULT_LIMITS.get(name, _DEFAULT_TOOL_RESULT_LIMIT)
+        if limit > 0 and len(c) > limit:
+            msg["content"] = _truncate(c, limit)
+        elif limit == 0:
+            # 对写盘工具：只保留是否成功/失败，不保留源码或详细输出
+            first_line = (c or "").splitlines()[0] if c else ""
+            msg["content"] = f"[{name}] {first_line[:120]}"
+
+    # 4. 超长 user 兜底
     for msg in messages:
         if msg.get("role") == "user":
             c = msg.get("content") or ""
