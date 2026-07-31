@@ -152,6 +152,7 @@ BASE_VAL_RULES = """validator.cpp 必须满足（testlib 写法）：
   - 读取顺序必须和题面输入格式完全一致（包括开头的 T，如果题目有多组数据）
   - 任何格式/范围不符 testlib 会自动 quit 并把原因打到 stderr
   - 必须验证题目声明的所有结构性质，不能只做格式和范围检查；对题面中“保证”“约定”“满足...”等条件，必须用 ensuref 显式校验，不要默认数据一定满足。
+  - 若本题确实只有范围/格式约束、没有任何「保证/约定」类结构性质，不要为了过门禁而编造题面没有的 ensuref 约束；可在 validator 顶部加注释 `// no-structural-constraints` 显式 opt-out（Reviewer 仍会抽查）。
 """
 
 RULES = """规则：
@@ -350,6 +351,53 @@ def build_range_prompt() -> str:
         "write_range 成功后立刻 finish。看到 ERROR 要修正后再 write_range。",
         RULES,
     ])
+
+
+PLANNER_PROMPT = """你是算法竞赛测试数据生成器设计专家。任务：为给定题目写一份 gen.cpp / validator.cpp 的生成计划。
+
+要求：
+1. 只输出 Markdown 计划正文，不要调用任何工具，不要写代码，不要解释。
+2. 计划必须包含以下小节，且每个小节都要有明确结论：
+   - 1. 输入格式（首行 T？字段顺序？分隔符？变量类型？）
+   - 2. 范围参数（来自 range.json，列出每个变量及其 [min, max]；固定参数 seed/index/count/type 也要注册）
+   - 3. 多测与 sum 约束（若有，写明如何处理；若无不测写 "无多测"）
+   - 4. 规模分层（random 分支如何用 index/count 覆盖 [L,R] 大小端）
+   - 5. edge_cases 映射（每个 edge_case 名字对应的分支构造策略）
+   - 6. validator 校验点（格式、范围、结构、多测 sum）
+   - 7. 实现顺序（先写什么函数/分支，再写什么，最后如何自检）
+3. 不要编造题面没有的范围或约束；若有不确定之处，在计划里明确标注。
+
+只输出 Markdown 计划，然后结束。"""
+
+
+def build_planner_prompt() -> str:
+    """返回 Planner 阶段（单次纯文本）的 System Prompt。"""
+    return PLANNER_PROMPT
+
+
+CODER_PROMPT = """你是 ACM 数据生成器 / 校验器编码专家。任务：根据当前工作目录的 gen_plan.md 和 range.json，写出完整可编译的 gen.cpp 与 validator.cpp。
+
+可用工具：
+- read_file(path): 读取 gen_plan.md / range.json / gen.cpp / validator.cpp
+- write_gen(content): 写完整 gen.cpp 并自动编译
+- write_validate(content): 写完整 validator.cpp 并自动编译
+- run_self_check(): 强化自检（必须调用，通过后才能 finish）
+- finish(summary): 自检通过后调用
+
+工作规则：
+1. 第一步必须 read_file("gen_plan.md") 和 read_file("range.json")，按 plan 与范围实现代码。
+2. gen.cpp 必须 #include "testlib.h" 或 "generator.h"，main 里 registerGen(argc, argv, 1)。
+3. 必须解析所有 opt：seed、type、index、count，以及 range.json 中所有 constraints 变量名，避免 "unused key" 错误。
+4. validator.cpp 必须调用 inf.readEof()；若存在特殊结构约束，用 ensuref 显式校验；若只有范围/格式约束，可加注释 // no-structural-constraints 声明。
+5. 只输出一次完整 gen.cpp 与 validator.cpp（可一次 write_gen + write_validate 同时写），然后立即调用 run_self_check()。
+6. 如果 run_self_check() 返回 ERROR，只允许再修正一次（读文件 → 写完整源码 → run_self_check）；若仍失败，直接 finish 并说明失败原因。
+7. 在 run_self_check() 返回 OK 之前，禁止再次 write_gen 或 write_validate 而未测试。
+8. 任何情况下禁止把 __OMITTED_SOURCE__ 等历史摘要写回文件；如需查看旧版，先 read_file。"""
+
+
+def build_coder_prompt() -> str:
+    """返回 Coder 阶段（硬自检）的 System Prompt。"""
+    return CODER_PROMPT
 
 
 CHECKER_CORE = """你是 Special Judge 编写助手。任务：为本题写一个 checker.cpp，用来判定选手输出是否合法/正确。

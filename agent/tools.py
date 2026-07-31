@@ -137,13 +137,53 @@ def _looks_like_omitted_stub(content: str) -> bool:
     return any(m in content for m in markers)
 
 
+def _range_has_structural_constraints() -> bool:
+    """读取 WORK_DIR/range.json，判断是否声明了 special_constraints 或多测 sum 约束。"""
+    p = WORK_DIR / "range.json"
+    if not p.is_file():
+        return True  # 找不到 range.json 时保守视为需要
+    try:
+        rj = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return True
+    sc = rj.get("special_constraints")
+    if isinstance(sc, list) and any(isinstance(s, str) and s.strip() for s in sc):
+        return True
+    return False
+
+
 def _validator_static_check(content: str) -> str | None:
-    """编译前对 validator.cpp 做静态检查：必须包含 readEof 和 ensuref。"""
+    """编译前对 validator.cpp 做静态检查：必须包含 readEof；ensuref 按需要求。
+
+    - readEof 始终强制：漏检 trailing 数据是常见 bug。
+    - ensuref 不再一刀切强制：
+        * 若 range.json 声明了 special_constraints（结构约束），必须用 ensuref 校验，
+          不允许 opt-out（已显式声明的结构性质不能跳过）；
+        * 若确实只有范围/格式约束，可在 validator 里加注释
+          `// no-structural-constraints` 显式 opt-out，避免模型为过门禁乱编 ensuref。
+    """
     if "readEof" not in content:
         return "ERROR: validator.cpp 必须调用 inf.readEof() 确认读到文件末尾，否则可能漏检 trailing 数据"
-    if "ensuref" not in content:
-        return "ERROR: validator.cpp 必须至少使用一次 ensuref(...) 对题意结构性质做显式校验"
-    return None
+    if "ensuref" in content:
+        return None
+    # 没有 ensuref：检查是否显式 opt-out
+    opt_out_markers = ("no-structural-constraints", "no-ensuref-needed")
+    opted_out = any(m in content for m in opt_out_markers)
+    if _range_has_structural_constraints():
+        # 已声明结构约束：opt-out 不被允许，必须用 ensuref
+        return (
+            "ERROR: range.json 声明了 special_constraints（结构约束），"
+            "validator 必须用 ensuref(...) 对每条结构性质做显式校验，"
+            "不能用 // no-structural-constraints 跳过——这些是题面明确要求的结构保证。"
+        )
+    if opted_out:
+        return None
+    return (
+        "ERROR: validator 未做任何结构性质校验（缺 ensuref）。"
+        "若本题确实只有范围/格式约束、无任何「保证/约定」类结构性质，"
+        "请在 validator 顶部加注释 `// no-structural-constraints` 显式 opt-out，"
+        "不要为了过门禁而编造题面没有的 ensuref 约束。"
+    )
 
 
 # ---- 通用工具 ----

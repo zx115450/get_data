@@ -57,7 +57,7 @@ class RangeProposeRequest(BaseModel):
 
 class TextRewriteRequest(BaseModel):
     text: str
-    kind: str = "statement"   # statement | range
+    kind: str = "statement"   # statement | range | output
     extra_hint: str = ""      # 用户附加提示，用于重新生成
 
 
@@ -92,13 +92,16 @@ def health():
     return {"status": "ok"}
 
 
+_TEXT_KINDS = ("statement", "range", "output")
+
+
 @app.post("/text/simplify")
 def api_simplify(req: TextRewriteRequest):
     """markup 清洗 + LLM 总结成无符号纯文本。"""
     if not (req.text or "").strip():
         raise HTTPException(400, "text 不能为空")
-    if req.kind not in ("statement", "range"):
-        raise HTTPException(400, "kind 只支持 statement / range")
+    if req.kind not in _TEXT_KINDS:
+        raise HTTPException(400, f"kind 只支持 {' / '.join(_TEXT_KINDS)}")
     try:
         result = simplify_text(req.text, req.kind, req.extra_hint)
     except Exception as e:
@@ -111,8 +114,8 @@ def api_beautify(req: TextRewriteRequest):
     """不改题意，LLM 生成 Markdown（可用 LaTeX）。"""
     if not (req.text or "").strip():
         raise HTTPException(400, "text 不能为空")
-    if req.kind not in ("statement", "range"):
-        raise HTTPException(400, "kind 只支持 statement / range")
+    if req.kind not in _TEXT_KINDS:
+        raise HTTPException(400, f"kind 只支持 {' / '.join(_TEXT_KINDS)}")
     try:
         result = beautify_text(req.text, req.kind, req.extra_hint)
     except Exception as e:

@@ -180,9 +180,10 @@ def generate(range_json: dict, work_dir: str, out_dir: str, verbose: bool = True
     max_retries = 3  # 同类型失败后最多重试几次
 
     def _gen_one(i: int, typ: str, fallback_types: list[str]):
-        """生成第 i 组测例（含重试 + 降级类型），返回 (i, success, inp, ans, error_log)。"""
+        """生成第 i 组测例（含重试 + 降级类型），返回 (i, success, inp, ans, error_log, input_preview)。"""
         types_to_try = [typ] + [t for t in fallback_types if t and t != typ]
         error_log = []
+        input_preview = ""
         for try_typ in types_to_try:
             last_error = ""
             for attempt in range(max_retries + 1):
@@ -224,6 +225,8 @@ def generate(range_json: dict, work_dir: str, out_dir: str, verbose: bool = True
                         last_error = f"validate MEMORY_LIMIT ({mem_mb} MB) type={try_typ}"
                     else:
                         last_error = f"validate FAILED type={try_typ}: {err.strip()}"
+                    if not input_preview:
+                        input_preview = inp[:800]
                     if verbose:
                         print(f"[{i+1}/{count}] attempt {attempt+1}/{max_retries+1} {last_error}")
                     continue
@@ -242,6 +245,8 @@ def generate(range_json: dict, work_dir: str, out_dir: str, verbose: bool = True
                         )
                     else:
                         last_error = f"std FAILED type={try_typ}: {err.strip()}"
+                    if not input_preview:
+                        input_preview = inp[:800]
                     if verbose:
                         print(f"[{i+1}/{count}] attempt {attempt+1}/{max_retries+1} {last_error}")
                     continue
@@ -251,13 +256,13 @@ def generate(range_json: dict, work_dir: str, out_dir: str, verbose: bool = True
                         print(f"[{i+1}/{count}] 降级成功：原类型 {typ} -> {try_typ} OK")
                 if verbose:
                     print(f"[{i+1}/{count}] OK type={try_typ} in={len(inp)}B ans={len(ans)}B")
-                return (i, True, inp, ans, "")
+                return (i, True, inp, ans, "", "")
 
             error_log.append(f"type={try_typ} 在 {max_retries+1} 次尝试后失败: {last_error}")
             if verbose:
                 print(f"[{i+1}/{count}] GIVE UP type={try_typ}")
 
-        return (i, False, "", "", "\n".join(error_log))
+        return (i, False, "", "", "\n".join(error_log), input_preview)
 
     # 只生成缺失组
     todo = [i for i in range(count) if (i + 1) not in existing_pairs]
@@ -277,14 +282,19 @@ def generate(range_json: dict, work_dir: str, out_dir: str, verbose: bool = True
     # 按索引顺序落盘，保证 .in/.out 文件名顺序稳定
     results.sort(key=lambda x: x[0])
     failures = []
-    for i, success, inp, ans, err in results:
+    for i, success, inp, ans, err, preview in results:
         if success:
             (out / f"{i+1}.in").write_text(inp, encoding="utf-8")
             (out / f"{i+1}.out").write_text(ans, encoding="utf-8")
             ok += 1
         else:
             bad += 1
-            failures.append({"index": i + 1, "planned_type": pick_type(i, count, edge_cases), "error": err})
+            failures.append({
+                "index": i + 1,
+                "planned_type": pick_type(i, count, edge_cases),
+                "error": err,
+                "input_preview": preview,
+            })
 
     elapsed = time.perf_counter() - t0
     return {

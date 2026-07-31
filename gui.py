@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -477,8 +478,21 @@ class App:
                 f"{BASE}{endpoint}", data=data,
                 headers={"Content-Type": "application/json"},
             )
-            r = urllib.request.urlopen(req, timeout=120)
-            return json.loads(r.read()).get("result") or ""
+            try:
+                r = urllib.request.urlopen(req, timeout=120)
+                return json.loads(r.read()).get("result") or ""
+            except urllib.error.HTTPError as e:
+                detail = ""
+                try:
+                    raw = e.read().decode("utf-8", errors="replace")
+                    payload = json.loads(raw) if raw else {}
+                    detail = payload.get("detail") or raw
+                except Exception:
+                    detail = ""
+                if isinstance(detail, list):
+                    detail = "; ".join(str(x) for x in detail)
+                msg = f"HTTP Error {e.code}: {detail or e.reason or 'Bad Request'}"
+                raise RuntimeError(msg) from e
 
         def run_gen(extra="", use_current_as_base=False):
             if state["busy"]:
@@ -494,11 +508,12 @@ class App:
                     if not base:
                         base = state["base_text"]
                     result = call_api(extra, base)
-                    self.root_after(lambda: set_result(result))
+                    self.root_after(lambda r=result: set_result(r))
                     self.root_after(lambda: status_var.set("完成 — 可「保留」写入编辑区，「重新生成」或「不保留」"))
                 except Exception as e:
-                    self.root_after(lambda: status_var.set(f"失败: {e}"))
-                    self.root_after(lambda: messagebox.showerror(title, str(e), parent=win))
+                    err = str(e) or repr(e)
+                    self.root_after(lambda m=err: status_var.set(f"失败: {m}"))
+                    self.root_after(lambda m=err: messagebox.showerror(title, m, parent=win))
                 finally:
                     state["busy"] = False
                     self.root_after(lambda: [b.config(state="normal") for b in (btn_keep, btn_regen, btn_discard)])

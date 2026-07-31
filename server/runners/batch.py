@@ -1,0 +1,168 @@
+"""批量生成与打包阶段。"""
+import sys
+from pathlib import Path
+from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
+from agent import tools
+from pipeline import gen_data, pack
+from pipeline.pack import pack_checker, pack_sources
+from server import job_store
+from server.few_shots_rag import add_job_to_corpus
+from server.runners import review
+from server.runners.snapshot import (
+    has_complete_in_out,
+    merge_out_into_good,
+    restore_good_snapshot,
+    save_good_snapshot,
+)
+
+
+def run_batch_and_pack(
+    job: job_store.Job,
+    job_dir: Path,
+    produced: dict,
+    eff_type: str,
+    special_judge: bool,
+    stmt_plain: str = "",
+    range_plain: str = "",
+    on_event=None,
+) -> dict[str, Any]:
+    """运行阶段 4/5：批量生成与打包。返回 stats 字典。
+
+    若批量生成出现失败，会保存当前成功快照，然后启动 Batch Fixer 自动修复
+    gen/validator，并只重跑失败索引。最多修复两轮，仍失败则中止。
+    """
+    out_dir = job_dir / "out"
+    zip_path = job_dir / "data.zip"
+    sources_zip_path = job_dir / "sources.zip"
+    checker_zip_path = job_dir / "checker.zip"
+
+    job_store.add_progress(
+        job,
+        f"产物 OK: count={produced.get('count')} edge_cases={produced.get('edge_cases')}",
+    )
+    save_good_snapshot(job_dir, include_in_out=False)
+    job_store.add_progress(job, "已保存 gen/validator 好版本快照")
+
+    # 确保工具函数看到正确的工作目录
+    tools.set_context(str(job_dir), produced.get("std_cmd", ""))
+
+    if (job_dir / "out.good").is_dir() and len(pair := _pair_indices(job_dir / "out.good")) > 0:
+        n_good = len(pair)
+        restore_good_snapshot(job_dir)
+        job_store.add_progress(
+            job,
+            f"已还原 out.good 中 {n_good} 组合法测例，将只补缺失组"
+        )
+
+    if has_complete_in_out(job_dir, produced):
+        job_store.add_progress(job, "【阶段 4/5】测例已齐全，跳过批量生成")
+        stats = {
+            "count": produced.get("count", 15),
+            "ok": produced.get("count", 15),
+            "bad": 0,
+            "reused": produced.get("count", 15),
+            "failures": [],
+            "restored": True,
+        }
+        merge_out_into_good(job_dir)
+    else:
+        max_repair_rounds = 2
+        stats = None
+        for round_no in range(max_repair_rounds + 1):
+            job_store.add_progress(
+                job, f"【阶段 4/5】批量生成第 {round_no + 1}/{max_repair_rounds + 1} 轮"
+            )
+            stats = gen_data.generate(
+                produced, str(job_dir), str(out_dir), verbose=False, reuse_existing=True
+            )
+            job_store.add_progress(job, f"生成统计: {stats}")
+            merged = merge_out_into_good(job_dir)
+            if merged:
+                job_store.add_progress(job, f"已把 {merged} 组合法测例合并进 out.good")
+
+            bad = stats.get("bad", 0)
+            if bad == 0:
+                job_store.add_progress(job, "批量生成全部通过")
+                break
+
+            failures = stats.get("failures", [])
+            for f in failures:
+                job_store.add_progress(
+                    job,
+                    f"生成失败 #{f['index']} (planned_type={f['planned_type']}):\n{f['error']}",
+                )
+
+            if round_no >= max_repair_rounds:
+                raise RuntimeError(
+                    f"批量生成仍有 {bad}/{stats['count']} 组失败，已用尽 {max_repair_rounds} 轮修复，"
+                    f"中止打包（已成功的 {stats.get('ok', 0)} 组已写入 out.good，下次同题可复用）"
+                )
+
+            ok, msg = review.run_batch_failure_fix(
+                job,
+                job_dir,
+                stmt_plain,
+                range_plain,
+                produced,
+                failures,
+                on_event,
+                attempt=round_no + 1,
+                max_attempts=max_repair_rounds,
+            )
+            if not ok:
+                raise RuntimeError(f"批量失败自动修复未通过自检: {msg}")
+            # 修复通过后会继续下一轮，只补缺失索引
+
+        if stats is None:
+            stats = {
+                "count": produced.get("count", 15),
+                "ok": produced.get("count", 15),
+                "bad": 0,
+                "reused": produced.get("count", 15),
+                "failures": [],
+                "restored": True,
+            }
+
+    job_store.add_progress(job, "【阶段 5/5】打包 zip（仅 .in / .out）")
+    meta = {"problem": str(job_dir), "range": produced, "stats": stats}
+    pack.pack(str(out_dir), str(zip_path), meta)
+    job.zip_path = str(zip_path)
+    job_store.add_progress(job, f"打包完成: {zip_path}")
+
+    try:
+        pack_sources(str(job_dir), str(sources_zip_path))
+        job.sources_zip_path = str(sources_zip_path)
+        job_store.add_progress(job, f"源码包完成: {sources_zip_path}")
+    except Exception as e:
+        job_store.add_progress(job, f"源码包打包失败（非致命）: {type(e).__name__}: {e}")
+
+    if special_judge:
+        checker_zip_path = job_dir / "checker.zip"
+        if (job_dir / "checker.cpp").is_file() or (job_dir / ("checker.exe" if Path().name == "nt" else "checker")).is_file():
+            pack_checker(str(job_dir), str(checker_zip_path))
+            job.checker_zip_path = str(checker_zip_path)
+            job_store.add_progress(job, f"checker.zip 完成: {checker_zip_path}")
+
+    try:
+        added = add_job_to_corpus(job_dir, stats=stats, problem_type=eff_type)
+        if added:
+            rate = added.get("valid_rate")
+            rate_s = f", valid_rate={rate:.4f}" if isinstance(rate, (int, float)) else ""
+            job_store.add_progress(
+                job,
+                f"RAG 语料库已更新: {added['key']} (type={added.get('problem_type') or eff_type}{rate_s})",
+            )
+        else:
+            job_store.add_progress(job, "RAG 语料库未更新（质量过滤未通过、重复或已存在）")
+    except Exception as e:
+        job_store.add_progress(job, f"RAG 语料库更新失败（非致命）: {type(e).__name__}: {e}")
+
+    return stats
+
+
+def _pair_indices(data_dir: Path) -> set[int]:
+    from server.runners.snapshot import pair_indices_in_dir
+    return pair_indices_in_dir(data_dir)
