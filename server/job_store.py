@@ -1,9 +1,9 @@
-"""内存级任务存储。生产环境可换 SQLite/Redis，这里保持简单。"""
+"""任务存储：内存索引 + 落盘 job_status.json；单 worker 并发闸门。"""
 import hashlib
 import json
+import os
 import threading
 import time
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -32,17 +32,157 @@ class Job:
     finished_at: float | None = None                # time.time()，任务结束
     elapsed_ms: int = 0                             # 总耗时（毫秒）
     token_usage: dict = field(default_factory=dict) # LLM token 累计
-    lock: threading.Lock = field(default_factory=threading.Lock)
+    # 产物体积（字节）：打包后由 batch 写入，供 GUI 状态栏展示
+    artifact_sizes: dict = field(default_factory=dict)
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
 _store: dict[str, Job] = {}
 _store_lock = threading.Lock()
 
+# 同时执行的 job 数（CPU/LLM/全局编译资源）；排队等待，不拒绝提交
+MAX_CONCURRENT_JOBS = max(1, int(os.environ.get("GET_DATA_MAX_JOBS", "1")))
+_job_slots = threading.Semaphore(MAX_CONCURRENT_JOBS)
+
+# progress 落盘节流：避免每条日志都写盘
+_PROGRESS_PERSIST_EVERY = 8
+
+
+def _job_dir(job_id: str) -> Path:
+    return Path("jobs") / job_id
+
+
+def _status_path(job_id: str) -> Path:
+    return _job_dir(job_id) / "job_status.json"
+
+
+def persist_job(job: Job) -> None:
+    """把任务元数据写入 jobs/<id>/job_status.json（供重启后查询）。"""
+    with job.lock:
+        data = {
+            "id": job.id,
+            "status": job.status.value,
+            "progress": list(job.progress),
+            "error": job.error,
+            "zip_path": job.zip_path,
+            "sources_zip_path": job.sources_zip_path,
+            "checker_zip_path": job.checker_zip_path,
+            "cancel_requested": job.cancel_requested,
+            "started_at": job.started_at,
+            "finished_at": job.finished_at,
+            "elapsed_ms": job.elapsed_ms,
+            "token_usage": dict(job.token_usage),
+            "artifact_sizes": dict(job.artifact_sizes),
+        }
+    path = _status_path(job.id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+    except Exception:
+        pass
+
+
+def _load_job_from_disk(job_id: str) -> Job | None:
+    path = _status_path(job_id)
+    jd = _job_dir(job_id)
+    if not path.is_file():
+        # 无元数据但已有 data.zip：视为可下载的完成任务（兼容旧目录）
+        if (jd / "data.zip").is_file():
+            job = Job(id=job_id, status=JobStatus.DONE, zip_path=str(jd / "data.zip"))
+            if (jd / "sources.zip").is_file():
+                job.sources_zip_path = str(jd / "sources.zip")
+            if (jd / "checker.zip").is_file():
+                job.checker_zip_path = str(jd / "checker.zip")
+            return job
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    try:
+        status = JobStatus(data.get("status") or "error")
+    except ValueError:
+        status = JobStatus.ERROR
+    # 进程崩溃时 running/queued 视为中断；若已有完整 data.zip 则按完成处理
+    if status in (JobStatus.RUNNING, JobStatus.QUEUED):
+        if (jd / "data.zip").is_file():
+            status = JobStatus.DONE
+        else:
+            status = JobStatus.ERROR
+            data["error"] = data.get("error") or "进程重启：任务中断"
+    job = Job(
+        id=job_id,
+        status=status,
+        progress=list(data.get("progress") or []),
+        zip_path=str(data.get("zip_path") or ""),
+        sources_zip_path=str(data.get("sources_zip_path") or ""),
+        checker_zip_path=str(data.get("checker_zip_path") or ""),
+        error=str(data.get("error") or ""),
+        cancel_requested=bool(data.get("cancel_requested")),
+        started_at=data.get("started_at"),
+        finished_at=data.get("finished_at"),
+        elapsed_ms=int(data.get("elapsed_ms") or 0),
+        token_usage=dict(data.get("token_usage") or {}),
+        artifact_sizes=dict(data.get("artifact_sizes") or {}),
+    )
+    # 补全 zip 路径与体积（若元数据空但文件仍在）
+    if not job.zip_path and (jd / "data.zip").is_file():
+        job.zip_path = str(jd / "data.zip")
+    if not job.sources_zip_path and (jd / "sources.zip").is_file():
+        job.sources_zip_path = str(jd / "sources.zip")
+    if not job.checker_zip_path and (jd / "checker.zip").is_file():
+        job.checker_zip_path = str(jd / "checker.zip")
+    if not job.artifact_sizes:
+        sizes: dict = {}
+        try:
+            if job.zip_path and Path(job.zip_path).is_file():
+                sizes["data_zip"] = Path(job.zip_path).stat().st_size
+            out_dir = jd / "out"
+            if out_dir.is_dir():
+                total = 0
+                for p in out_dir.iterdir():
+                    if p.is_file() and p.suffix in (".in", ".out"):
+                        total += p.stat().st_size
+                sizes["out_total"] = total
+            if job.sources_zip_path and Path(job.sources_zip_path).is_file():
+                sizes["sources_zip"] = Path(job.sources_zip_path).stat().st_size
+            if job.checker_zip_path and Path(job.checker_zip_path).is_file():
+                sizes["checker_zip"] = Path(job.checker_zip_path).stat().st_size
+        except OSError:
+            pass
+        if sizes:
+            job.artifact_sizes = sizes
+    return job
+
+
+def load_persisted_jobs(lookback: int = 80) -> int:
+    """启动时从 jobs/ 恢复近期任务索引。返回载入数量。"""
+    root = Path("jobs")
+    if not root.is_dir():
+        return 0
+    dirs = sorted(
+        [p for p in root.iterdir() if p.is_dir()],
+        key=lambda p: p.name,
+        reverse=True,
+    )[:lookback]
+    n = 0
+    with _store_lock:
+        for d in dirs:
+            if d.name in _store:
+                continue
+            job = _load_job_from_disk(d.name)
+            if job is None:
+                continue
+            _store[job.id] = job
+            n += 1
+    return n
+
 
 def create_job() -> Job:
     # 目录名：日期 + 时间戳，例如 20260730_210456
     jid = datetime.now().strftime("%Y%m%d_%H%M%S")
-    # 避免同一秒内并发创建同名目录：检查是否存在并递增秒位
     base = jid
     suffix = 0
     while Path("jobs") / jid in [Path("jobs") / d for d in _store] or (Path("jobs") / jid).exists():
@@ -51,17 +191,62 @@ def create_job() -> Job:
     job = Job(id=jid)
     with _store_lock:
         _store[jid] = job
+    persist_job(job)
     return job
 
 
-def get_job(jid: str):
+def get_job(jid: str) -> Job | None:
     with _store_lock:
-        return _store.get(jid)
+        job = _store.get(jid)
+    if job is not None:
+        return job
+    # 冷启动后按需从磁盘加载
+    job = _load_job_from_disk(jid)
+    if job is None:
+        return None
+    with _store_lock:
+        _store.setdefault(jid, job)
+        return _store[jid]
 
 
 def add_progress(job: Job, msg: str) -> None:
     with job.lock:
         job.progress.append(msg)
+        n = len(job.progress)
+    if n == 1 or n % _PROGRESS_PERSIST_EVERY == 0:
+        persist_job(job)
+
+
+def acquire_job_slot(job: Job) -> bool:
+    """阻塞等待执行槽；若已取消则返回 False。"""
+    add_progress(
+        job,
+        f"【排队】等待执行槽（并发上限 {MAX_CONCURRENT_JOBS}）…",
+    )
+    while True:
+        got = _job_slots.acquire(timeout=0.5)
+        with job.lock:
+            cancelled = job.cancel_requested
+        if cancelled:
+            if got:
+                _job_slots.release()
+            return False
+        if got:
+            return True
+
+
+def release_job_slot() -> None:
+    _job_slots.release()
+
+
+def count_active_jobs() -> int:
+    """内存中 queued/running 的任务数。"""
+    with _store_lock:
+        return sum(
+            1
+            for j in _store.values()
+            if j.status in (JobStatus.QUEUED, JobStatus.RUNNING)
+        )
 
 
 def mark_job_started(job: Job) -> None:
@@ -80,6 +265,8 @@ def mark_job_started(job: Job) -> None:
         job.finished_at = None
         job.elapsed_ms = 0
         job.token_usage = {}
+        job.status = JobStatus.RUNNING
+    persist_job(job)
 
 
 def mark_job_finished(job: Job) -> None:
@@ -96,10 +283,49 @@ def mark_job_finished(job: Job) -> None:
         job.elapsed_ms = max(0, int((job.finished_at - job.started_at) * 1000))
         job.token_usage = dict(usage)
         elapsed_ms = job.elapsed_ms
+        sizes = dict(job.artifact_sizes)
+    size_s = format_artifact_sizes(sizes)
+    size_part = f" | {size_s}" if size_s else ""
     add_progress(
         job,
-        f"【统计】耗时 {_format_elapsed_ms(elapsed_ms)} | tokens: {format_token_usage(usage)}",
+        f"【统计】耗时 {_format_elapsed_ms(elapsed_ms)} | tokens: {format_token_usage(usage)}{size_part}",
     )
+    persist_job(job)
+
+
+def format_bytes(n: int | float | None) -> str:
+    """人类可读的字节数。"""
+    try:
+        b = float(n or 0)
+    except (TypeError, ValueError):
+        return "-"
+    if b < 0:
+        b = 0
+    units = ("B", "KB", "MB", "GB")
+    i = 0
+    while b >= 1024 and i < len(units) - 1:
+        b /= 1024
+        i += 1
+    if i == 0:
+        return f"{int(b)}{units[i]}"
+    return f"{b:.1f}{units[i]}"
+
+
+def format_artifact_sizes(sizes: dict | None) -> str:
+    """把 artifact_sizes 格式化成状态栏短串。"""
+    if not sizes:
+        return ""
+    parts = []
+    mapping = (
+        ("data_zip", "data.zip"),
+        ("out_total", "测例"),
+        ("sources_zip", "sources"),
+        ("checker_zip", "checker"),
+    )
+    for key, label in mapping:
+        if key in sizes and sizes[key] is not None:
+            parts.append(f"{label}={format_bytes(sizes[key])}")
+    return " · ".join(parts)
 
 
 def _format_elapsed_ms(elapsed_ms: int) -> str:
@@ -123,6 +349,7 @@ def snapshot(job: Job) -> dict:
         elapsed_ms = job.elapsed_ms
         usage = dict(job.token_usage)
         status = job.status
+        sizes = dict(job.artifact_sizes)
         data = {
             "id": job.id,
             "status": status.value,
@@ -136,17 +363,17 @@ def snapshot(job: Job) -> dict:
             "finished_at": finished,
             "elapsed_ms": elapsed_ms,
             "token_usage": usage,
+            "artifact_sizes": sizes,
+            "artifact_sizes_text": format_artifact_sizes(sizes),
+            "max_concurrent_jobs": MAX_CONCURRENT_JOBS,
         }
 
-    # 运行中动态算已耗时；已结束用落盘值。token 在结束前也可读当前线程外的缓存，
-    # 这里仅返回 job 上已写入的用量（结束时一次性写入）。
     if status == JobStatus.RUNNING and started is not None:
         data["elapsed_ms"] = max(0, int((time.time() - started) * 1000))
     elif status in (JobStatus.DONE, JobStatus.ERROR, JobStatus.CANCELLED) and started is not None:
         if finished is None:
             data["elapsed_ms"] = max(0, int((time.time() - started) * 1000))
 
-    # 失败或取消时若存在 failure_context.json，把它返回给前端，便于 GUI 重试时携带
     if status in (JobStatus.ERROR, JobStatus.DONE, JobStatus.CANCELLED):
         try:
             p = Path("jobs") / job.id / "failure_context.json"
@@ -163,6 +390,7 @@ def request_cancel(job: Job) -> bool:
         if job.status not in (JobStatus.RUNNING, JobStatus.QUEUED):
             return False
         job.cancel_requested = True
+    persist_job(job)
     return True
 
 

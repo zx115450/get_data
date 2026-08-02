@@ -1,13 +1,17 @@
 【参考范例：一道带权图题的标准写法（C++ + ACM-generator）】
-题面：给定 n 点 m 边带权无向图，输出边权之和。
-输入格式：第 1 行 n m；接下来 m 行 u v w（无自环无重边）。
+【仅供参考】下面范例是「单测、无向、无自环、正权」的示意。写本题 gen 必须以题面/标程/range.json/gen_plan 为准：
+- 多测则先输出 T；有向/自环/负权则改采样与 validator，勿照抄本范例。
+- edge_n1：本范例无自环 → n=1 时 m=0；若本题允许自环可改为 (1,1,w)。
+
+题面（范例题）：给定 n 点 m 边带权无向图，输出边权之和。
+输入格式（单测）：第 1 行 n m；接下来 m 行 u v w。
 输出格式：一个整数。
-数据范围：n in [1,1000]，m in [0,n*(n-1)/2]，w in [1,1e9]，15 组。
+数据范围：n in [1,1000]，m in [0,3000]，w in [1,1e9]，15 组。
 
 range.json:
 {
   "count": 15,
-  "constraints": {"n": [1, 1000], "m": [0, 499500], "w": [1, 1000000000]},
+  "constraints": {"n": [1, 1000], "m": [0, 3000], "w": [1, 1000000000]},
   "edge_cases": ["connected_tree", "path", "star", "random_sparse", "edge_n1"]
 }
 
@@ -34,23 +38,28 @@ int main(int argc, char* argv[]) {
         t.gen();
         for (auto &e : t.edges()) edges.emplace_back(e.u(), e.v(), e.w());
     };
-    if (typ == "connected_tree" && n >= 2) {
+    if (typ == "edge_n1" || n <= 1) {
+        n = 1; // 无自环约定下 m=0
+    } else if (typ == "connected_tree" && n >= 2) {
         edge_weight::Tree<int> t(n); add_tree(t);
     } else if (typ == "path" && n >= 2) {
         edge_weight::Chain<int> t(n); add_tree(t);
     } else if (typ == "star" && n >= 2) {
         edge_weight::Flower<int> t(n); add_tree(t);
-    } else if (n >= 2) {
-        int m = rnd.next(0, max(1, n));
+    } else {
+        int m = rnd.next(0, min(n, 3000));
         unordered_set<long long> used;
-        while ((int)edges.size() < m) {
+        int tries = 0, lim = max(100, m * 40);
+        while ((int)edges.size() < m && tries++ < lim) {
             int u = rnd.next(1, n), v = rnd.next(1, n);
             if (u == v) continue;
-            long long key = (long long)min(u,v) * (n + 1) + max(u,v);
+            if (u > v) swap(u, v);
+            long long key = (long long)u * (n + 1) + v;
             if (!used.insert(key).second) continue;
             edges.emplace_back(u, v, rnd.next(1LL, 1000000000LL));
         }
     }
+    // 单测示意；多测请先输出 T
     printf("%d %d\n", n, (int)edges.size());
     for (auto [u,v,w] : edges) printf("%d %d %lld\n", u, v, w);
     return 0;
@@ -62,7 +71,7 @@ using namespace std;
 int main(int argc, char* argv[]) {
     registerValidation();
     int n = inf.readInt(1, 1000, "n"); inf.readSpace();
-    int m = inf.readInt(0, 499500, "m"); inf.readEoln();
+    int m = inf.readInt(0, 3000, "m"); inf.readEoln();
     set<pair<int,int>> es;
     for (int i = 0; i < m; i++) {
         int u = inf.readInt(1, n, "u"); inf.readSpace();

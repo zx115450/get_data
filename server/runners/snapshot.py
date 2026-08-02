@@ -8,7 +8,7 @@ def detect_artifacts(job_dir: Path) -> list[str]:
     """列出 job_dir 下可复用的产物文件名。"""
     candidates = [
         "range.json",
-        "gen.cpp", "gen.py",
+        "gen.cpp", "gen_special.cpp", "gen.py",
         "validator.cpp", "validate.py",
         "checker.cpp",
     ]
@@ -17,7 +17,7 @@ def detect_artifacts(job_dir: Path) -> list[str]:
         if (job_dir / name).is_file():
             found.append(name)
     if os.name == "nt":
-        for name in ("gen.exe", "validator.exe", "checker.exe"):
+        for name in ("gen.exe", "gen_special.exe", "validator.exe", "checker.exe"):
             if (job_dir / name).is_file():
                 found.append(name)
     return found
@@ -26,11 +26,11 @@ def detect_artifacts(job_dir: Path) -> list[str]:
 def detect_good_artifacts(job_dir: Path) -> list[str]:
     """列出通过校验的"好版本"产物（含 out.good 测例快照）。"""
     found = []
-    for name in ("gen.cpp", "gen.py", "validator.cpp", "validate.py"):
+    for name in ("gen.cpp", "gen_special.cpp", "gen.py", "validator.cpp", "validate.py"):
         good = name + ".good"
         if (job_dir / good).is_file():
             found.append(good)
-    for name in ("gen.exe", "validator.exe"):
+    for name in ("gen.exe", "gen_special.exe", "validator.exe"):
         good = name + ".good"
         if (job_dir / good).is_file():
             found.append(good)
@@ -62,12 +62,12 @@ def pair_indices_in_dir(data_dir: Path) -> set[int]:
 
 def save_good_snapshot(job_dir: Path, include_in_out: bool = False, suffix: str = ".good") -> None:
     """把当前 gen/validator 保存为带后缀的快照；默认 .good，可选合并 out → out.good。"""
-    for name in ("gen.cpp", "gen.py", "validator.cpp", "validate.py"):
+    for name in ("gen.cpp", "gen_special.cpp", "gen.py", "validator.cpp", "validate.py"):
         src = job_dir / name
         if src.is_file():
             shutil.copy2(src, job_dir / (name + suffix))
     if os.name == "nt":
-        for name in ("gen.exe", "validator.exe"):
+        for name in ("gen.exe", "gen_special.exe", "validator.exe"):
             src = job_dir / name
             if src.is_file():
                 shutil.copy2(src, job_dir / (name + suffix))
@@ -93,12 +93,12 @@ def merge_out_into_good(job_dir: Path) -> int:
 
 def restore_good_snapshot(job_dir: Path, suffix: str = ".good") -> None:
     """把带后缀的快照还原为正式产物（源码 + 已合法测例）；默认 .good。"""
-    for name in ("gen.cpp", "gen.py", "validator.cpp", "validate.py"):
+    for name in ("gen.cpp", "gen_special.cpp", "gen.py", "validator.cpp", "validate.py"):
         good = job_dir / (name + suffix)
         if good.is_file():
             shutil.copy2(good, job_dir / name)
     if os.name == "nt":
-        for name in ("gen.exe", "validator.exe"):
+        for name in ("gen.exe", "gen_special.exe", "validator.exe"):
             good = job_dir / (name + suffix)
             if good.is_file():
                 shutil.copy2(good, job_dir / name)
@@ -122,7 +122,10 @@ def has_complete_in_out(job_dir: Path, range_json: dict, *, prefer_good: bool = 
 
 
 def has_gen_val_at_resume(job_dir: Path) -> bool:
-    """检查当前目录是否已有 gen + validator 可执行产物。"""
+    """检查当前目录是否已有 gen + validator 产物。
+
+    gen_special 由后续 SpecialCoder 阶段产出，续跑 checker 时不要求已有。
+    """
     _exe = lambda b: b + (".exe" if os.name == "nt" else "")
     has_gen = (job_dir / _exe("gen")).exists() or (job_dir / "gen.py").exists() or (job_dir / "gen.cpp").exists()
     has_val = (job_dir / _exe("validator")).exists() or (job_dir / "validate.py").exists() or (job_dir / "validator.cpp").exists()

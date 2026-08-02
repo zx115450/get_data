@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from server import job_store, runner
 from server.few_shots import FEW_SHOTS
+from server.runners.resume import text_hash
 from server.few_shots_rag import (
     delete_corpus_item,
     get_corpus_item,
@@ -42,6 +43,12 @@ app = FastAPI(title="ACM 出数据后端")
 def _startup_sync_rag_templates():
     """启动时同步固定 few-shot 模板到 RAG 语料（content 变更会清空旧向量）。"""
     try:
+        n = job_store.load_persisted_jobs()
+        if n:
+            print(f"[job_store] restored {n} job(s) from disk")
+    except Exception as e:
+        print(f"[job_store] restore skipped: {e}")
+    try:
         sync_templates_from_code()
     except Exception:
         pass
@@ -53,6 +60,9 @@ class RangeProposeRequest(BaseModel):
     problem_type: str = ""
     std_code: str = ""
     lang: str = "cpp"
+    special_samples_desc: str = ""  # 特殊样例描述；非空时单独生成 special_samples_count 个特殊样例
+    special_samples_count: int = 1   # 特殊样例数量，默认 1
+    auto_discover_special: bool = False  # 无用户提示时仍从标程/题面自动挖特殊方案
 
 
 class TextRewriteRequest(BaseModel):
@@ -71,8 +81,20 @@ class JobRequest(BaseModel):
     range_json: Optional[dict[str, Any]] = None  # 若提供则跳过 Agent 写 range
     special_judge: bool = False  # 是否生成 special judge / checker.zip
     builtin_checker: str = ""  # 可选 lcmp/wcmp/rcmp4/rcmp6/rcmp9/yesno
-    # 失败续跑上下文：由上次失败时返回的 failure_context.json 提供，携带后 runner 会尝试复用产物
+    special_samples_desc: str = ""  # 特殊样例描述；非空时单独生成 special_samples_count 个特殊样例
+    special_samples_count: int = 1   # 特殊样例数量，默认 1
+    auto_discover_special: bool = False  # 无用户提示时仍从标程/题面自动挖特殊方案
+    # 显式指定复用父任务：{"parent_job_id": "2026..."}；优先于自动扫描
     resume_context: Optional[dict[str, Any]] = None
+    skip_resume: bool = False  # 为 True 时强制跳过同题复用，从零重新生成
+
+
+class ResumeCheckRequest(BaseModel):
+    std_code: str
+    lang: str = "python"
+    problem_statement: str = ""
+    lookback: int = 10  # 最近多少个「已成功(有 data.zip)」任务
+    prefer_parent_id: str = ""  # 历史加载时指定的父任务；优先检查是否可直接下载
 
 
 class CorpusDisableRequest(BaseModel):
@@ -139,12 +161,16 @@ def propose_range(req: RangeProposeRequest):
             req.problem_type,
             req.std_code,
             req.lang,
+            special_samples_desc=req.special_samples_desc,
+            special_samples_count=req.special_samples_count,
+            auto_discover_special=bool(req.auto_discover_special),
         )
     except Exception as e:
         raise HTTPException(500, f"{type(e).__name__}: {e}") from e
     return {
         "range_json": data,
         "problem_type": data.get("problem_type") or "",
+        "special_schemes": data.get("special_schemes") or [],
     }
 
 
@@ -164,10 +190,16 @@ def submit(req: JobRequest):
     job = job_store.create_job()
 
     def worker():
-        job_store.mark_job_started(job)
+        slot = False
         try:
-            job.status = job_store.JobStatus.RUNNING
-            runner.run_job(
+            slot = job_store.acquire_job_slot(job)
+            if not slot:
+                job.status = job_store.JobStatus.CANCELLED
+                job.error = "cancelled while queued"
+                job_store.add_progress(job, "【取消】排队期间已取消")
+                return
+            job_store.mark_job_started(job)
+            result = runner.run_job(
                 job, req.std_code, req.lang,
                 req.problem_statement, req.data_range_desc,
                 req.problem_type,
@@ -176,17 +208,216 @@ def submit(req: JobRequest):
                 special_judge=req.special_judge,
                 builtin_checker=bc,
                 resume_context=req.resume_context,
+                skip_resume=req.skip_resume,
+                special_samples_desc=req.special_samples_desc,
+                special_samples_count=req.special_samples_count,
+                auto_discover_special=bool(req.auto_discover_special),
             )
-            job.status = job_store.JobStatus.DONE
+            with job.lock:
+                if job.status == job_store.JobStatus.RUNNING:
+                    if job.cancel_requested:
+                        job.status = job_store.JobStatus.CANCELLED
+                    else:
+                        job.status = job_store.JobStatus.DONE
+            if job.status == job_store.JobStatus.DONE:
+                try:
+                    from server.runners.resume import write_success_context
+                    special_failed = (
+                        isinstance(result, dict)
+                        and isinstance(result.get("stats"), dict)
+                        and bool(result["stats"].get("special_failed"))
+                    )
+                    write_success_context(
+                        Path("jobs") / job.id,
+                        job.id,
+                        req.problem_statement,
+                        req.std_code,
+                        req.lang,
+                        special_failed=special_failed,
+                    )
+                except Exception:
+                    pass
         except Exception as e:
-            job.status = job_store.JobStatus.ERROR
-            job.error = f"{type(e).__name__}: {e}"
-            job_store.add_progress(job, f"ERROR: {job.error}")
+            with job.lock:
+                already_cancelled = (
+                    job.status == job_store.JobStatus.CANCELLED
+                    or job.cancel_requested
+                    or "客户端请求取消" in str(e)
+                )
+                if already_cancelled:
+                    job.status = job_store.JobStatus.CANCELLED
+                    if not job.error:
+                        job.error = f"{type(e).__name__}: {e}"
+                else:
+                    job.status = job_store.JobStatus.ERROR
+                    job.error = f"{type(e).__name__}: {e}"
+            if job.status == job_store.JobStatus.ERROR:
+                job_store.add_progress(job, f"ERROR: {job.error}")
         finally:
+            if slot:
+                job_store.release_job_slot()
             job_store.mark_job_finished(job)
 
     threading.Thread(target=worker, daemon=True).start()
-    return {"job_id": job.id}
+    return {"job_id": job.id, "max_concurrent_jobs": job_store.MAX_CONCURRENT_JOBS}
+
+
+@app.post("/jobs/check_resume")
+def check_resume(req: ResumeCheckRequest):
+    """提交前预检查：优先同题已成功可下载任务（可多条），其次失败可续跑任务。"""
+    if req.lang not in ("python", "cpp"):
+        raise HTTPException(400, "lang 只支持 python / cpp")
+    if not req.std_code.strip():
+        raise HTTPException(400, "std_code 不能为空")
+    from server.runners import resume
+    from server.runners.snapshot import detect_artifacts, detect_good_artifacts
+
+    stmt_hash = text_hash(req.problem_statement or "")
+    std_hash = text_hash(req.std_code or "")
+    lookback = max(1, int(req.lookback or 10))
+    prefer = (req.prefer_parent_id or "").strip()
+
+    # 1) 显式父任务若已成功且有 data.zip → 直接下载复用
+    if prefer:
+        done_info = resume.describe_done_job(prefer)
+        if done_info:
+            return {
+                "can_resume": True,
+                "kind": "done",
+                "candidates": [done_info],
+                **done_info,
+            }
+        # 父任务有 data.zip 但 special_failed=True：返回 partial，不能直接用 zip
+        parent_dir = Path("jobs") / prefer
+        if not parent_dir.is_dir():
+            parent_dir = resume.JOBS_DIR / prefer
+        if parent_dir.is_dir() and resume._is_special_failed_success(parent_dir):
+            level_info = resume.classify_resume_dir(parent_dir)
+            disk_arts = detect_good_artifacts(parent_dir) + detect_artifacts(parent_dir)
+            return {
+                "can_resume": True,
+                "kind": "partial",
+                "parent_job_id": prefer,
+                "stage": "partial_resume",
+                "error_summary": "上次特殊样例生成失败，可复用普通产物并重新跑特殊流程",
+                "artifacts": disk_arts,
+                "resume_level": level_info.get("resume_level"),
+                "has_gen_val": level_info.get("has_gen_val"),
+                "has_range": level_info.get("has_range"),
+                "has_out_good": level_info.get("has_out_good"),
+                "has_data_zip": True,
+                "has_sources_zip": (parent_dir / "sources.zip").is_file(),
+                "has_checker_zip": (parent_dir / "checker.zip").is_file(),
+                "candidates": [],
+                "special_failed": True,
+            }
+
+    # 2) 扫描同题已成功任务（按成功任务计 lookback），partial 任务按失败续跑处理
+    done_list = resume.find_matching_done_jobs(
+        stmt_hash, std_hash, req.lang, lookback=lookback,
+    )
+    if done_list:
+        top = done_list[0]
+        return {
+            "can_resume": True,
+            "kind": "done",
+            "candidates": done_list,
+            **top,
+        }
+
+    # 3) 失败任务续跑（显式父任务或自动扫描）
+    if prefer:
+        parent_dir = Path("jobs") / prefer
+        if not parent_dir.is_dir():
+            parent_dir = resume.JOBS_DIR / prefer
+        if parent_dir.is_dir():
+            parent_ctx = resume.load_parent_failure_context(parent_dir) or {
+                "stage": "unknown",
+                "error_summary": "",
+                "artifacts": [],
+            }
+            level_info = resume.classify_resume_dir(parent_dir)
+            disk_arts = detect_good_artifacts(parent_dir) + detect_artifacts(parent_dir)
+            return {
+                "can_resume": True,
+                "kind": "failed",
+                "parent_job_id": prefer,
+                "stage": parent_ctx.get("stage", "unknown"),
+                "error_summary": parent_ctx.get("error_summary", ""),
+                "artifacts": disk_arts or parent_ctx.get("artifacts", []),
+                "resume_level": level_info.get("resume_level"),
+                "has_gen_val": level_info.get("has_gen_val"),
+                "has_range": level_info.get("has_range"),
+                "has_out_good": level_info.get("has_out_good"),
+                "has_data_zip": (parent_dir / "data.zip").is_file(),
+                "has_sources_zip": (parent_dir / "sources.zip").is_file(),
+                "has_checker_zip": (parent_dir / "checker.zip").is_file(),
+                "candidates": [],
+            }
+
+    match = resume.find_matching_parent_job(
+        stmt_hash, std_hash, req.lang, lookback=lookback,
+    )
+    if match is None:
+        return {
+            "can_resume": False,
+            "kind": "",
+            "candidates": [],
+            "lookback": lookback,
+            "hint": f"最近 {lookback} 个成功任务中未找到同题 data.zip",
+        }
+    parent_dir, parent_ctx = match
+    done_info = resume.describe_done_job(parent_dir.name)
+    if done_info:
+        return {
+            "can_resume": True,
+            "kind": "done",
+            "candidates": [done_info],
+            **done_info,
+        }
+    # 自动扫描：data.zip 存在但 special_failed=True → partial
+    if (parent_dir / "data.zip").is_file() and resume._is_special_failed_success(parent_dir):
+        level_info = resume.classify_resume_dir(parent_dir)
+        disk_arts = detect_good_artifacts(parent_dir) + detect_artifacts(parent_dir)
+        return {
+            "can_resume": True,
+            "kind": "partial",
+            "parent_job_id": parent_dir.name,
+            "stage": "partial_resume",
+            "error_summary": "上次特殊样例生成失败，可复用普通产物并重新跑特殊流程",
+            "artifacts": disk_arts,
+            "resume_level": level_info.get("resume_level"),
+            "has_gen_val": level_info.get("has_gen_val"),
+            "has_range": level_info.get("has_range"),
+            "has_out_good": level_info.get("has_out_good"),
+            "has_data_zip": True,
+            "has_sources_zip": (parent_dir / "sources.zip").is_file(),
+            "has_checker_zip": (parent_dir / "checker.zip").is_file(),
+            "candidates": [],
+            "special_failed": True,
+        }
+    level_info = resume.classify_resume_dir(parent_dir)
+    disk_arts = detect_good_artifacts(parent_dir) + detect_artifacts(parent_dir)
+    if (parent_dir / "gen_plan.md").is_file() and "gen_plan.md" not in disk_arts:
+        disk_arts.append("gen_plan.md")
+    if (parent_dir / "statement_simplified.txt").is_file():
+        disk_arts.append("statement_simplified.txt")
+    return {
+        "can_resume": True,
+        "kind": "failed",
+        "parent_job_id": parent_dir.name,
+        "stage": parent_ctx.get("stage", "unknown"),
+        "error_summary": parent_ctx.get("error_summary", ""),
+        "artifacts": disk_arts or parent_ctx.get("artifacts", []),
+        "resume_level": level_info.get("resume_level"),
+        "has_gen_val": level_info.get("has_gen_val"),
+        "has_range": level_info.get("has_range"),
+        "has_out_good": level_info.get("has_out_good"),
+        "has_data_zip": (parent_dir / "data.zip").is_file(),
+        "has_sources_zip": (parent_dir / "sources.zip").is_file(),
+        "has_checker_zip": (parent_dir / "checker.zip").is_file(),
+        "candidates": [],
+    }
 
 
 @app.post("/jobs/{jid}/cancel")

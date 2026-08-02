@@ -1,0 +1,56 @@
+{
+  "count": 16,
+  "constraints": {
+    "T": [
+      1,
+      100
+    ],
+    "l": [
+      1,
+      10000000
+    ],
+    "r": [
+      1,
+      10000000
+    ],
+    "n": [
+      2,
+      10000000
+    ]
+  },
+  "edge_cases": [
+    "edge_T1",
+    "edge_Tmax",
+    "edge_l_eq_r",
+    "edge_r_eq_n_minus_1",
+    "edge_l1",
+    "edge_nmax",
+    "edge_n_prime",
+    "edge_all_power_of_two",
+    "edge_gap_large",
+    "edge_gap_narrow",
+    "edge_coprime_lr",
+    "edge_max_value"
+  ],
+  "time_limit_ms": 3000,
+  "memory_limit_mb": 256,
+  "special_samples_desc": "（自动挖掘特殊方案）",
+  "special_samples_count": 1,
+  "special_schemes": [
+    {
+      "id": "user_special",
+      "title": "用户描述的特殊情况",
+      "why": "用户直接给出的特殊样例描述",
+      "must_hold": [
+        "输出恰好为整数"
+      ],
+      "construct_hint": "从零构造满足特殊意图：输出恰好为整数",
+      "construct_mode": "build",
+      "source": "user_hint",
+      "priority": 1,
+      "selected": true,
+      "samples_per_scheme": 1
+    }
+  ],
+  "problem_type": "number_theory"
+}

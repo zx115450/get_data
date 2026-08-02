@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from server.runners.resume import text_hash
+from server.runners.resume import RESUME_VERSION, text_hash
 from server.runners.snapshot import detect_artifacts, detect_good_artifacts
 
 
@@ -52,6 +52,7 @@ def write_failure_context(
     artifacts = [a for a in artifacts if not (a in seen or seen.add(a))]
     ctx = {
         "v": 1,
+        "resume_version": RESUME_VERSION,
         "parent_job_id": job_id,
         "stage": stage,
         "statement_hash": text_hash(statement or ""),

@@ -36,24 +36,33 @@ def _mb_to_bytes(mb: int) -> int:
     return int(mb) * 1024 * 1024
 
 
-def _linux_preexec(memory_bytes: int):
-    """返回 preexec_fn：在子进程里设置 RLIMIT_AS。"""
+def _linux_preexec(memory_bytes: int = 0, stack_bytes: int = 0):
+    """返回 preexec_fn：在子进程里设置 RLIMIT_AS / RLIMIT_STACK。"""
+
+    def _set_rlimit(res, want: int):
+        import resource
+
+        if want <= 0:
+            return
+        soft = hard = want
+        try:
+            resource.setrlimit(res, (soft, hard))
+        except (ValueError, OSError):
+            try:
+                cur_soft, cur_hard = resource.getrlimit(res)
+                if cur_hard != resource.RLIM_INFINITY and soft > cur_hard:
+                    soft = hard = cur_hard
+                resource.setrlimit(res, (soft, hard))
+            except Exception:
+                pass
 
     def _set():
         import resource
 
-        soft = hard = memory_bytes
-        # 部分系统 soft 不能超过当前 hard，先抬 hard 再设 soft
-        try:
-            resource.setrlimit(resource.RLIMIT_AS, (soft, hard))
-        except (ValueError, OSError):
-            try:
-                cur_soft, cur_hard = resource.getrlimit(resource.RLIMIT_AS)
-                if cur_hard != resource.RLIM_INFINITY and soft > cur_hard:
-                    soft = hard = cur_hard
-                resource.setrlimit(resource.RLIMIT_AS, (soft, hard))
-            except Exception:
-                pass
+        if memory_bytes > 0:
+            _set_rlimit(resource.RLIMIT_AS, memory_bytes)
+        if stack_bytes > 0:
+            _set_rlimit(resource.RLIMIT_STACK, stack_bytes)
 
     return _set
 
@@ -168,13 +177,16 @@ def _looks_like_oom(returncode: Optional[int], stderr: str) -> bool:
     if returncode == EXIT_MEMORY:
         return True
     err_l = (stderr or "").lower()
+    # 只用明确超限/分配失败标记；禁止用 "memory_limit"/"oom" 宽匹配——
+    # 否则 safe_run 二次 normalize 时，软提示里的 memory_limit_mb 会把
+    # finder 正常 exit 1（无命中）误判成 MEMORY_LIMIT。
     markers = (
+        "memory_limit exceeded",
         "memoryerror",
         "std::bad_alloc",
         "cannot allocate memory",
         "out of memory",
-        "oom",
-        "memory_limit",
+        "bad_alloc",
     )
     return any(m in err_l for m in markers)
 
@@ -188,14 +200,17 @@ def _normalize_oom(
     msg = f"MEMORY_LIMIT exceeded ({memory_limit_mb} MB)"
     if _looks_like_oom(returncode, stderr):
         err = (stderr or "").strip()
-        if "MEMORY_LIMIT" not in err:
+        if "MEMORY_LIMIT exceeded" not in err:
             err = f"{err}\n{msg}".strip() if err else msg
         return EXIT_MEMORY, stdout or "", err
-    # 非明确 OOM：仍保留原码，但附带提示，方便 Agent 排查「莫名崩溃」
+    # 0/1 为常见正常退出（成功 / 约定失败如 finder 无命中），不要加内存软提示
+    if returncode in (0, 1):
+        return returncode, stdout or "", stderr or ""
+    # 其它非零：保留原码，附带轻提示（文案避免触发 _looks_like_oom）
     if returncode != 0 and memory_limit_mb > 0:
-        hint = f"（若为内存问题：已启用 memory_limit_mb={memory_limit_mb}）"
+        hint = f"（子进程非零退出 rc={returncode}；已启用进程内存上限 {memory_limit_mb}MB）"
         err = (stderr or "").strip()
-        if "memory_limit_mb" not in err.lower() and "MEMORY_LIMIT" not in err:
+        if "进程内存上限" not in err and "MEMORY_LIMIT exceeded" not in err:
             err = f"{err}\n{hint}".strip() if err else hint
         return returncode, stdout or "", err
     return returncode, stdout or "", stderr or ""
@@ -207,16 +222,21 @@ def run(
     timeout=10,
     cwd=None,
     memory_limit_mb: Optional[int] = None,
+    stack_limit_mb: Optional[int] = None,
 ):
     """跑一条命令，超时抛 subprocess.TimeoutExpired。
 
     memory_limit_mb: 正整数时限制子进程（及 shell 子进程）可用内存（MB）。
+    stack_limit_mb: 正整数时在 POSIX 上抬高/限制 RLIMIT_STACK（MB）；
+      Windows 栈大小应在链接期用 -Wl,--stack 设置，此处忽略。
     返回 subprocess.CompletedProcess。
     """
     mem_mb = int(memory_limit_mb) if memory_limit_mb else 0
     memory_bytes = _mb_to_bytes(mem_mb) if mem_mb > 0 else 0
+    stack_mb = int(stack_limit_mb) if stack_limit_mb else 0
+    stack_bytes = _mb_to_bytes(stack_mb) if stack_mb > 0 else 0
 
-    if memory_bytes <= 0:
+    if memory_bytes <= 0 and stack_bytes <= 0:
         return subprocess.run(
             cmd,
             input=stdin,
@@ -228,11 +248,24 @@ def run(
         )
 
     if os.name == "nt":
+        # Windows：内存走 Job Object；栈靠链接参数，不在此设置
+        if memory_bytes <= 0:
+            return subprocess.run(
+                cmd,
+                input=stdin,
+                capture_output=True,
+                timeout=timeout,
+                text=True,
+                shell=True,
+                cwd=cwd,
+            )
         return _run_windows(cmd, stdin, timeout, cwd, mem_mb, memory_bytes)
-    return _run_posix(cmd, stdin, timeout, cwd, mem_mb, memory_bytes)
+    return _run_posix(cmd, stdin, timeout, cwd, mem_mb, memory_bytes, stack_bytes)
 
 
-def _run_posix(cmd, stdin, timeout, cwd, mem_mb: int, memory_bytes: int):
+def _run_posix(
+    cmd, stdin, timeout, cwd, mem_mb: int, memory_bytes: int, stack_bytes: int = 0,
+):
     try:
         cp = subprocess.run(
             cmd,
@@ -242,10 +275,10 @@ def _run_posix(cmd, stdin, timeout, cwd, mem_mb: int, memory_bytes: int):
             text=True,
             shell=True,
             cwd=cwd,
-            preexec_fn=_linux_preexec(memory_bytes),
+            preexec_fn=_linux_preexec(memory_bytes, stack_bytes),
         )
     except AttributeError:
-        # 极端环境无 preexec_fn：退化为不限内存
+        # 极端环境无 preexec_fn：退化为不限内存/栈
         return subprocess.run(
             cmd,
             input=stdin,
@@ -256,12 +289,13 @@ def _run_posix(cmd, stdin, timeout, cwd, mem_mb: int, memory_bytes: int):
             cwd=cwd,
         )
 
-    rc, out, err = _normalize_oom(
-        cp.returncode, cp.stdout or "", cp.stderr or "", mem_mb
-    )
-    cp.returncode = rc
-    cp.stdout = out
-    cp.stderr = err
+    if mem_mb > 0:
+        rc, out, err = _normalize_oom(
+            cp.returncode, cp.stdout or "", cp.stderr or "", mem_mb
+        )
+        cp.returncode = rc
+        cp.stdout = out
+        cp.stderr = err
     return cp
 
 
@@ -327,9 +361,11 @@ def safe_run(
     timeout=10,
     cwd=None,
     memory_limit_mb: Optional[int] = None,
+    stack_limit_mb: Optional[int] = None,
 ):
     """跑命令，但把超时/超内存/异常也转成统一的三元组返回，方便喂回 Agent。"""
     mem_mb = int(memory_limit_mb) if memory_limit_mb else 0
+    stack_mb = int(stack_limit_mb) if stack_limit_mb else 0
     try:
         cp = run(
             cmd,
@@ -337,6 +373,7 @@ def safe_run(
             timeout=timeout,
             cwd=cwd,
             memory_limit_mb=mem_mb if mem_mb > 0 else None,
+            stack_limit_mb=stack_mb if stack_mb > 0 else None,
         )
         rc = cp.returncode
         out = cp.stdout or ""

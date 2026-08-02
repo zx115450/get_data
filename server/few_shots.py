@@ -5,9 +5,10 @@ runner 会按 problem_type 选中并拼到给 Agent 的 task 里，让模型照�
 
 样板要求：正确、能跑、校验严格，且与目标题「同构但不同」。
 
-detect_problem_type(): 关键词兜底（仅在 LLM 失败时使用）。
-classify_problem_type_llm(): 单独一次 chat 判题型，供 range 生成流程调用。
+detect_problem_type(): 关键词兜底（range.json 未写/写错 problem_type 时使用）。
+resolve_problem_type_from_range(): 从 range.json 取题型，无效则关键词兜底。
 get_few_shot(): 统一入口，按显式指定或已解析题型返回样板字符串（可能为空）。
+题型判定融入 Range Agent 写 range.json（字段 problem_type），不再单独调大模型判型。
 """
 
 from __future__ import annotations
@@ -146,6 +147,25 @@ FEW_SHOTS = {
 
 KNOWN_PROBLEM_TYPES = tuple(FEW_SHOTS.keys())
 
+# 拼进 Range Agent 的 task/system：要求在同一次 write_range 里写出 problem_type
+PROBLEM_TYPE_RANGE_HINT = (
+    "【problem_type — 必填】在 range.json 中写入字段 problem_type，"
+    "取值必须是下列之一（只写标识符，不要写中文）：\n"
+    + ", ".join(KNOWN_PROBLEM_TYPES)
+    + "\n\n分类原则（按优先级）：\n"
+    "1. 输入主体是树（n-1 条边、有根/无根树、子树、树上路径、树链剖分、LCA 等）"
+    "→ tree；以边权/点权为主 → weighted_tree。\n"
+    "2. 输入主体是一般图（连通性、最短路、DAG、二分图、网络流等）"
+    "→ graph 或 weighted_graph。\n"
+    "3. 以 gcd/素数/同余/欧拉函数/组合数等数论对象为主 → number_theory。"
+    "不要仅因答案需要取模（mod/%）就判为 number_theory。\n"
+    "4. 字符串/模式匹配 → string；几何点集/凸包 → geometry；"
+    "多测 T+sum → multi_test；区间数据结构查询 → range_query；"
+    "DP/背包 → dp；二维网格 → matrix；交互题 → interactive。\n"
+    "5. 其余序列/数组题 → array。\n"
+    "先定 problem_type，再按该题型设计 edge_cases（见下方各题型建议）。\n"
+)
+
 
 def normalize_problem_type(raw: str) -> str:
     """把自由文本规范成已知题型标识；无法识别返回空串。"""
@@ -174,54 +194,20 @@ def normalize_problem_type(raw: str) -> str:
     return ""
 
 
-def classify_problem_type_llm(
-    problem_statement: str,
+def resolve_problem_type_from_range(
+    range_json: dict | None,
+    problem_statement: str = "",
     data_range_desc: str = "",
     std_code: str = "",
 ) -> str:
-    """单独一次大模型调用判断题型；失败时回退关键词检测。"""
-    from agent.llm import chat_text
-
-    known = ", ".join(KNOWN_PROBLEM_TYPES)
-    system = (
-        "你是算法竞赛题目的题型分类器。\n"
-        "只输出下面列表中的一个标识符，不要输出任何其它文字、标点或解释。\n"
-        f"可选题型：{known}\n\n"
-        "分类原则（按优先级）：\n"
-        "1. 输入主体是树（n-1 条边、有根/无根树、子树、树上路径、树链剖分、LCA 等）"
-        "→ tree；以边权/点权为主 → weighted_tree。\n"
-        "2. 输入主体是一般图（连通性、最短路、DAG、二分图、网络流等）"
-        "→ graph 或 weighted_graph。\n"
-        "3. 以 gcd/素数/同余/欧拉函数/组合数等数论对象为主 → number_theory。"
-        "不要仅因答案需要取模（mod/%）就判为 number_theory。\n"
-        "4. 字符串/模式匹配 → string；几何点集/凸包 → geometry；"
-        "多测 T+sum → multi_test；区间数据结构查询 → range_query；"
-        "DP/背包 → dp；二维网格 → matrix；交互题 → interactive。\n"
-        "5. 其余序列/数组题 → array。"
+    """从 range.json 的 problem_type 取值；无效/缺失时关键词兜底，再默认 array。"""
+    if isinstance(range_json, dict):
+        typ = normalize_problem_type(str(range_json.get("problem_type") or ""))
+        if typ:
+            return typ
+    return (
+        detect_problem_type(problem_statement, data_range_desc, std_code) or "array"
     )
-    stmt = (problem_statement or "").strip()
-    rng = (data_range_desc or "").strip()
-    code = (std_code or "").strip()
-    if len(stmt) > 2500:
-        stmt = stmt[:1500] + "\n...(截断)...\n" + stmt[-800:]
-    if len(rng) > 1200:
-        rng = rng[:700] + "\n...(截断)...\n" + rng[-400:]
-    if len(code) > 3000:
-        code = code[:1500] + "\n/* ... */\n" + code[-1200:]
-    user = (
-        f"【题面】\n{stmt or '(空)'}\n\n"
-        f"【数据范围描述】\n{rng or '(空)'}\n\n"
-        f"【标程片段】\n{code or '(空)'}\n\n"
-        "请只输出一个题型标识符。"
-    )
-    try:
-        raw = chat_text(system, user, temperature=0.0)
-    except Exception:
-        return detect_problem_type(problem_statement, data_range_desc, std_code)
-    typ = normalize_problem_type(raw)
-    if typ:
-        return typ
-    return detect_problem_type(problem_statement, data_range_desc, std_code)
 
 
 def get_few_shot(
@@ -247,16 +233,13 @@ def detected_type(
     """返回最终生效的题型名。
 
     优先级：显式 problem_type > range.json.problem_type > 关键词回退。
-    生成 range 流程请改用 classify_problem_type_llm。
     """
     typ = normalize_problem_type(problem_type)
     if typ:
         return typ
-    if isinstance(range_json, dict):
-        typ = normalize_problem_type(str(range_json.get("problem_type") or ""))
-        if typ:
-            return typ
-    return detect_problem_type(problem_statement, data_range_desc, std_code)
+    return resolve_problem_type_from_range(
+        range_json, problem_statement, data_range_desc, std_code
+    )
 
 
 # ---- 数组 / 序列题（求和类）----

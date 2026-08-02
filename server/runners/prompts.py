@@ -144,8 +144,9 @@ def build_gen_fixer_task(
         "【角色】Gen Fixer\n"
         "【目标】当前工作目录已有 gen.cpp / validator.cpp，但强化自检未通过。"
         "请根据失败日志修复，使 run_self_check() 返回 OK。\n"
-        "【约束】只修改 gen.cpp / validator.cpp；禁止修改 range.json、checker.cpp、标程；"
-        "write_gen / write_validate 必须传完整源码；禁止把 __OMITTED_SOURCE__ 写回。",
+        "【约束】只修改 gen.cpp / validator.cpp；禁止修改 gen_special.cpp、range.json、checker.cpp、标程；"
+        "write_gen / write_validate 必须传完整源码；禁止把 __OMITTED_SOURCE__ 写回。"
+        "特殊样例由后续 SpecialCoder 处理，本阶段忽略 special_samples。",
         f"\n【题面摘要】\n{stmt_brief}",
         f"\n【数据范围摘要】\n{range_brief}",
         f"\n【range.json】\n```json\n{json.dumps(range_json, ensure_ascii=False, indent=2)}```",
@@ -183,7 +184,8 @@ def build_coder_rewrite_task(
         "【角色】Coder Rewrite\n"
         "【目标】当前 gen.cpp / validator.cpp 骨架存在结构性问题，Fixer 无法收敛，需按 gen_plan.md 重新写出完整新版。\n"
         "【约束】按 plan 重新设计骨架，不要局部补丁；write_gen / write_validate 必须完整源码；"
-        "禁止把 __OMITTED_SOURCE__ 写回；禁止修改 range.json / 标程。",
+        "禁止把 __OMITTED_SOURCE__ 写回；禁止修改 range.json / 标程 / gen_special.cpp。"
+        "特殊样例由后续 SpecialCoder 处理。",
         f"\n【题面摘要】\n{stmt_brief}",
         f"\n【数据范围摘要】\n{range_brief}",
         f"\n【range.json】\n```json\n{json.dumps(range_json, ensure_ascii=False, indent=2)}```",
@@ -195,7 +197,7 @@ def build_coder_rewrite_task(
         "- 输入格式与标程读入顺序不匹配；\n"
         "- 连续多轮 Fixer 无法收敛的同类错误。\n"
         "\n动作：\n"
-        "1. 先 read_file(\"gen_plan.md\") 和 read_file(\"range.json\")，重新理解题意与范围。\n"
+        "1. 先 read_file(\"gen_plan.md\") 一次（range.json 已在 task 中，不必再读）。\n"
         "2. 再 read_file 当前 gen.cpp / validator.cpp 了解失败实现。\n"
         "3. 按 plan 重写完整 gen.cpp / validator.cpp，可一次 write_gen + write_validate 同时写。\n"
         "4. 立即调用 run_self_check()；通过则 finish，否则说明未解决问题。\n"
@@ -237,6 +239,7 @@ def build_batch_fixer_task(
     failures: list[dict],
     attempt: int,
     max_attempts: int,
+    special_only: bool = False,
 ) -> str:
     """为批量生成失败后的修复 Agent 构造 task（精简版）。"""
     stmt_brief = (stmt_plain or "").strip()
@@ -269,10 +272,36 @@ def build_batch_fixer_task(
             )
     sample_block = "\n\n".join(sample_blocks)
 
+    if special_only:
+        parts = [
+            "【角色】Special Batch Fixer\n"
+            "【目标】修复 gen_special.cpp，使特殊样例批量生成不再失败。\n"
+            "【约束】只 write_special_gen；禁止改 gen.cpp / validator.cpp / range.json。",
+            f"\n这是第 {attempt}/{max_attempts} 轮自动修复；若本轮仍失败，将保留成功测例并中止任务。",
+            f"\n【题面摘要】\n{stmt_brief}",
+            f"\n【数据范围摘要】\n{range_brief}",
+            f"\n【range.json】\n```json\n{json.dumps(range_json, ensure_ascii=False, indent=2)}```",
+            f"\n【失败统计】\n共 {len(failures)} 组失败\n" + "\n".join(summary_lines),
+        ]
+        if sample_block:
+            parts.append(
+                "\n【失败样例输入预览】\n"
+                f"{sample_block}\n"
+            )
+        parts.append(
+            "\n要求：\n"
+            "1. read_file('gen_special.cpp') 与 read_file('gen.cpp')，对齐格式。\n"
+            "2. 按 special_schemes 各方案的 construct_mode 修复："
+            "mutate=底稿+局部 patch；build=从零构造；保证 must_hold；不要改 validator。\n"
+            "3. write_special_gen 写完整源码（保留其他方案分支）。\n"
+            "4. run_self_check() 通过后 finish。"
+        )
+        return "\n".join(parts)
+
     parts = [
         "【角色】Batch Fixer\n"
         "【目标】修复 gen.cpp / validator.cpp，使批量生成阶段不再失败。\n"
-        "【约束】只修改 gen.cpp / validator.cpp；禁止改 range.json；write_* 必须完整源码。",
+        "【约束】只修改 gen.cpp / validator.cpp；禁止改 gen_special.cpp / range.json；write_* 必须完整源码。",
         f"\n这是第 {attempt}/{max_attempts} 轮自动修复；若本轮仍失败，将保留成功测例并中止任务。",
         f"\n【题面摘要】\n{stmt_brief}",
         f"\n【数据范围摘要】\n{range_brief}",

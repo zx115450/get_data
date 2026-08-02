@@ -20,8 +20,18 @@ def _exe(base: str) -> str:
     return base + (".exe" if os.name == "nt" else "")
 
 
-def _gen_cmd(work: Path) -> str:
-    """优先用编译好的 gen 二进制，否则回退 python gen.py。"""
+def _is_special_type(typ: str) -> bool:
+    t = (typ or "").strip()
+    return t == "special_samples" or t.startswith("special:")
+
+
+def _gen_cmd(work: Path, typ: str = "") -> str:
+    """优先用编译好的 gen 二进制，否则回退 python gen.py。
+
+    若 typ 为 special_samples / special:<id> 且存在 gen_special 二进制，则使用 gen_special。
+    """
+    if _is_special_type(typ) and (work / _exe("gen_special")).exists():
+        return _exe("gen_special")
     if (work / _exe("gen")).exists():
         return _exe("gen")
     if (work / "gen.py").exists():
@@ -90,6 +100,22 @@ def validate_range_json(rj) -> list:
                 errs.append(f"special_constraints 每条必须是非空字符串，当前含 {s!r}")
                 break
 
+    # 特殊样例描述与数量：可选字段，启用时 count 必须包含这些样例
+    ssd = rj.get("special_samples_desc")
+    ssc = rj.get("special_samples_count")
+    if ssd is not None:
+        if not isinstance(ssd, str) or not ssd.strip():
+            errs.append("special_samples_desc 若提供必须是非空字符串")
+    if ssc is not None:
+        if isinstance(ssc, bool) or not isinstance(ssc, int) or ssc <= 0:
+            errs.append(f"special_samples_count 必须是正整数，当前为 {ssc!r}")
+    if (ssd or "").strip() and isinstance(ssc, int) and ssc > 0:
+        if not isinstance(count, int) or isinstance(count, bool) or count < ssc + 1:
+            errs.append(
+                f"启用特殊样例时 count 必须 >= special_samples_count + 1，"
+                f"当前 count={count} special_samples_count={ssc}"
+            )
+
     ml = rj.get("memory_limit_mb")
     if ml is not None:
         if isinstance(ml, bool) or not isinstance(ml, int) or ml <= 0:
@@ -106,7 +132,10 @@ def validate_range_json(rj) -> list:
 
 
 def normalize_range_json(rj: dict) -> dict:
-    """清洗 range.json：去掉 edge_cases 里的 'random'（系统会自动补），去重保序；count 缺省补 15。"""
+    """清洗 range.json：去掉 edge_cases 里的 'random'（系统会自动补），去重保序；count 缺省补 15。
+
+    若启用特殊样例（special_samples_desc 非空），确保 count 至少为 special_samples_count + 1。
+    """
     if not isinstance(rj, dict):
         return rj
     if "count" not in rj or rj.get("count") in (None, 0):
@@ -116,32 +145,120 @@ def normalize_range_json(rj: dict) -> dict:
         seen = set()
         cleaned = []
         for e in ec:
-            if not isinstance(e, str) or not e or e == "random":
+            if not isinstance(e, str) or not e or e == "random" or e == "special_samples":
                 continue
             if e not in seen:
                 seen.add(e)
                 cleaned.append(e)
         rj["edge_cases"] = cleaned
+
+    # LLM 常写 "special_samples_desc": "" / null；有键却为空会过不了 validate，直接删掉
+    ssd = rj.get("special_samples_desc")
+    if ssd is None or (isinstance(ssd, str) and not ssd.strip()):
+        rj.pop("special_samples_desc", None)
+
+    # 特殊样例：有 schemes 时按选中方案重算 count；否则兼容旧字段
+    schemes = rj.get("special_schemes")
+    if isinstance(schemes, list) and schemes:
+        sched = _selected_scheme_schedule(rj)
+        ssc = sum(n for _, n in sched)
+        rj["special_samples_count"] = ssc
+        # 尽量保留常规数：若原 count 偏小则抬到 常规15 + 特殊
+        regular = max(1, int(rj.get("count") or 15) - int(ssc or 0))
+        if regular + ssc != rj.get("count"):
+            # 仅当 special 变化导致不一致时，以「至少常规1」校正
+            if int(rj.get("count") or 0) < ssc + 1:
+                rj["count"] = 15 + ssc
+    else:
+        ssd = rj.get("special_samples_desc")
+        ssc = rj.get("special_samples_count")
+        if (ssd or "").strip():
+            if not isinstance(ssc, int) or isinstance(ssc, bool) or ssc <= 0:
+                rj["special_samples_count"] = 1
+                ssc = 5
+            if rj["count"] < ssc + 1:
+                rj["count"] = ssc + 15  # 常规 15 + 特殊样例
     return rj
 
 
-def pick_type(i: int, count: int, edge_cases: list) -> str:
-    """前几组按顺序覆盖边界类型，其余 random；始终保留至少 count - len(edge_cases) 个随机组。"""
+def _selected_scheme_schedule(range_json: dict) -> list[tuple[str, int]]:
+    """返回 [(scheme_id, samples_per_scheme), ...] 仅含选中方案。
+
+    若存在 special_schemes 字段（即使全未选中），以该列表为准，不再回退旧 desc。
+    """
+    if not isinstance(range_json, dict):
+        return []
+    schemes = range_json.get("special_schemes")
+    if isinstance(schemes, list):
+        out: list[tuple[str, int]] = []
+        for s in schemes:
+            if not isinstance(s, dict) or s.get("selected", True) is False:
+                continue
+            sid = str(s.get("id") or "").strip() or "special"
+            try:
+                n = int(s.get("samples_per_scheme") or 1)
+            except (TypeError, ValueError):
+                n = 5
+            out.append((sid, max(1, n)))
+        return out
+    # 兼容旧字段：无 schemes 时整块 special 用 special_samples
+    try:
+        sc = int(range_json.get("special_samples_count") or 0)
+    except (TypeError, ValueError):
+        sc = 0
+    if sc > 0 and (range_json.get("special_samples_desc") or "").strip():
+        return [("", sc)]
+    return []
+
+
+def special_enabled(range_json: dict) -> bool:
+    """range.json 是否启用特殊样例（有选中方案或旧字段 desc+count）。"""
+    return bool(_selected_scheme_schedule(range_json))
+
+
+def pick_type(i: int, count: int, edge_cases: list, special_count: int = 0,
+              scheme_schedule: list[tuple[str, int]] | None = None) -> str:
+    """前几组按顺序覆盖边界类型，最后 special 组按方案调度，其余 random。
+
+    scheme_schedule: [(scheme_id, n_samples), ...]；scheme_id 空则 type=special_samples。
+    """
     edge_cases = list(edge_cases or [])
-    random_min = max(1, count - len(edge_cases))  # 最少要保留这么多 random 组
-    edge_max = min(len(edge_cases), max(0, count - random_min))
+    special_count = max(0, int(special_count or 0))
+    if scheme_schedule:
+        special_count = sum(n for _, n in scheme_schedule)
+    # 除去特殊样例后，至少保留 1 个 random 组
+    random_min = max(1, count - len(edge_cases) - special_count)
+    edge_max = min(len(edge_cases), max(0, count - special_count - random_min))
     if i < edge_max:
         return edge_cases[i]
+    if i >= count - special_count:
+        local = i - (count - special_count)
+        if scheme_schedule:
+            acc = 0
+            for sid, n in scheme_schedule:
+                if local < acc + n:
+                    return f"special:{sid}" if sid else "special_samples"
+                acc += n
+            sid, _ = scheme_schedule[-1]
+            return f"special:{sid}" if sid else "special_samples"
+        return "special_samples"
     return "random"
 
 
 def generate(range_json: dict, work_dir: str, out_dir: str, verbose: bool = True,
-             reuse_existing: bool = True) -> dict:
+             reuse_existing: bool = True,
+             skip_special: bool = False,
+             only_special: bool = False) -> dict:
     """按 range.json 批量生成测例，返回统计信息。
 
     reuse_existing=True 时：若 out_dir 已有成对的 {i}.in/{i}.out，则跳过该组，
     只补缺失组。这样父任务里已通过 gen→validate→std 的合法测例可以复用。
+    skip_special=True：跳过最后 special_samples_count 组（留给 SpecialCoder 之后补）。
+    only_special=True：只生成最后 special_samples_count 组。
     """
+    if skip_special and only_special:
+        raise ValueError("skip_special 与 only_special 不能同时为 True")
+
     range_json = normalize_range_json(dict(range_json))  # 拷贝后再洗，避免改调用方
     errs = validate_range_json(range_json)
     if errs:
@@ -151,11 +268,21 @@ def generate(range_json: dict, work_dir: str, out_dir: str, verbose: bool = True
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    gen_cmd = _gen_cmd(work)
     validator_cmd = _validator_cmd(work)
     std_cmd = range_json["std_cmd"]
     count = range_json["count"]
     edge_cases = range_json.get("edge_cases", [])
+    scheme_schedule = _selected_scheme_schedule(range_json) if special_enabled(range_json) else []
+    special_count = sum(n for _, n in scheme_schedule) if scheme_schedule else int(
+        range_json.get("special_samples_count") or 0
+    )
+    if scheme_schedule:
+        range_json["special_samples_count"] = special_count
+    if not special_enabled(range_json):
+        special_count = 0
+        scheme_schedule = []
+        skip_special = False
+        only_special = False
     # gen 单独硬限 5s：超过即视为算法不达标（O(n^2) 枚举等），直接判该组失败，
     # 不让慢生成器拖垮整批；validate/std 仍按 range.json 的 time_limit_ms。
     gen_timeout_s = 5
@@ -189,6 +316,7 @@ def generate(range_json: dict, work_dir: str, out_dir: str, verbose: bool = True
             for attempt in range(max_retries + 1):
                 # 重试时换 seed，避免命中同一个随机坏点；index/count 仍保持当前组号
                 seed = i + attempt * count
+                gen_cmd = _gen_cmd(work, try_typ)
                 rc, inp, err = safe_run(
                     f"{gen_cmd} --seed {seed} --type {try_typ} --index {i} --count {count}",
                     timeout=gen_timeout_s,
@@ -264,17 +392,29 @@ def generate(range_json: dict, work_dir: str, out_dir: str, verbose: bool = True
 
         return (i, False, "", "", "\n".join(error_log), input_preview)
 
-    # 只生成缺失组
-    todo = [i for i in range(count) if (i + 1) not in existing_pairs]
+    # 只生成缺失组；可按阶段限制常规 / 特殊
+    def _in_scope(i: int) -> bool:
+        is_special_slot = special_count > 0 and i >= count - special_count
+        if skip_special and is_special_slot:
+            return False
+        if only_special and not is_special_slot:
+            return False
+        return True
+
+    todo = [i for i in range(count) if (i + 1) not in existing_pairs and _in_scope(i)]
     results = []
     if todo:
         max_workers = min(8, os.cpu_count() or 1, len(todo))
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {}
             for i in todo:
-                typ = pick_type(i, count, edge_cases)
+                typ = pick_type(i, count, edge_cases, special_count, scheme_schedule)
                 # 降级类型：优先回退到 random，再尝试前几个 edge_case
-                fallback = ["random"] + [e for e in edge_cases[:3] if e != typ]
+                # 特殊样例不降级，避免用 random 冒充特殊约束
+                if _is_special_type(typ):
+                    fallback = []
+                else:
+                    fallback = ["random"] + [e for e in edge_cases[:3] if e != typ]
                 futures[executor.submit(_gen_one, i, typ, fallback)] = i
             for fut in concurrent.futures.as_completed(futures):
                 results.append(fut.result())
@@ -291,12 +431,25 @@ def generate(range_json: dict, work_dir: str, out_dir: str, verbose: bool = True
             bad += 1
             failures.append({
                 "index": i + 1,
-                "planned_type": pick_type(i, count, edge_cases),
+                "planned_type": pick_type(i, count, edge_cases, special_count, scheme_schedule),
                 "error": err,
                 "input_preview": preview,
             })
 
     elapsed = time.perf_counter() - t0
+    # 统计已落盘测例体积（含复用组）
+    in_bytes = 0
+    out_bytes = 0
+    for i in range(1, count + 1):
+        ip = out / f"{i}.in"
+        op = out / f"{i}.out"
+        try:
+            if ip.is_file():
+                in_bytes += ip.stat().st_size
+            if op.is_file():
+                out_bytes += op.stat().st_size
+        except OSError:
+            pass
     return {
         "count": count,
         "ok": ok,
@@ -305,4 +458,7 @@ def generate(range_json: dict, work_dir: str, out_dir: str, verbose: bool = True
         "valid_rate": ok / count if count else 0,
         "elapsed_s": round(elapsed, 2),
         "failures": failures,
+        "in_bytes": in_bytes,
+        "out_bytes": out_bytes,
+        "total_bytes": in_bytes + out_bytes,
     }

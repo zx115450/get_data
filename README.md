@@ -142,14 +142,14 @@ python gui.py
 ### 1. 标程
 
 - **语言**：选 `cpp` 或 `python`（和你的标程一致）
-- **题型**：不会选就留「自动」。点「生成方案」时会**单独调用一次大模型**判定题型，写入 `range.json.problem_type` 并回填下拉框；完整任务若无方案也会在 Range 阶段同样判定。可选类型包括：
+- **题型**：不会选就留「自动」。点「生成方案」时由 Range Agent **一并**写入 `range.json.problem_type`（不再单独调大模型判型），并回填下拉框。可选类型包括：
   - 基础：`array` / `tree` / `graph` / `string` / `number_theory` / `multi_test`
   - 扩展：`geometry` / `dp` / `matrix` / `range_query` / `weighted_tree` / `weighted_graph` / `interactive`
 - 把**能正确通过样例的标程代码**完整粘贴进去
 
 标程非常重要：后面生成的输入会丢给标程跑，才能得到 `.out` 答案。
 
-树 / 图 / 几何 / 带权结构题会自动使用 **ACM-generator**（`generator.h`，基于 testlib），方便生成链、菊花、二分图、DAG、凸包等；Agent 仍须遵守本项目的 `--seed` / `--type` / `--index` / `--count` 契约。树/图正确写法是 `t.gen(); cout << t`（或 `for (auto &e : t.edges())`）；`get_edges()` / `t.shuffle()` 会被 `write_gen` 静态拒绝。
+树 / 图 / 几何 / 带权结构题会自动使用 **ACM-generator**（`generator.h`，基于 testlib），方便生成链、菊花、二分图、DAG、凸包等；Agent 仍须遵守本项目的 `--seed` / `--type` / `--index` / `--count` 契约。树/图正确写法是 `t.gen(); cout << t`（或 `for (auto &e : t.edges())`）；`get_edges()` / `t.shuffle()` 写错会编译失败。
 
 ### 2. 题面
 

@@ -10,8 +10,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from agent import prompts, tools
 from server import job_store
 from server.few_shots import normalize_problem_type
+from pipeline.gen_data import special_enabled
 from server.runners import agent, batch, failure, resume, review, scaffold, snapshot
 from server.runners.snapshot import has_gen_val_at_resume
+from server.runners.special import run_special_agent
 from utils.markup import to_plain_for_llm
 
 JOBS_DIR = Path("jobs")
@@ -30,6 +32,10 @@ def _run_job_impl(
     special_judge: bool,
     builtin_checker: str,
     resume_context: dict[str, Any] | None,
+    special_samples_desc: str = "",
+    special_samples_count: int = 1,
+    auto_discover_special: bool = False,
+    skip_resume: bool = False,
 ) -> None:
     """run_job 的实际实现：按阶段调用 runners 子模块。"""
     builtin_checker = (builtin_checker or "").strip().lower()
@@ -45,13 +51,33 @@ def _run_job_impl(
     checker_zip_path = job_dir / "checker.zip"
     range_file = job_dir / "range.json"
 
+    # 落盘题面/输入/输出（与 std 一起，关闭 GUI 或历史回载用）
+    scaffold.save_problem_workspace(
+        job_dir,
+        std_code=std_code,
+        lang=lang,
+        problem_statement=problem_statement,
+        data_range_desc=data_range_desc,
+        output_desc=output_desc,
+        problem_type=problem_type,
+    )
+
     def on_event(step, name, args, preview):
         brief = {}
         if name == "run_gen":
             brief = {"seed": args.get("seed"), "type": args.get("type")}
-        elif name in ("write_gen", "write_validate", "write_range", "write_checker"):
-            content = args.get("content") or ""
+        elif name in ("write_gen", "write_validate", "write_range", "write_checker",
+                       "write_special_gen", "write_finder"):
+            content = (
+                args.get("content") or args.get("code") or args.get("source") or ""
+            )
             brief = {"chars": len(content)}
+            if args.get("_args_recovered"):
+                brief["recovered"] = True
+            if args.get("_args_parse_failed"):
+                brief["parse_failed"] = True
+            if not content:
+                brief["warn"] = "missing_content"
         elif name == "use_builtin_checker":
             brief = {"name": args.get("name")}
         elif name in ("run_validate", "run_std"):
@@ -62,18 +88,47 @@ def _run_job_impl(
         else:
             brief = {k: (str(v)[:40] if not isinstance(v, (int, float, bool)) else v)
                      for k, v in list(args.items())[:4]}
-        pv = preview if len(preview) <= 100 else preview[:100] + "…"
+        # 自检失败需要完整 FAIL 行复盘；其它事件仍短预览
+        if name == "run_self_check" and isinstance(preview, str) and preview.startswith("ERROR"):
+            pv = preview if len(preview) <= 4000 else preview[:3200] + "…\n" + preview[-600:]
+            try:
+                (job_dir / "self_check_last_fail.txt").write_text(preview, encoding="utf-8")
+            except Exception:
+                pass
+        else:
+            pv = preview if len(preview) <= 100 else preview[:100] + "…"
         job_store.add_progress(job, f"[step {step}] {name} {brief} -> {pv}")
 
-    # 1.0) 同题复用：只扫描最近 3 个 job
-    resume_info, resume_failure_block = resume.try_resume(
-        job, job_dir, problem_statement, std_code, lang, lookback=3
-    )
-    if resume_context:
+    # 1.0) 同题复用：客户端指定父任务优先，否则扫描最近 3 个失败 job
+    prefer_parent = ""
+    if isinstance(resume_context, dict):
+        prefer_parent = str(
+            resume_context.get("parent_job_id") or resume_context.get("parent_id") or ""
+        ).strip()
+    if skip_resume:
+        job_store.add_progress(job, "【复用】客户端要求跳过同题复用，按新任务执行。")
+        resume_info, resume_failure_block = None, ""
+    else:
+        resume_info, resume_failure_block = resume.try_resume(
+            job, job_dir, problem_statement, std_code, lang,
+            lookback=3,
+            prefer_parent_id=prefer_parent or None,
+        )
+
+    # 父任务已成功：只挂 zip，整条流水线直接结束
+    if isinstance(resume_info, dict) and resume_info.get("short_circuit"):
+        if (job_dir / "data.zip").is_file():
+            job.zip_path = str(job_dir / "data.zip")
+        if (job_dir / "sources.zip").is_file():
+            job.sources_zip_path = str(job_dir / "sources.zip")
+        if (job_dir / "checker.zip").is_file():
+            job.checker_zip_path = str(job_dir / "checker.zip")
+        parent_id = resume_info.get("parent_job_id") or ""
         job_store.add_progress(
             job,
-            f"【复用】收到客户端 resume_context（已废弃，仅记录），父任务 {resume_context.get('parent_job_id')!r}"
+            f"【完成】已复用成功任务 {parent_id} 的数据包，未重新 Plan / 写 gen / 出数",
         )
+        return
 
     # 1) 准备标程
     job_store.add_progress(job, f"【阶段 1/5】准备标程 (lang={lang})")
@@ -96,27 +151,50 @@ def _run_job_impl(
         job_store.add_progress(job, f"校验 sandbox 头文件失败: {e}")
 
     # 2) 准备 Prompts 并启动 Agent
-    # 题型优先级：用户显式 > range.json.problem_type；仍空则在 Range 阶段单独 LLM 判定
+    # 有 range_json 时用其 problem_type / 用户指定；无方案（将走 Range Agent）则留空，
+    # 由 Range 阶段 LLM 自动判型（不再信任 GUI 历史下拉）。
     range_plain = to_plain_for_llm(data_range_desc or "")
-    eff_type = normalize_problem_type(problem_type)
-    if not eff_type and isinstance(range_json, dict):
-        eff_type = normalize_problem_type(str(range_json.get("problem_type") or ""))
-    type_note = "用户指定" if normalize_problem_type(problem_type) else (
-        "来自 range.json" if eff_type else "待 Range 阶段 LLM 判定"
-    )
+    has_preset_range = isinstance(range_json, dict) and bool(range_json.get("constraints"))
+    if has_preset_range:
+        eff_type = normalize_problem_type(problem_type) or normalize_problem_type(
+            str(range_json.get("problem_type") or "")
+        )
+        type_note = "用户指定" if normalize_problem_type(problem_type) else (
+            "来自 range.json" if eff_type else "待关键词补判"
+        )
+    else:
+        eff_type = ""
+        type_note = "待 Range 写入 problem_type"
     job_store.add_progress(
         job,
         f"题型: {eff_type or '(未定)'} ({type_note})"
         + f" | 题面 {len(to_plain_for_llm(problem_statement or ''))} 字"
         + f" | 范围描述 {len(range_plain)} 字 | std {len(std_code)} 字",
     )
+    # 若用户通过 API 传了 special_samples_desc / auto_discover，但 range_json 里没写，则合并进去
+    if isinstance(range_json, dict) and (
+        special_samples_desc or auto_discover_special
+    ):
+        range_json = dict(range_json)
+        if special_samples_desc:
+            range_json.setdefault("special_samples_desc", special_samples_desc)
+            range_json.setdefault("special_samples_count", special_samples_count)
+        if auto_discover_special:
+            range_json["auto_discover_special"] = True
+
     stmt_plain, task, preset, output_plain, std_for_prompt = agent.prepare_prompts(
         problem_statement, data_range_desc, output_desc, std_code, lang,
         eff_type, eff_type, range_json, resume_failure_block, job_dir, job,
+        special_samples_desc=special_samples_desc,
+        special_samples_count=special_samples_count,
+        auto_discover_special=auto_discover_special,
     )
     summary, eff_type = agent.run_gen_agent(
         job, job_dir, task, eff_type, range_json or preset, resume_info, on_event,
         stmt_plain=stmt_plain, std_code=std_code, resume_failure_block=resume_failure_block,
+        special_samples_desc=special_samples_desc,
+        special_samples_count=special_samples_count,
+        auto_discover_special=auto_discover_special,
     )
     scaffold.ensure_agent_log(job, job_dir)
 
@@ -174,12 +252,32 @@ def _run_job_impl(
     )
 
     # 4/5) 批量生成与打包
-    batch.run_batch_and_pack(
+    # 启用特殊样例时：先生成常规数据 → Special Plan/Coder → 再补特殊组 → 打包
+    special_hook = None
+    if special_enabled(produced) or (special_samples_desc or "").strip():
+        def special_hook():
+            run_special_agent(
+                job,
+                job_dir,
+                produced,
+                eff_type,
+                on_event,
+                stmt_plain=stmt_plain,
+                range_plain=range_plain,
+                special_samples_desc=special_samples_desc or produced.get("special_samples_desc") or "",
+                special_samples_count=int(
+                    produced.get("special_samples_count") or special_samples_count or 1
+                ),
+            )
+
+    result = batch.run_batch_and_pack(
         job, job_dir, produced, eff_type, special_judge,
         stmt_plain=stmt_plain,
         range_plain=range_plain,
         on_event=on_event,
+        after_regular_hook=special_hook,
     )
+    return result
 
 
 def run_job(job: job_store.Job, std_code: str, lang: str,
@@ -189,10 +287,17 @@ def run_job(job: job_store.Job, std_code: str, lang: str,
             range_json=None,
             special_judge: bool = False,
             builtin_checker: str = "",
-            resume_context: dict[str, Any] | None = None) -> None:
+            resume_context: dict[str, Any] | None = None,
+            special_samples_desc: str = "",
+            special_samples_count: int = 1,
+            auto_discover_special: bool = False,
+            skip_resume: bool = False) -> dict[str, Any] | None:
     """在 worker 线程里跑完整流程。
 
-    resume_context: 已废弃，保留仅作兼容；现在 runner 会自动扫描 jobs/ 下最近同题任务。
+    resume_context: 可选；含 parent_job_id 时优先复用该历史任务产物。
+    skip_resume: 为 True 时强制跳过同题复用，从零重新生成。
+
+    返回: batch.run_batch_and_pack 的 stats（若执行到该阶段）；short_circuit 时返回 resume_info。
     """
     job_dir = JOBS_DIR / job.id
     range_file = job_dir / "range.json"
@@ -207,6 +312,10 @@ def run_job(job: job_store.Job, std_code: str, lang: str,
             special_judge,
             builtin_checker,
             resume_context,
+            special_samples_desc=special_samples_desc,
+            special_samples_count=special_samples_count,
+            auto_discover_special=auto_discover_special,
+            skip_resume=skip_resume,
         )
     except (Exception, KeyboardInterrupt, SystemExit) as e:
         cancelled = isinstance(e, (KeyboardInterrupt, SystemExit)) or "客户端请求取消" in str(e)

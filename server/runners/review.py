@@ -32,6 +32,13 @@ BATCH_FIXER_TOOL_SCHEMAS = [
         "run_self_check", "finish",
     }
 ]
+BATCH_SPECIAL_FIXER_TOOL_SCHEMAS = [
+    s for s in tools.TOOL_SCHEMAS
+    if s["function"]["name"] in {
+        "read_file", "write_special_gen", "run_gen", "run_validate", "run_std",
+        "run_self_check", "finish",
+    }
+]
 
 
 def run_batch_failure_fix(
@@ -45,24 +52,50 @@ def run_batch_failure_fix(
     attempt: int = 1,
     max_attempts: int = 2,
     hard_self_check: bool = True,
+    special_failures_only: bool = False,
 ) -> tuple[bool, str]:
-    """根据批量生成阶段的失败报告，启动 Fixer Agent 修复 gen/validator，并强制自检。"""
+    """根据批量生成阶段的失败报告，启动 Fixer Agent 修复 gen/validator（或 gen_special），并强制自检。"""
     tools.set_context(str(job_dir), produced.get("std_cmd", ""))
     # 用 .fixer_bak 保存基线，不污染 .good 快照
     save_good_snapshot(job_dir, include_in_out=False, suffix=".fixer_bak")
-    job_store.add_progress(job, f"【批量修复 {attempt}/{max_attempts}】保存 gen/validator .fixer_bak 基线，启动 Fixer Agent")
 
-    task = build_batch_fixer_task(stmt_plain, range_plain, produced, failures, attempt, max_attempts)
+    def _is_special_fail(f: dict) -> bool:
+        t = str(f.get("planned_type") or "")
+        return t == "special_samples" or t.startswith("special:")
+
+    all_special = bool(failures) and all(_is_special_fail(f) for f in failures)
+    use_special_fixer = special_failures_only or all_special
+    sc_args = {"special_only": True} if use_special_fixer else {"skip_special": True}
+
+    job_store.add_progress(
+        job,
+        f"【批量修复 {attempt}/{max_attempts}】保存 .fixer_bak 基线，启动 "
+        f"{'Special' if use_special_fixer else 'Gen'} Batch Fixer",
+    )
+
+    task = build_batch_fixer_task(
+        stmt_plain, range_plain, produced, failures, attempt, max_attempts,
+        special_only=use_special_fixer,
+    )
     try:
         fixer_summary = agent_run(
             task,
             max_steps=12,
             verbose=False,
             on_event=on_event,
-            system_prompt=prompts.build_fixer_prompt(),
-            tool_schemas=BATCH_FIXER_TOOL_SCHEMAS,
+            system_prompt=(
+                prompts.build_special_fixer_prompt()
+                if use_special_fixer
+                else prompts.build_gen_fixer_prompt()
+            ),
+            tool_schemas=(
+                BATCH_SPECIAL_FIXER_TOOL_SCHEMAS
+                if use_special_fixer
+                else BATCH_FIXER_TOOL_SCHEMAS
+            ),
             write_check_discipline=True,
             self_check_fast=True,
+            self_check_args=sc_args,
         )
         job_store.add_progress(job, f"Batch Fixer 结束: {fixer_summary}")
     except Exception as e:
@@ -77,12 +110,15 @@ def run_batch_failure_fix(
     if hard_self_check:
         # 批量修复中间轮次用快速自检，最后一轮用完整模式
         use_fast = attempt < max_attempts
-        job_store.add_progress(job, f"Batch Fixer 修改后强制自检：重新跑 run_self_check(fast_mode={use_fast})")
-        self_check_result = tools.run_self_check(fast_mode=use_fast)
+        job_store.add_progress(
+            job,
+            f"Batch Fixer 修改后强制自检：run_self_check(fast_mode={use_fast}, {sc_args})",
+        )
+        self_check_result = tools.run_self_check(fast_mode=use_fast, **sc_args)
         if isinstance(self_check_result, str) and self_check_result.startswith("ERROR"):
             # 回退到 .fixer_bak 基线，不破坏 .good 快照
             restore_good_snapshot(job_dir, suffix=".fixer_bak")
-            job_store.add_progress(job, "Batch Fixer 自检失败，已回退到 gen/validator .fixer_bak 基线")
+            job_store.add_progress(job, "Batch Fixer 自检失败，已回退到 .fixer_bak 基线")
             return False, f"Batch Fixer 自检失败: {self_check_result}"
         job_store.add_progress(job, "Batch Fixer 自检通过")
     return True, "Batch Fixer 自检通过"

@@ -20,6 +20,7 @@ RANGE_ONLY_PROMPT = """你是出题数据规划助手。任务：根据题面与
 - finish(summary): 写完并确认合法后调用
 
 range.json 必须含：
+- problem_type: 题型标识符（与题面/标程匹配的英文枚举，见 task 里的可选项与分类原则）
 - count: 正整数，默认 15
 - constraints: 对象，变量名 -> [min, max]（整数）
 - edge_cases: 字符串数组（边界类型名，禁止含 "random"）
@@ -44,7 +45,7 @@ range.json 必须含：
 1. 只调用 write_range，不要写 gen/validator，不要编造测例正文。
 2. edge_cases 要覆盖最小/最大/典型边界；多测 T 时建议含 edge_T1、edge_Tmax 等。
 3. edge_cases 必须覆盖 special_constraints 里每一条约束对应的边界。
-4. write_range 成功后立刻 finish。
+4. write_range 成功后立刻 finish，不要重复 write_range。
 5. 看到 ERROR 要修正后再 write_range。
 """
 
@@ -61,9 +62,11 @@ _TYPE_EDGE_HINTS = {
         "flower_chain", "caterpillar", "broom",
     ],
     "graph": [
+        "edge_T1", "edge_Tmax",  # 多测时优先；单测可省略
         "edge_n1", "edge_nmax", "edge_m_min", "edge_m_max",
-        "connected_tree", "disconnected", "complete", "path", "star",
-        "random_sparse", "random_dense", "bipartite", "dag_acyclic",
+        "disconnected", "random_sparse",
+        # 以下按题意选用，勿无脑全抄：connected_tree / path / star / complete /
+        # bipartite / dag_acyclic / negative_cycle_reachable
     ],
     "string": [
         "edge_n1", "edge_nmax", "all_same", "pattern_at_start", "pattern_at_end",
@@ -104,7 +107,13 @@ _TYPE_EDGE_HINTS = {
 _TYPE_HINT_HEADER = {
     "array": "数组/序列题：建议 edge_cases 覆盖以下边界（按需挑选，不要全抄）",
     "tree": "树题：建议 edge_cases 覆盖以下边界（按需挑选，不要全抄）。生成优先用 generator.h 的 Tree/Chain/Flower",
-    "graph": "图题：建议 edge_cases 覆盖以下边界（按需挑选，不要全抄）。注意图题还要根据题意补结构边界（如 DAG 题加 dag_acyclic，连通题加 connected/disconnected）；优先用 Graph/BipartiteGraph/DAG 等 API",
+    "graph": (
+        "图题：建议按需挑选下列边界，不要全抄。"
+        "有多测 T 时务必含 edge_T1/edge_Tmax；输入格式跟标程（先 T 再各组）。"
+        "edge_n1：无自环则 m=0，允许自环可用 (1,1)。"
+        "complete 须控制 n 使边数≤m 上界。"
+        "再按题意补结构边界（负环/DAG/连通/二分图等）"
+    ),
     "string": "字符串题：建议 edge_cases 覆盖以下边界（按需挑选，不要全抄）",
     "number_theory": "数论题：建议 edge_cases 覆盖以下边界（按需挑选，不要全抄）",
     "geometry": "几何题：建议 edge_cases 覆盖以下边界（按需挑选，不要全抄）。优先用 ConvexHull/SimplePolygon/RandomPoints",
@@ -128,16 +137,59 @@ def _build_type_hint_block(problem_type: str) -> str:
     return (
         f"\n\n【题型 edge_cases 建议（{problem_type}）】\n"
         f"{header}：\n{joined}\n"
-        f"这些只是建议清单，最终 edge_cases 必须与题面/数据范围一致；"
-        f"若题面有特殊结构约束（如「图是 DAG」「图连通」「存在哈密顿路径」），"
-        f"必须额外加一个对应边界（如 dag_acyclic / connected / has_hamiltonian）"
+        f"这些只是建议清单（few-shot 同理仅供参考），最终 edge_cases 必须与题面/标程一致；"
+        f"若题面有特殊结构约束（如「图是 DAG」「图连通」「存在哈密顿路径」「可达负环」），"
+        f"必须额外加对应边界（如 dag_acyclic / connected / has_hamiltonian / negative_cycle_reachable）"
         f"并在 gen 里真正保证该性质。\n"
     )
+
+
+def _build_all_type_hints_block() -> str:
+    """题型未预判时：给出各题型 edge_cases 建议，供写 range 时一并选用。"""
+    lines = ["\n\n【各题型 edge_cases 建议（先选 problem_type，再按该行挑选，勿全抄）】"]
+    for typ, examples in _TYPE_EDGE_HINTS.items():
+        header = _TYPE_HINT_HEADER.get(typ, typ)
+        lines.append(f"- {typ}: {header} → {', '.join(examples)}")
+    lines.append(
+        "最终 edge_cases 必须与题面/标程一致；有特殊结构约束时额外加对应边界。\n"
+    )
+    return "\n".join(lines)
+
+
+def _build_special_samples_block(
+    special_samples_desc: str,
+    special_samples_count: int,
+    auto_discover_special: bool = False,
+) -> str:
+    """若启用特殊样例（用户提示或自动挖掘），返回拼进 range task 的说明文本。"""
+    desc = (special_samples_desc or "").strip()
+    if desc:
+        return (
+            f"\n\n【特殊样例提示】\n"
+            f"用户提示：{desc}\n"
+            f"每方案样例数：{special_samples_count}（系统稍后单独调用大模型挖 1 条方案并自选 mutate/build，此处 count 先按常规即可）\n"
+            "要求：\n"
+            "1. edge_cases 不要写 special_samples；\n"
+            "2. 不要在本阶段规划特殊构造方案或 gen_special；"
+            "系统会在写出 range 后单独调用大模型（题面+标程）理解特殊样例，并产出 1 条方案（mode 由模型选，用户可手改）。\n"
+            "3. count 必须写 15（常规样例数）；特殊组由后续选中方案叠加，不要自行加减。\n"
+        )
+    if auto_discover_special:
+        return (
+            f"\n\n【自动挖掘特殊方案】已开启（用户未填特殊提示）。\n"
+            f"每方案样例数：{special_samples_count}\n"
+            "要求：\n"
+            "1. edge_cases 不要写 special_samples；\n"
+            "2. 不要在本阶段规划特殊构造方案；"
+            "系统将单独调用大模型根据标程/题面理解后产出 1 条方案（mutate/build 由模型选择）。\n"
+            "3. count 必须写 15（常规样例数）。\n"
+        )
+    return ""
 
 RANGE_TOOL_SCHEMAS = [
     _schema(
         "write_range",
-        "写入 range.json。content 为完整 JSON：count、constraints、edge_cases（不要含 random）。",
+        "写入 range.json。content 为完整 JSON：problem_type、count、constraints、edge_cases（不要含 random）。",
         {"content": {"type": "string", "description": "range.json 完整 JSON 字符串"}},
         ["content"],
     ),
@@ -156,13 +208,16 @@ def propose_range_json(
     problem_type: str = "",
     std_code: str = "",
     lang: str = "cpp",
+    special_samples_desc: str = "",
+    special_samples_count: int = 1,
+    auto_discover_special: bool = False,
 ) -> dict:
     """调 LLM 只生成 range.json，返回清洗并校验后的 dict（不含 std_cmd）。
 
-    若未显式指定 problem_type：先单独调用一次大模型判题型，再写 range；
-    结果写入 range.json 的 problem_type 字段。
+    题型由 Range Agent 写入 range.json.problem_type（不单独调大模型判型；忽略 GUI 传入题型）。
+    auto_discover_special：用户未填特殊提示时，仍根据标程/题面自动挖特殊方案。
     """
-    from server.few_shots import classify_problem_type_llm, normalize_problem_type
+    from server.few_shots import PROBLEM_TYPE_RANGE_HINT, resolve_problem_type_from_range
 
     stmt = to_plain_for_llm(problem_statement)
     rng = to_plain_for_llm(data_range_desc)
@@ -170,18 +225,14 @@ def propose_range_json(
     work.mkdir(parents=True, exist_ok=True)
     tools.set_context(str(work), std_cmd="")
 
-    typ = normalize_problem_type(problem_type)
-    type_source = "user"
-    if not typ:
-        typ = classify_problem_type_llm(stmt, rng, std_code)
-        type_source = "llm"
-
     std_hint = ""
     if std_code and std_code.strip():
         code = std_code.strip()
         if len(code) > 4000:
             code = code[:2000] + "\n/* ... */\n" + code[-1500:]
-        std_hint = f"\n\n【标程片段 lang={lang}，仅供推断是否有多测 T】\n```\n{code}\n```\n"
+        std_hint = (
+            f"\n\n【标程片段 lang={lang}，供推断题型与是否有多测 T】\n```\n{code}\n```\n"
+        )
 
     # 扫题面关键词：命中特殊结构约束时，给 LLM 两份帮助：
     # 1) 一段针对性提醒文本（scan_structural_hints），告诉 LLM 该约束对生成器意味着什么；
@@ -197,26 +248,33 @@ def propose_range_json(
             "并补充题面里其它未被预扫描到的隐含约束。每条都要在 edge_cases 里加对应边界。\n"
         )
 
+    special_block = _build_special_samples_block(
+        special_samples_desc, special_samples_count, auto_discover_special,
+    )
+
     task = (
-        f"请只产出 range.json。\n\n"
+        f"请只产出 range.json（含 problem_type）。\n\n"
         f"【题面】\n{stmt}\n\n"
         f"【数据范围描述】\n{rng}\n"
         f"{std_hint}"
-        f"\n【已判定题型】{typ}（来源: {type_source}）\n"
-        f"{_build_type_hint_block(typ)}"
+        f"\n{PROBLEM_TYPE_RANGE_HINT}"
+        f"{_build_all_type_hints_block()}"
         f"{pre_titles_block}"
         f"{struct_hint_block}"
-        f"\ncount 默认 15。constraints 覆盖题面中的规模变量（如 n、T、m）。"
+        f"{special_block}"
+        f"\ncount 必须写 15（常规样例数默认；用户未另行指定时禁止写其它数字）。"
+        f"constraints 覆盖题面中的规模变量（如 n、T、m）。"
         f"edge_cases 用简短英文标识符。写完 write_range 后 finish。"
         f"务必填写 special_constraints 字段（即使为空数组也要写）。\n"
-        f"不要改写 problem_type（系统会写入）；只需按上述题型建议设计 edge_cases。\n"
+        f"务必填写 problem_type（与题面一致的英文标识符）。\n"
     )
     summary = agent_run(
         task,
-        max_steps=8,
+        max_steps=4,
         verbose=False,
         system_prompt=RANGE_ONLY_PROMPT,
         tool_schemas=RANGE_TOOL_SCHEMAS,
+        tool_limits={"write_range": 1},
     )
     path = work / "range.json"
     if not path.exists():
@@ -228,7 +286,57 @@ def propose_range_json(
 
     data = normalize_range_json(dict(data))
     data.pop("std_cmd", None)
+    typ = resolve_problem_type_from_range(data, stmt, rng, std_code)
     data["problem_type"] = typ
+    data["auto_discover_special"] = bool(auto_discover_special)
+    print(f"[range_agent] problem_type from range.json: {typ}", flush=True)
+
+    # 特殊方案：有用户提示或开启自动挖掘时挖候选；count = 常规 + 选中×每方案样例数
+    hint = (special_samples_desc or "").strip()
+    want_special = bool(hint) or bool(auto_discover_special)
+    if want_special:
+        from server.special_discover import (
+            apply_schemes_to_range,
+            discover_special_schemes,
+        )
+        # 用户未提供数据方案：常规样例数固定默认 15，不信任 LLM 写的 count
+        regular = 15
+        print(
+            f"[range_agent] discover special schemes "
+            f"(hint_len={len(hint)}, auto={bool(auto_discover_special)}, type={typ})",
+            flush=True,
+        )
+        schemes = discover_special_schemes(
+            stmt,
+            rng,
+            std_code=std_code,
+            user_hint=hint,
+            problem_type=typ,
+            samples_per_scheme=max(1, int(special_samples_count or 1)),
+            auto_discover=bool(auto_discover_special),
+        )
+        if not schemes and hint:
+            from server.special_discover import fallback_user_scheme
+            schemes = fallback_user_scheme(hint, max(1, int(special_samples_count or 1)))
+        data = apply_schemes_to_range(
+            data,
+            schemes,
+            user_hint=hint,
+            regular_count=regular,
+        )
+        print(f"[range_agent] special schemes = {len(schemes)}", flush=True)
+    else:
+        data["count"] = 15
+        data.pop("special_samples_desc", None)
+        if not data.get("special_schemes"):
+            data.pop("special_samples_count", None)
+            data.pop("special_schemes", None)
+        print(
+            "[range_agent] skip special discover "
+            "(no special_samples_desc and auto_discover_special=false); count forced to 15",
+            flush=True,
+        )
+
     errs = validate_range_json(data)
     if errs:
         raise RuntimeError("range.json 不合法:\n" + "\n".join(f"  - {e}" for e in errs))

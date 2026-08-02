@@ -9,6 +9,42 @@ from sandbox.run import safe_run
 from server import job_store
 
 
+def save_problem_workspace(
+    job_dir: Path,
+    *,
+    std_code: str = "",
+    lang: str = "cpp",
+    problem_statement: str = "",
+    data_range_desc: str = "",
+    output_desc: str = "",
+    problem_type: str = "",
+) -> None:
+    """把题面/输入/输出原文落到 job 目录，供 GUI「历史题目」回载。"""
+    try:
+        from problem_store import save_problem_texts_to_dir
+
+        save_problem_texts_to_dir(
+            job_dir,
+            statement=problem_statement or "",
+            input_desc=data_range_desc or "",
+            output_desc=output_desc or "",
+            std_code=std_code or "",
+            lang=lang or "cpp",
+            problem_type=problem_type or "",
+            last_job_id=job_dir.name,
+            problem_id="",
+            extra_meta={"source": "job"},
+        )
+    except Exception:
+        # 非致命：至少保证 txt 落盘
+        try:
+            (job_dir / "statement.txt").write_text(problem_statement or "", encoding="utf-8")
+            (job_dir / "input_desc.txt").write_text(data_range_desc or "", encoding="utf-8")
+            (job_dir / "output_desc.txt").write_text(output_desc or "", encoding="utf-8")
+        except Exception:
+            pass
+
+
 def compile_std(job_dir: Path, std_code: str, lang: str) -> str:
     """把标程写入 job_dir，必要时编译，返回可执行的 std_cmd。"""
     if lang == "python":

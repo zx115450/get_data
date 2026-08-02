@@ -14,7 +14,7 @@ from . import llm, prompts, tools
 SYSTEM_PROMPT = prompts.default_full_prompt
 
 # 写代码类工具：门禁针对这些（不含 write_range）
-_WRITE_CODE_TOOLS = frozenset({"write_gen", "write_validate", "write_file"})
+_WRITE_CODE_TOOLS = frozenset({"write_gen", "write_special_gen", "write_validate", "write_file"})
 
 
 # 阶段切换提示词
@@ -67,6 +67,29 @@ def _filter_schemas(schemas: list, deny_names: set[str] | frozenset[str]) -> lis
     return out if out else schemas
 
 
+def _schema_tool_names(schemas: list | None) -> set[str]:
+    names: set[str] = set()
+    for s in schemas or []:
+        name = (s.get("function") or {}).get("name", "")
+        if name:
+            names.add(name)
+    return names
+
+
+def _is_range_only_schemas(schemas: list | None) -> bool:
+    """当前可用工具是否仅为 write_range + finish（range-only 阶段）。"""
+    names = _schema_tool_names(schemas)
+    return bool(names) and names <= {"write_range", "finish"}
+
+
+def _norm_read_path(path: str) -> str:
+    """归一化 read_file 路径，用于去重（相对路径、统一斜杠与大小写）。"""
+    p = (path or "").strip().replace("\\", "/")
+    while p.startswith("./"):
+        p = p[2:]
+    return p.lower()
+
+
 def _preview(result: str, limit: int = 120) -> str:
     return result if len(result) <= limit else result[:limit] + "..."
 
@@ -109,6 +132,8 @@ def run(
     tool_schemas=None,
     write_check_discipline: bool = False,
     self_check_fast: bool = False,
+    self_check_args: dict | None = None,
+    tool_limits: dict[str, int] | None = None,
 ) -> str:
     """跑一轮 Agent。
 
@@ -135,8 +160,14 @@ def run(
     self_check_fast:
                     True 时 Agent 主动调用的 run_self_check 强制 fast_mode=True
                     （与门禁的自动自检一致；完整自检由外层 runner 负责）。
+    self_check_args:
+                    额外传给 run_self_check / ensure_self_check_prereqs 的参数，
+                    如 {"skip_special": True} 或 {"special_only": True}。
+    tool_limits:      限制单个工具最多被调用次数，例如 {"write_finder": 2, "run_finder": 1}。
+                      超过限制时该工具返回 ERROR，并提示模型改用其他工具或 finish。
     返回:           finish 的 summary，或 "预算用尽"
     """
+    _sc_args = dict(self_check_args or {})
     if system_prompt is None and stage_prompts is None:
         system_prompt = SYSTEM_PROMPT
 
@@ -162,6 +193,9 @@ def run(
         {"role": "user", "content": task},
     ]
 
+    # 工具调用次数限制
+    tool_counts: dict[str, int] = {name: 0 for name in (tool_limits or {})}
+
     # LLM 偶尔会只返回文本不调工具（如「解释一下思路」）。此时不直接 finish，
     # 而是发一条 nudge 提醒它调工具。连续 nudge 太多次仍不改，才放弃。
     max_nudges = 3
@@ -169,18 +203,32 @@ def run(
 
     # 门禁状态：快速自检是否已通过（通过后禁止再写）
     check_ok = False
+    # range-only：首次 write_range 成功后自动结束，避免模型反复改写空转
+    range_only = _is_range_only_schemas(schemas)
+    range_done = False
+    # 同一 Agent 轮次内已成功读过的路径，禁止重复 read_file（如两次 gen_plan.md）
+    read_paths_ok: set[str] = set()
 
     for step in range(1, max_steps + 1):
         # 自检通过后从 schema 里拿掉写代码工具，减少模型违规调用
         step_schemas = schemas
         if write_check_discipline and check_ok:
             step_schemas = _filter_schemas(schemas, _WRITE_CODE_TOOLS)
+        # range 已写好：不再暴露 write_range，只留 finish（若模型仍不 finish 则下一步自动结束）
+        if range_only and range_done:
+            step_schemas = _filter_schemas(schemas, {"write_range"})
 
         actions = llm.chat(messages, step_schemas)
 
         # LLM 没调任何工具：发 nudge 提醒它调工具，而不是直接 finish。
         # 这避免了「LLM 解释思路 → Agent 立刻终止 → 没产出 gen」的常见失败模式。
         if not actions:
+            if range_only and range_done:
+                if verbose:
+                    print(f"[step {step}] range already written; auto-finish (no tool call)")
+                if on_event:
+                    on_event(step, "finish", {"auto": True, "reason": "range_written"}, "已写出 range.json")
+                return "已写出 range.json（write_range 成功后自动结束）"
             nudge_count += 1
             if nudge_count > max_nudges:
                 if verbose:
@@ -221,6 +269,12 @@ def run(
                     "请调用 finish(summary) 结束本阶段。"
                 )
                 continue
+            if range_only and range_done and act.name == "write_range":
+                results[idx] = (
+                    "ERROR: range.json 已写好，禁止再次 write_range。"
+                    "请调用 finish(summary) 结束本阶段。"
+                )
+                continue
             if act.name in ("write_gen", "write_validate", "write_checker", "use_builtin_checker"):
                 writer_indices[act.name] = idx
         parallel_writers = [name for name in ("write_gen", "write_validate", "write_checker", "use_builtin_checker")
@@ -245,6 +299,27 @@ def run(
         skip_recompile: set[str] = set()
 
         for idx, act in enumerate(actions):
+            # 工具调用次数限制：超限时直接返回错误，不执行工具
+            if tool_limits and act.name in tool_limits:
+                limit = tool_limits[act.name]
+                if tool_counts[act.name] >= limit:
+                    limit_msg = (
+                        f"ERROR: 工具 {act.name} 已超过调用次数限制（最多 {limit} 次）。"
+                        "请改用其他工具或调用 finish(summary) 结束本阶段。"
+                    )
+                    results[idx] = limit_msg
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": act.tool_call_id,
+                        "content": limit_msg,
+                    })
+                    if verbose:
+                        print(f"[step {step}] {act.name} blocked (limit {limit})")
+                    if on_event:
+                        on_event(step, act.name, dict(act.args), _preview(limit_msg))
+                    continue
+                tool_counts[act.name] += 1
+
             if verbose:
                 print(f"[step {step}] {act.name} {act.args}")
 
@@ -256,11 +331,31 @@ def run(
 
             result = results[idx]
             if result is None:
+                # 同一步里若已成功写过 range，后续 write_range 直接拒掉
+                if range_only and range_done and act.name == "write_range":
+                    result = (
+                        "ERROR: range.json 已写好，禁止再次 write_range。"
+                        "请调用 finish(summary) 结束本阶段。"
+                    )
                 # 强制快速自检：Agent 主动调 run_self_check 时注入 fast_mode
-                if act.name == "run_self_check" and (self_check_fast or write_check_discipline):
+                elif act.name == "run_self_check":
                     args = dict(act.args or {})
-                    args["fast_mode"] = True
+                    if self_check_fast or write_check_discipline:
+                        args["fast_mode"] = True
+                    args.update(_sc_args)
                     result = tools.dispatch(act.name, args)
+                elif act.name == "read_file":
+                    path = str((act.args or {}).get("path") or "")
+                    key = _norm_read_path(path)
+                    if key and key in read_paths_ok:
+                        result = (
+                            f"ERROR: 本阶段已读过 {path}，内容已在上文工具结果中。"
+                            "禁止重复 read_file。请直接 write_gen / write_validate / finish。"
+                        )
+                    else:
+                        result = tools.dispatch(act.name, act.args)
+                        if key and isinstance(result, str) and not result.startswith("ERROR"):
+                            read_paths_ok.add(key)
                 else:
                     result = tools.dispatch(act.name, act.args)
                 results[idx] = result
@@ -280,13 +375,22 @@ def run(
                 "content": result_for_llm,
             })
 
+            # 同一步并行多次读同一文件：第一次成功后登记，后续拒掉
+            if act.name == "read_file" and isinstance(result, str) and not result.startswith("ERROR"):
+                key = _norm_read_path(str((act.args or {}).get("path") or ""))
+                if key:
+                    read_paths_ok.add(key)
+
             if act.name == "write_range" and not str(result_for_llm).startswith("ERROR"):
                 range_written_ok = True
+                range_done = True
 
             if act.name in _WRITE_CODE_TOOLS and isinstance(result, str) and result.startswith("OK"):
                 had_successful_write = True
             elif act.name == "write_gen" and isinstance(result, str) and result.startswith("ERROR"):
                 skip_recompile.add("gen")
+            elif act.name == "write_special_gen" and isinstance(result, str) and result.startswith("ERROR"):
+                skip_recompile.add("gen_special")
             elif act.name == "write_validate" and isinstance(result, str) and result.startswith("ERROR"):
                 skip_recompile.add("validator")
 
@@ -297,9 +401,52 @@ def run(
                 else:
                     check_ok = False
 
+        # range-only：本步 write_range 已成功 → 立即结束，杜绝反复改写空转
+        if range_only and range_written_ok:
+            if verbose:
+                print(f"[step {step}] write_range OK; auto-finish (range-only)")
+            if on_event:
+                on_event(
+                    step, "finish",
+                    {"auto": True, "reason": "write_range_ok"},
+                    "已写出 range.json",
+                )
+            return "已写出 range.json（write_range 成功后自动结束）"
+
+        # write_* 缺 content / 参数截断：立刻强提醒，避免空转 TypeError
+        missing_content = any(
+            act.name in _WRITE_CODE_TOOLS
+            and isinstance(results[i], str)
+            and (
+                "缺少必填参数 content" in results[i]
+                or "参数不完整" in results[i]
+                or "参数疑似截断" in results[i]
+                or "JSON 解析失败" in results[i]
+            )
+            for i, act in enumerate(actions)
+        )
+        if missing_content:
+            follow = (
+                "【硬错误】上一轮 write_* 没有带上完整 content（空参数或 JSON 被截断）。"
+                "下一轮必须重新调用同一个 write_*，arguments 只含完整源码字段 content；"
+                "若需旧版：先 read_file(\"gen.cpp\") 或对应文件，再整份写出。"
+                "禁止再次空调用 write_gen/write_validate；禁止提交 __OMITTED_SOURCE__。"
+            )
+            messages.append({"role": "user", "content": follow})
+            if on_event:
+                on_event(step, "nudge", {"reason": "missing_write_content"}, follow[:120])
+
         # 门禁：成功写入且本步未自检 → 先确保双产物就绪，再自动快速自检
         if write_check_discipline and had_successful_write and not had_self_check:
-            ready, prep_msg = tools.ensure_self_check_prereqs(skip_recompile=skip_recompile)
+            require_special = None
+            if _sc_args.get("skip_special"):
+                require_special = False
+            elif _sc_args.get("special_only"):
+                require_special = True
+            ready, prep_msg = tools.ensure_self_check_prereqs(
+                skip_recompile=skip_recompile,
+                require_special=require_special,
+            )
             if on_event:
                 on_event(
                     step, "precheck",
@@ -309,7 +456,14 @@ def run(
             if not ready:
                 # gen/validator 尚未齐备：不跑自检，提示补写 / 修复编译失败项
                 check_ok = False
-                if skip_recompile:
+                if _sc_args.get("special_only"):
+                    follow = (
+                        "【系统自检前置检查未通过】尚未自动跑 run_self_check。\n"
+                        f"{prep_msg}\n\n"
+                        "本阶段只需写出可编译的 gen_special.cpp（write_special_gen）；"
+                        "不要改 gen.cpp / validator.cpp。"
+                    )
+                elif skip_recompile:
                     follow = (
                         "【系统自检前置检查未通过】尚未自动跑 run_self_check。\n"
                         f"{prep_msg}\n\n"
@@ -333,12 +487,24 @@ def run(
                         f"[step {step}] auto run_self_check(fast_mode=True) "
                         f"after successful write ({prep_msg})"
                     )
-                auto_result = tools.run_self_check(fast_mode=True)
-                auto_preview = _preview(auto_result, 200)
+                auto_kwargs = {"fast_mode": True, **_sc_args}
+                auto_result = tools.run_self_check(**auto_kwargs)
+                # 失败时保留足够长的 FAIL 行供日志复盘（成功仍短预览）
+                if isinstance(auto_result, str) and auto_result.startswith("ERROR"):
+                    auto_preview = auto_result if len(auto_result) <= 4000 else (
+                        auto_result[:3200] + f"\n...[{len(auto_result)} chars]...\n" + auto_result[-600:]
+                    )
+                    try:
+                        fail_path = tools._wd() / "self_check_last_fail.txt"
+                        fail_path.write_text(auto_result, encoding="utf-8")
+                    except Exception:
+                        pass
+                else:
+                    auto_preview = _preview(auto_result, 200)
                 if on_event:
                     on_event(
                         step, "run_self_check",
-                        {"fast_mode": True, "auto": True},
+                        {**auto_kwargs, "auto": True},
                         auto_preview,
                     )
 
@@ -347,14 +513,18 @@ def run(
                     follow = (
                         "【系统自动快速自检】写入成功后已自动执行 run_self_check(fast_mode=True)，结果 OK。\n"
                         f"{_truncate_for_messages('run_self_check', auto_result)}\n\n"
-                        "请立即调用 finish(summary) 结束。禁止再 write_gen / write_validate。"
+                        "请立即调用 finish(summary) 结束。禁止再 write_gen / write_validate / write_special_gen。"
                     )
                 else:
                     check_ok = False
+                    if _sc_args.get("special_only"):
+                        fix_hint = "请根据 FAIL 再修改一轮（只 write_special_gen），"
+                    else:
+                        fix_hint = "请根据 FAIL 再修改一轮（可同轮 write_gen + write_validate），"
                     follow = (
                         "【系统自动快速自检】写入成功后已自动执行 run_self_check(fast_mode=True)，未通过。\n"
                         f"{_truncate_for_messages('run_self_check', auto_result)}\n\n"
-                        "请根据 FAIL 再修改一轮（可同轮 write_gen + write_validate），"
+                        f"{fix_hint}"
                         "写完后系统会再次自动快速自检。禁止未自检连续多次改写。"
                     )
                 messages.append({"role": "user", "content": follow})

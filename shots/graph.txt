@@ -1,15 +1,22 @@
 【参考范例：一道图题的标准写法（C++ + ACM-generator）】
-题面：给定 n 个点 m 条边的无向图（无自环无重边），判断是否连通。
-说明：树/链/菊花优先用 generator.h；稀疏随机边用 unordered_set 采样。严禁枚举 O(n^2) 边池。
-输入格式：第 1 行 n m；接下来 m 行每行 u v。
+【仅供参考】下面范例是「单测、无向、无自环无重边、判连通」的示意。写本题 gen 时必须以【本题题面 / 标程 / range.json / gen_plan】为准：
+- 若标程先读 T：stdout 第一行必须是 T∈[Tmin,Tmax]，禁止照抄本范例「第一行 n m」。
+- 若题面允许自环/有向边/带权：不要照抄本范例的 ensuref(u!=v) 与无向去重 key。
+- edge_cases 名字与构造策略跟本题走，不要机械照搬 connected_tree/complete/path/star。
+- generator.h 的 API 用法（.gen() / .edges()）可参考；输入格式与图语义不可照搬。
+
+题面（范例题）：给定 n 个点 m 条边的无向图（无自环无重边），判断是否连通。
+说明：树/链/菊花优先用 generator.h：先 .gen()，再 .edges()。稀疏随机边用 unordered_set 采样并设尝试上限。严禁枚举 O(n^2) 边池。
+输入格式（本范例为单测）：第 1 行 n m；接下来 m 行每行 u v。
+（若真实题目多测：先输出 T，再重复 T 组「n m + 边」——以标程为准。）
 输出格式：YES 或 NO。
-数据范围：n in [1,1000]，m in [0,n*(n-1)/2]，15 组，覆盖连通树、不连通、完全图、链、菊花、随机稀疏。
+数据范围：n in [1,1000]，m in [0,min(3000,n*(n-1)/2)]，15 组。
 
 range.json:
 {
   "count": 15,
-  "constraints": {"n": [1, 1000], "m": [0, 499500]},
-  "edge_cases": ["connected_tree", "disconnected", "complete", "path", "star", "random_sparse"]
+  "constraints": {"n": [1, 1000], "m": [0, 3000]},
+  "edge_cases": ["connected_tree", "disconnected", "complete", "path", "star", "random_sparse", "edge_n1"]
 }
 
 gen.cpp:
@@ -30,22 +37,43 @@ int pickSized(int lo, int hi) {
     if (b > hi) b = hi;
     return rnd.next((int)a, (int)b);
 }
+// 无自环无向边；n=1 或无法再采时停止，禁止死循环
+void sampleUndirected(int n, int m, vector<pair<int,int>>& edges) {
+    if (n <= 1 || m <= 0) return;
+    long long maxe = 1LL * n * (n - 1) / 2;
+    if (m > maxe) m = (int)maxe;
+    unordered_set<long long> used;
+    used.reserve(m * 2);
+    int tries = 0, lim = max(100, m * 40);
+    while ((int)edges.size() < m && tries++ < lim) {
+        int u = rnd.next(1, n), v = rnd.next(1, n);
+        if (u == v) continue;
+        if (u > v) swap(u, v);
+        long long key = (long long)u * (n + 1) + v;
+        if (!used.insert(key).second) continue;
+        edges.push_back({u, v});
+    }
+}
 int main(int argc, char* argv[]) {
     registerGen(argc, argv, 1);
     int seed = opt<int>("seed");
     string typ = opt<string>("type", "random_sparse");
-    int n = max(1, pickSized(1, 1000));
+    (void)seed;
+    int n = (typ == "edge_n1") ? 1 : max(1, pickSized(1, 1000));
     vector<pair<int,int>> edges;
-    if (typ == "connected_tree") {
+    if (typ == "edge_n1") {
+        // 本范例禁止自环：n=1 时 m 必须为 0
+        n = 1;
+    } else if (typ == "connected_tree" && n >= 2) {
         unweight::Tree t(n); t.gen();
         for (auto &e : t.edges()) edges.push_back({e.u(), e.v()});
-    } else if (typ == "path") {
+    } else if (typ == "path" && n >= 2) {
         unweight::Chain t(n); t.gen();
         for (auto &e : t.edges()) edges.push_back({e.u(), e.v()});
-    } else if (typ == "star") {
+    } else if (typ == "star" && n >= 2) {
         unweight::Flower t(n); t.gen();
         for (auto &e : t.edges()) edges.push_back({e.u(), e.v()});
-    } else if (typ == "disconnected") {
+    } else if (typ == "disconnected" && n >= 2) {
         int mid = max(1, n / 2);
         if (mid >= 2) {
             unweight::Tree a(mid); a.gen();
@@ -57,19 +85,16 @@ int main(int argc, char* argv[]) {
             for (auto &e : b.edges()) edges.push_back({e.u() + mid, e.v() + mid});
         }
     } else if (typ == "complete") {
-        for (int u = 1; u <= n; u++) for (int v = u + 1; v <= n; v++) edges.push_back({u, v});
+        // 控制规模，避免 O(n^2) 超时；本题 m 上限 3000 → n≈77
+        if (n > 70) n = 70;
+        for (int u = 1; u <= n; u++)
+            for (int v = u + 1; v <= n; v++)
+                edges.push_back({u, v});
     } else {
-        int m = rnd.next(0, max(1, n));
-        unordered_set<long long> used;
-        used.reserve(m * 2);
-        while ((int)edges.size() < m) {
-            int u = rnd.next(1, n), v = rnd.next(1, n);
-            if (u == v) continue;
-            long long key = (long long)min(u, v) * (n + 1) + max(u, v);
-            if (!used.insert(key).second) continue;
-            edges.push_back({u, v});
-        }
+        int m = (n <= 1) ? 0 : rnd.next(0, min(n, 3000));
+        sampleUndirected(n, m, edges);
     }
+    // 本范例单测：第一行 n m。多测题请先 printf T，再循环输出各组。
     printf("%d %d\n", n, (int)edges.size());
     for (auto e : edges) printf("%d %d\n", e.first, e.second);
     return 0;
@@ -81,7 +106,7 @@ using namespace std;
 int main(int argc, char* argv[]) {
     registerValidation();
     int n = inf.readInt(1, 1000, "n"); inf.readSpace();
-    int m = inf.readInt(0, 499500, "m"); inf.readEoln();
+    int m = inf.readInt(0, 3000, "m"); inf.readEoln();
     set<pair<int,int>> es;
     for (int i = 0; i < m; i++) {
         int u = inf.readInt(1, n, "u"); inf.readSpace();

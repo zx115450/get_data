@@ -9,6 +9,7 @@ write_gen / write_validate 源码参数从历史里换成摘要。
 """
 import json
 import os
+import re
 import threading
 from dataclasses import dataclass
 from typing import Any
@@ -392,12 +393,111 @@ def chat(messages: list[dict], tool_schemas: list[dict]) -> list[Action]:
     actions: list[Action] = []
     for tc in msg.tool_calls:
         name = tc.function.name
-        try:
-            args = json.loads(tc.function.arguments or "{}")
-        except json.JSONDecodeError:
-            args = {}
+        args = parse_tool_arguments(tc.function.arguments or "")
         actions.append(Action(name=name, args=args, tool_call_id=tc.id, raw_content=msg.content or ""))
     return actions
+
+
+def _unescape_json_string_body(body: str) -> str:
+    """把 JSON 字符串字面量主体（不含两端引号）反转义；允许末尾未闭合。"""
+    out: list[str] = []
+    i = 0
+    n = len(body)
+    while i < n:
+        c = body[i]
+        if c != "\\":
+            out.append(c)
+            i += 1
+            continue
+        if i + 1 >= n:
+            break  # 截断在反斜杠上
+        nxt = body[i + 1]
+        simple = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f"}
+        if nxt in simple:
+            out.append(simple[nxt])
+            i += 2
+            continue
+        if nxt == "u" and i + 5 < n:
+            hexpart = body[i + 2 : i + 6]
+            try:
+                out.append(chr(int(hexpart, 16)))
+                i += 6
+                continue
+            except ValueError:
+                pass
+        out.append(nxt)
+        i += 2
+    return "".join(out)
+
+
+def _recover_content_from_truncated_json(raw: str) -> str | None:
+    """从被截断的 tool arguments JSON 里尽量抠出 content 字符串。"""
+    m = re.search(r'"content"\s*:\s*"', raw)
+    if not m:
+        return None
+    body = raw[m.end() :]
+    # 若存在未转义的结束引号则截到那里；否则整段当作截断源码
+    chunks: list[str] = []
+    i = 0
+    while i < len(body):
+        c = body[i]
+        if c == "\\":
+            if i + 1 >= len(body):
+                break
+            chunks.append(body[i : i + 2])
+            i += 2
+            continue
+        if c == '"':
+            break
+        chunks.append(c)
+        i += 1
+    text = _unescape_json_string_body("".join(chunks))
+    return text if text.strip() else None
+
+
+def parse_tool_arguments(raw: str) -> dict:
+    """解析 tool_call.arguments；JSON 截断/别名时尽量恢复 content，避免 write_gen 收到 {}。"""
+    s = (raw or "").strip()
+    if not s:
+        return {}
+    try:
+        obj = json.loads(s)
+        if isinstance(obj, dict):
+            return obj
+        if isinstance(obj, str):
+            return {"content": obj}
+        return {"content": json.dumps(obj, ensure_ascii=False)}
+    except json.JSONDecodeError:
+        pass
+
+    recovered = _recover_content_from_truncated_json(s)
+    if recovered is not None:
+        args: dict[str, Any] = {"content": recovered, "_args_recovered": True}
+        # 顺带抠 scheme_id / path 等短字段
+        for key in ("scheme_id", "path", "summary", "name"):
+            km = re.search(rf'"{key}"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"', s)
+            if km:
+                try:
+                    args[key] = json.loads(f'"{km.group(1)}"')
+                except json.JSONDecodeError:
+                    args[key] = km.group(1)
+        return args
+
+    # 模型有时直接把源码当 arguments（无 JSON 包装）
+    if any(k in s for k in ("#include", "registerGen", "registerValidation", "registerTestlibCmd")):
+        return {"content": s, "_args_recovered": True}
+
+    # 最后尝试：单引号 JSON / 尾逗号
+    try:
+        fixed = s.replace("'", '"')
+        fixed = re.sub(r",\s*}", "}", fixed)
+        obj = json.loads(fixed)
+        if isinstance(obj, dict):
+            obj["_args_recovered"] = True
+            return obj
+    except json.JSONDecodeError:
+        pass
+    return {"_args_parse_failed": True, "_raw_args_preview": s[:200]}
 
 
 def chat_text(system: str, user: str, temperature: float = 0.3) -> str:
