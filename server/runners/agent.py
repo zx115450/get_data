@@ -46,6 +46,28 @@ GEN_TOOL_SCHEMAS = GEN_FIXER_TOOL_SCHEMAS
 PLAN_FILE = "gen_plan.md"
 
 
+def _log_self_check(job, result: str, prefix: str = "自检结果") -> None:
+    """进度写入自检结果：失败时落盘全文，进度保留全部 FAIL 行（不截断到半行）。"""
+    text = result if isinstance(result, str) else str(result)
+    if text.startswith("ERROR") or "\nFAIL " in ("\n" + text):
+        try:
+            tools._persist_self_check_fail(text)
+        except Exception:
+            pass
+        job_store.add_progress(
+            job, f"{prefix}: {tools.format_self_check_for_progress(text)}"
+        )
+    else:
+        job_store.add_progress(
+            job, f"{prefix}: {tools.format_self_check_for_progress(text)}"
+        )
+
+
+def _is_timeout_or_memory_fail(text: str) -> bool:
+    t = (text or "").lower()
+    return "timeout" in t or "memory_limit" in t
+
+
 def _extract_range_plain(task: str) -> str:
     """从完整 task 文本里抽出【数据范围描述】段落。"""
     if "【数据范围描述】\n" not in task:
@@ -129,7 +151,8 @@ def _run_range_only_agent(
         f"\ncount 必须写 15（常规样例数默认；用户未另行指定时禁止写其它数字）；"
         f"若上方有【特殊样例描述】，count 仍只写常规 15（特殊组由后续方案叠加）。"
         f"constraints 覆盖题面中的规模变量（如 n、T、m）。"
-        f"edge_cases 用简短英文标识符。写完 write_range 后 finish。"
+        f"edge_cases 用简短英文标识符，总数 4～6 个即可（含最小/最大规模与关键结构边界）。"
+        f"写完 write_range 后 finish。"
         f"务必填写 special_constraints 字段（即使为空数组也要写）。\n"
         f"务必填写 problem_type（与题面一致的英文标识符）。\n"
     )
@@ -421,9 +444,9 @@ def prepare_prompts(
     return stmt_plain, task, preset, output_plain, std_for_prompt
 
 
-# Planner 篇幅：提示目标 ~1500；超过软上限则压缩补写一次
-PLAN_TARGET_CHARS = 1500
-PLAN_SOFT_MAX_CHARS = 2200
+# Planner 篇幅：提示目标 ~1600；超过软上限则压缩补写一次（含复杂度预算节）
+PLAN_TARGET_CHARS = 1600
+PLAN_SOFT_MAX_CHARS = 2400
 
 
 def _build_planner_task(
@@ -457,7 +480,8 @@ def _build_planner_task(
         f"\n【range.json】\n```json\n{json.dumps(range_json, ensure_ascii=False, indent=2)}```\n"
         f"{special_note}"
         f"\n题型: {eff_type}\n"
-        "\nedge_cases 每个一行；不要复述题面或粘贴大段伪代码。\n"
+        "\nedge_cases 每个一行；必须含第 7 节「复杂度与规模预算」，其中强制写清「有效状态预算」"
+        "（最大档唯一顶点/字符串/权值种类等上界；满输出规模≠满状态）；不要复述题面或粘贴大段伪代码。\n"
     )
     return prompts.build_planner_prompt(), user_prompt
 
@@ -468,9 +492,19 @@ def _plan_looks_complete(plan_text: str) -> bool:
         return False
     text = plan_text.lower()
     required = [
-        "1.", "2.", "3.", "4.", "5.", "6.", "7.",  # 至少含编号小节
+        "1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.",  # 8 节含复杂度预算
     ]
-    return all(h in text for h in required)
+    if not all(h in text for h in required):
+        return False
+    # 第 7 节：复杂度 + 有效状态预算（上界/池/状态 等）
+    has_complexity = ("复杂" in plan_text) or ("o(" in text) or ("复杂度" in plan_text)
+    has_state_budget = (
+        ("有效状态" in plan_text)
+        or ("状态预算" in plan_text)
+        or ("状态上界" in plan_text)
+        or (("预算" in plan_text) and ("状态" in plan_text or "池" in plan_text))
+    )
+    return has_complexity and has_state_budget
 
 
 def _plan_too_long(plan_text: str) -> bool:
@@ -497,6 +531,10 @@ def _build_coder_task(
         )
     return (
         "请根据当前工作目录的 gen_plan.md 写完整的 gen.cpp 和 validator.cpp。\n\n"
+        "【content 书写 · 必读】write_gen / write_validate 的 arguments 必须含完整 content"
+        "（从 #include 到 main 结尾 }）；禁止空调用、半截、摘要；宜短而全，防止 JSON 截断"
+        "（出现 recovered / missing_content 须立刻整份重写）。"
+        "实现必须带上题面+标程+range 全部上下文（edge_cases 分支、多测 T、约束变量 opt）。\n\n"
         f"【题面】\n{stmt_plain}\n\n"
         f"【数据范围】\n{range_plain}\n"
         f"{output_plain}\n"
@@ -504,13 +542,15 @@ def _build_coder_task(
         f"\n【range.json】\n```json\n{__import__('json').dumps(range_json, ensure_ascii=False, indent=2)}```\n"
         "要求：\n"
         "1. 只 read_file('gen_plan.md') 一次；range.json 已在上方，禁止再读。\n"
-        "2. 首轮勿读 gen.cpp / validator.cpp；读完 plan 后直接 write_gen + write_validate。\n"
+        "2. 首轮勿读 gen.cpp / validator.cpp；读完 plan 后直接 write_gen + write_validate"
+        "（各自带完整 content，可并行）。\n"
         "3. 严格按 plan + 本题标程实现；task 里的 few-shot/参考范例仅作 API/风格参考，"
         "禁止照抄其「第一行 n m」或无自环约定（标程有 T 则先输出 T；n=1 按题面决定自环或 m=0）。\n"
-        "4. 不要遗漏多测 / sum 约束 / edge_case 分支。\n"
+        "4. 不要遗漏多测 / sum 约束 / edge_case 分支；写 gen 时对照上方全部上下文。\n"
         "5. gen.cpp 必须注册 seed / index / count / type 以及 range.json 中所有变量。\n"
-        "6. 对每种 edge_type 做 run_gen → run_validate → run_std 三连自检。\n"
-        "7. 最后调用 run_self_check() 做强化自检，通过后 finish。\n"
+        "6. 严格按 gen_plan 第 7 节「有效状态预算」实现：满规模≠满状态。\n"
+        "7. 对每种 edge_type 做 run_gen → run_validate → run_std 三连自检。\n"
+        "8. 最后调用 run_self_check() 做强化自检，通过后 finish。\n"
         f"{special_note}{resume_failure_block}"
     )
 
@@ -703,24 +743,27 @@ def run_gen_agent(
             job_store.add_progress(job, "【Plan】首次计划不完整，补一次简洁完整版")
             retry_prompt = (
                 f"{user_prompt}\n\n"
-                "【上一次计划被判定为不完整】请严格按 7 个小节重写，保持简短"
+                "【上一次计划被判定为不完整】请严格按 8 个小节重写，保持简短"
                 f"（目标约 {PLAN_TARGET_CHARS} 字）：\n"
                 "1. 输入格式 2. 范围参数 3. 多测与 sum 4. 规模分层 "
-                "5. edge_cases（每名一行）6. validator 7. 实现顺序（最多 3 条）"
+                "5. edge_cases（每名一行）6. validator "
+                "7. 复杂度与规模预算（必须含有效状态上界数字/表达式） "
+                "8. 实现顺序（最多 3 条）"
             )
             try:
                 plan_text = chat_text(system_prompt, retry_prompt, temperature=0.3)
             except Exception as e:
                 job_store.add_progress(job, f"【Plan】Planner 补写失败: {type(e).__name__}: {e}")
 
-        # 过长：压缩一次（仍须保留 7 节）
+        # 过长：压缩一次（仍须保留 8 节，含复杂度预算）
         if _plan_too_long(plan_text):
             job_store.add_progress(
                 job,
                 f"【Plan】计划过长 ({len(plan_text)} 字符 > {PLAN_SOFT_MAX_CHARS})，压缩一次",
             )
             compress_prompt = (
-                "请把下面的 gen_plan 压缩为更短 Markdown，保留全部 7 个小节与每个 edge_case 一行映射，"
+                "请把下面的 gen_plan 压缩为更短 Markdown，保留全部 8 个小节与每个 edge_case 一行映射，"
+                "尤其保留第 7 节的 O(...) 与「有效状态预算」数字，"
                 f"全文控制在约 {PLAN_TARGET_CHARS} 字以内（硬上限 {PLAN_SOFT_MAX_CHARS}）。"
                 "删除复述、伪代码和空话；只输出压缩后的计划。\n\n"
                 f"【原计划】\n{plan_text}"
@@ -766,18 +809,40 @@ def run_gen_agent(
     max_fixer_attempts = 4
     fixer_summary = ""
 
+    def _run_coder_rewrite(fail_text: str, label: str) -> str:
+        """跑一轮 Coder Rewrite，返回 agent summary。"""
+        job_store.add_progress(job, f"【{label}】启动 Coder Rewrite（按失败摘要重写 gen/validator）")
+        retry_task = build_coder_rewrite_task(
+            stmt_plain, range_plain, range_json or {},
+            fail_text,
+            f"Coder 摘要: {coder_summary}\nFixer 摘要: {fixer_summary}",
+        )
+        retry_summary = agent_run(
+            retry_task,
+            max_steps=12,
+            verbose=False,
+            on_event=on_event,
+            system_prompt=prompts.build_coder_rewrite_prompt(typ),
+            tool_schemas=CODER_TOOL_SCHEMAS,
+            write_check_discipline=True,
+            self_check_fast=True,
+            self_check_args=_GEN_SELF_CHECK_ARGS,
+        )
+        job_store.add_progress(job, f"{label} 结束: {retry_summary}")
+        return retry_summary
+
     def _full_gate(self_check_result: str, prefix: str) -> tuple[bool, str]:
         """Gen Agent 唯一大数据/抗压门禁：完整自检。
 
-        通过返回 (True, 摘要)；失败则进入一次 tiny 修复 + 再次完整自检，
-        整次 Gen Agent 最多 2 次完整自检。
+        通过返回 (True, 摘要)；失败则修复后再完整自检。
+        TIMEOUT/MEMORY 类：Rewrite 后必须以 full 通过为准（不以 tiny/fast 收工）。
         """
         # 第 1 次完整自检
         job_store.add_progress(
             job, f"{prefix} 强制跑 run_self_check(fast_mode=False) 做交付前完整自检"
         )
         self_check_result = tools.run_self_check(fast_mode=False, **_GEN_SELF_CHECK_ARGS)
-        job_store.add_progress(job, f"自检结果: {self_check_result[:500]}")
+        _log_self_check(job, self_check_result)
 
         if isinstance(self_check_result, str) and self_check_result.startswith("OK"):
             save_good_snapshot(job_dir, include_in_out=False)
@@ -786,43 +851,40 @@ def run_gen_agent(
             job_store.add_progress(job, f"Agent 结束: {msg}")
             return True, msg
 
-        # 完整自检失败：按错误类型分流，用 tiny 模式快速迭代修复，再完整一次
+        fail_preview = tools.format_self_check_for_progress(self_check_result)
         job_store.add_progress(
             job,
-            f"{prefix} 完整自检失败（大数据/抗压未通过），进入 tiny 修复轮: "
-            f"{self_check_result[:500]}"
+            f"{prefix} 完整自检失败（大数据/抗压未通过），进入修复轮:\n{fail_preview}",
         )
 
         is_structural = _classify_self_check_error(self_check_result) == "structural"
-        if is_structural:
-            # 性能/骨架问题：直接 Rewrite
-            job_store.add_progress(job, "【完整自检失败】结构性/性能问题，启动 Coder Rewrite")
-            retry_task = build_coder_rewrite_task(
-                stmt_plain, range_plain, range_json or {},
-                self_check_result,
-                f"Coder 摘要: {coder_summary}\nFixer 摘要: {fixer_summary}",
+        is_timeoutish = _is_timeout_or_memory_fail(self_check_result)
+
+        if is_structural or is_timeoutish:
+            # 性能/骨架/超时：Rewrite；TIMEOUT 必须以 full 验收
+            job_store.add_progress(
+                job,
+                "【完整自检失败】结构性/性能问题"
+                + ("（含 TIMEOUT/MEMORY）" if is_timeoutish else "")
+                + "，启动 Coder Rewrite",
             )
-            retry_summary = agent_run(
-                retry_task,
-                max_steps=12,
-                verbose=False,
-                on_event=on_event,
-                system_prompt=prompts.build_coder_rewrite_prompt(typ),
-                tool_schemas=CODER_TOOL_SCHEMAS,
-                write_check_discipline=True,
-                self_check_fast=True,
-                self_check_args=_GEN_SELF_CHECK_ARGS,
-            )
-            job_store.add_progress(job, f"Coder Rewrite (tiny 修复) 结束: {retry_summary}")
-            tiny_result = tools.run_self_check(tiny_mode=True, **_GEN_SELF_CHECK_ARGS)
-            job_store.add_progress(job, f"tiny 自检结果: {tiny_result[:500]}")
-            if not isinstance(tiny_result, str) or not tiny_result.startswith("OK"):
-                restore_good_snapshot(job_dir, suffix=".fixer_bak")
-                msg = f"{prefix} 完整自检失败后 Rewrite + tiny 仍失败"
-                job_store.add_progress(job, msg)
-                return False, msg
+            _run_coder_rewrite(self_check_result, "Coder Rewrite")
+
+            if is_timeoutish:
+                job_store.add_progress(
+                    job,
+                    "【TIMEOUT/MEMORY】Rewrite 后跳过 tiny 收工，直接强制完整自检",
+                )
+            else:
+                tiny_result = tools.run_self_check(tiny_mode=True, **_GEN_SELF_CHECK_ARGS)
+                _log_self_check(job, tiny_result, "tiny 自检结果")
+                if not isinstance(tiny_result, str) or not tiny_result.startswith("OK"):
+                    restore_good_snapshot(job_dir, suffix=".fixer_bak")
+                    msg = f"{prefix} 完整自检失败后 Rewrite + tiny 仍失败"
+                    job_store.add_progress(job, msg)
+                    return False, msg
         else:
-            # 局部/大数据边界问题：用 Gen Fixer tiny 最多 2 轮
+            # 局部问题：Gen Fixer tiny 最多 2 轮
             job_store.add_progress(job, "【完整自检失败】局部问题，启动 Gen Fixer (tiny 模式)")
             retry_ok = False
             for attempt in range(1, 3):
@@ -845,7 +907,7 @@ def run_gen_agent(
                     job, f"Fixer tiny 第 {attempt}/2 轮结束: {retry_summary}"
                 )
                 tiny_result = tools.run_self_check(tiny_mode=True, **_GEN_SELF_CHECK_ARGS)
-                job_store.add_progress(job, f"tiny 自检结果: {tiny_result[:500]}")
+                _log_self_check(job, tiny_result, "tiny 自检结果")
                 if isinstance(tiny_result, str) and tiny_result.startswith("OK"):
                     retry_ok = True
                     break
@@ -855,12 +917,12 @@ def run_gen_agent(
                 job_store.add_progress(job, msg)
                 return False, msg
 
-        # 第 2 次完整自检
+        # 第 2 次完整自检（TIMEOUT Rewrite 后的必过门禁）
         job_store.add_progress(
             job, f"{prefix} 修复后再次跑 run_self_check(fast_mode=False) 完整自检"
         )
         self_check_result = tools.run_self_check(fast_mode=False, **_GEN_SELF_CHECK_ARGS)
-        job_store.add_progress(job, f"自检结果: {self_check_result[:500]}")
+        _log_self_check(job, self_check_result)
 
         if isinstance(self_check_result, str) and self_check_result.startswith("OK"):
             save_good_snapshot(job_dir, include_in_out=False)
@@ -869,15 +931,46 @@ def run_gen_agent(
             job_store.add_progress(job, f"Agent 结束: {msg}")
             return True, msg
 
+        # TIMEOUT/MEMORY 仍失败：再给一次 Rewrite，且仍必须以 full 通过
+        if is_timeoutish or _is_timeout_or_memory_fail(self_check_result):
+            job_store.add_progress(
+                job,
+                "【TIMEOUT/MEMORY】完整自检第 2 次仍失败，再启动一轮 Coder Rewrite，"
+                "必须以 full 通过为准（见 self_check_last_fail.txt）",
+            )
+            _run_coder_rewrite(self_check_result, "Coder Rewrite #2 (TIMEOUT)")
+            job_store.add_progress(
+                job, f"{prefix} TIMEOUT Rewrite #2 后强制完整自检"
+            )
+            self_check_result = tools.run_self_check(
+                fast_mode=False, **_GEN_SELF_CHECK_ARGS
+            )
+            _log_self_check(job, self_check_result)
+            if isinstance(self_check_result, str) and self_check_result.startswith("OK"):
+                save_good_snapshot(job_dir, include_in_out=False)
+                msg = f"{prefix} TIMEOUT Rewrite 后完整自检通过"
+                job_store.add_progress(job, msg)
+                job_store.add_progress(job, f"Agent 结束: {msg}")
+                return True, msg
+
         restore_good_snapshot(job_dir, suffix=".fixer_bak")
-        msg = f"{prefix} 完整自检第 2 次仍失败: {self_check_result[:500]}"
+        # 避免半截 out/ 被阶段 4 误判为「测例已齐全」
+        try:
+            rj = range_json or {}
+            tools._clear_out_pairs(job_dir / "out", int(rj.get("count") or 15))
+        except Exception:
+            pass
+        msg = (
+            f"{prefix} 完整自检最终仍失败:\n"
+            f"{tools.format_self_check_for_progress(self_check_result)}"
+        )
         job_store.add_progress(job, msg)
         return False, msg
 
     # Coder 第一版：快速自检，只验证结构/中小数据
     job_store.add_progress(job, "【Execute】Coder 后跑 run_self_check(fast_mode=True) 做结构验证")
     self_check_result = tools.run_self_check(fast_mode=True, **_GEN_SELF_CHECK_ARGS)
-    job_store.add_progress(job, f"自检结果: {self_check_result[:500]}")
+    _log_self_check(job, self_check_result)
 
     if isinstance(self_check_result, str) and self_check_result.startswith("OK"):
         ok, full_msg = _full_gate(self_check_result, "Coder")
@@ -918,7 +1011,7 @@ def run_gen_agent(
 
         job_store.add_progress(job, "【Fixer】强制跑 run_self_check(fast_mode=True) 验证修复产物")
         self_check_result = tools.run_self_check(fast_mode=True, **_GEN_SELF_CHECK_ARGS)
-        job_store.add_progress(job, f"自检结果: {self_check_result[:500]}")
+        _log_self_check(job, self_check_result)
 
         if isinstance(self_check_result, str) and self_check_result.startswith("OK"):
             ok, full_msg = _full_gate(self_check_result, f"Fixer 第 {attempt} 轮")
@@ -927,51 +1020,54 @@ def run_gen_agent(
         if attempt >= max_fixer_attempts:
             job_store.add_progress(
                 job,
-                f"Fixer 用尽 {max_fixer_attempts} 轮，快速自检仍失败: {self_check_result[:500]}"
+                "Fixer 用尽 "
+                f"{max_fixer_attempts} 轮，快速自检仍失败:\n"
+                f"{tools.format_self_check_for_progress(self_check_result)}",
             )
             break
 
         job_store.add_progress(job, f"【Fixer】第 {attempt} 轮自检失败，进入下一轮修复")
 
-    # 若 Fixer 次数用尽或结构性错误，进入一次 Coder Rewrite
+    # 若 Fixer 次数用尽或结构性错误，进入一次 Coder Rewrite（必须以 full 收工）
     if _needs_coder_rewrite(self_check_result, max_fixer_attempts, max_fixer_attempts):
-        job_store.add_progress(job, "【Coder Rewrite】骨架重写：按失败摘要重新设计 gen/validator")
-        rewrite_task = build_coder_rewrite_task(
-            stmt_plain, range_plain, range_json or {},
-            self_check_result,
-            f"Coder 摘要: {coder_summary}\nFixer 摘要: {fixer_summary}",
-        )
-        rewrite_summary = agent_run(
-            rewrite_task,
-            max_steps=12,
-            verbose=False,
-            on_event=on_event,
-            system_prompt=prompts.build_coder_rewrite_prompt(typ),
-            tool_schemas=CODER_TOOL_SCHEMAS,
-            write_check_discipline=True,
-            self_check_fast=True,
-            self_check_args=_GEN_SELF_CHECK_ARGS,
-        )
-        job_store.add_progress(job, f"Coder Rewrite 结束: {rewrite_summary}")
+        _run_coder_rewrite(self_check_result, "Coder Rewrite")
 
-        job_store.add_progress(job, "【Coder Rewrite】强制跑 run_self_check(fast_mode=True) 验证重写产物")
+        # TIMEOUT 类：不要只靠 fast 收工；其余也优先进 full_gate
+        job_store.add_progress(
+            job, "【Coder Rewrite】强制跑 run_self_check(fast_mode=True) 做冒烟"
+        )
         self_check_result = tools.run_self_check(fast_mode=True, **_GEN_SELF_CHECK_ARGS)
-        job_store.add_progress(job, f"自检结果: {self_check_result[:500]}")
+        _log_self_check(job, self_check_result)
 
         if isinstance(self_check_result, str) and self_check_result.startswith("OK"):
             ok, full_msg = _full_gate(self_check_result, "Coder Rewrite")
             return full_msg, typ
 
-        # Rewrite 仍失败：回退 .fixer_bak 基线
+        # fast 仍失败但若是 TIMEOUT 残留线索：仍尝试 full_gate 无意义；回退
+        # 若 fast 失败但是 TIMEOUT 场景下 rewrite 可能修了大档——仍强制再跑一次 full
+        if _is_timeout_or_memory_fail(self_check_result):
+            job_store.add_progress(
+                job,
+                "【TIMEOUT/MEMORY】Rewrite 后 fast 仍失败，仍强制完整自检验收",
+            )
+            ok, full_msg = _full_gate(self_check_result, "Coder Rewrite")
+            return full_msg, typ
+
         restore_good_snapshot(job_dir, suffix=".fixer_bak")
-        final_summary = f"Coder Rewrite 后快速自检仍失败: {self_check_result[:500]}"
+        final_summary = (
+            "Coder Rewrite 后快速自检仍失败:\n"
+            f"{tools.format_self_check_for_progress(self_check_result)}"
+        )
         job_store.add_progress(job, final_summary)
         job_store.add_progress(job, f"Agent 结束: {final_summary}")
         return final_summary, typ
 
     # 未触发重写（理论上不会到这里，但兜底）
     restore_good_snapshot(job_dir, suffix=".fixer_bak")
-    final_summary = f"Coder + Fixer 用尽 {max_fixer_attempts} 轮，快速自检仍失败: {self_check_result[:500]}"
+    final_summary = (
+        f"Coder + Fixer 用尽 {max_fixer_attempts} 轮，快速自检仍失败:\n"
+        f"{tools.format_self_check_for_progress(self_check_result)}"
+    )
     job_store.add_progress(job, final_summary)
     job_store.add_progress(job, f"Agent 结束: {final_summary}")
     return final_summary, typ

@@ -145,7 +145,9 @@ def build_gen_fixer_task(
         "【目标】当前工作目录已有 gen.cpp / validator.cpp，但强化自检未通过。"
         "请根据失败日志修复，使 run_self_check() 返回 OK。\n"
         "【约束】只修改 gen.cpp / validator.cpp；禁止修改 gen_special.cpp、range.json、checker.cpp、标程；"
-        "write_gen / write_validate 必须传完整源码；禁止把 __OMITTED_SOURCE__ 写回。"
+        "write_gen / write_validate 必须传【完整 content】（从 #include 到 main 结尾 }）；"
+        "禁止空调用、半截、__OMITTED_SOURCE__；宜短而全，避免 JSON 截断。"
+        "修复时仍须对照题面+标程+range 上下文。"
         "特殊样例由后续 SpecialCoder 处理，本阶段忽略 special_samples。",
         f"\n【题面摘要】\n{stmt_brief}",
         f"\n【数据范围摘要】\n{range_brief}",
@@ -155,7 +157,8 @@ def build_gen_fixer_task(
         "1. 先 read_file(\"gen.cpp\") 和 read_file(\"validator.cpp\") 查看当前源码。\n"
         "2. 根据失败类型判断根因：gen TIMEOUT/MEMORY → 优化算法；validate FAILED → 优先修 gen；"
         "std FAILED → 对齐格式/降低规模。\n"
-        "3. 用 write_gen / write_validate 写完整修复后源码，编译失败时继续修正。\n"
+        "3. 用 write_gen / write_validate 写完整修复后源码，编译失败时继续修正。"
+        "TIMEOUT 时按 gen_plan 有效状态预算降密度（满规模≠满状态）。\n"
         "4. 调用 run_self_check() 验证；通过后调 finish(summary) 说明改动点与根因。\n"
         f"这是第 {attempt}/{max_attempts} 轮自动修复；若本轮仍失败，将回退基线并中止本阶段。",
     ]
@@ -183,8 +186,9 @@ def build_coder_rewrite_task(
     parts = [
         "【角色】Coder Rewrite\n"
         "【目标】当前 gen.cpp / validator.cpp 骨架存在结构性问题，Fixer 无法收敛，需按 gen_plan.md 重新写出完整新版。\n"
-        "【约束】按 plan 重新设计骨架，不要局部补丁；write_gen / write_validate 必须完整源码；"
-        "禁止把 __OMITTED_SOURCE__ 写回；禁止修改 range.json / 标程 / gen_special.cpp。"
+        "【约束】按 plan 重新设计骨架，不要局部补丁；"
+        "write_gen / write_validate 必须传【完整 content】，宜短而全，禁止截断/空调用/__OMITTED_SOURCE__；"
+        "重写须带上题面+标程+range 全部上下文；禁止修改 range.json / 标程 / gen_special.cpp。"
         "特殊样例由后续 SpecialCoder 处理。",
         f"\n【题面摘要】\n{stmt_brief}",
         f"\n【数据范围摘要】\n{range_brief}",
@@ -199,9 +203,10 @@ def build_coder_rewrite_task(
         "\n动作：\n"
         "1. 先 read_file(\"gen_plan.md\") 一次（range.json 已在 task 中，不必再读）。\n"
         "2. 再 read_file 当前 gen.cpp / validator.cpp 了解失败实现。\n"
-        "3. 按 plan 重写完整 gen.cpp / validator.cpp，可一次 write_gen + write_validate 同时写。\n"
-        "4. 立即调用 run_self_check()；通过则 finish，否则说明未解决问题。\n"
-        "这是骨架重写，只给一次机会；请尽量写对。",
+        "3. 按 plan 重写完整 gen.cpp / validator.cpp，可一次 write_gen + write_validate 同时写；"
+        "遵守有效状态预算（满规模≠满状态）。\n"
+        "4. 立即调用 run_self_check()；通过则 finish。外层会对 TIMEOUT 再强制完整自检，tiny/fast 通过不算交付。\n"
+        "这是骨架重写；请按 FAIL 行（尤其 TIMEOUT 的 type/index）写对。",
     ]
     return "\n".join(parts)
 

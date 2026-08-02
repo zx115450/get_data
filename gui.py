@@ -38,6 +38,162 @@ PROBLEM_TYPES = [
 LANGS = ["python", "cpp"]
 BUILTIN_CHECKER_OPTIONS = ["无", "lcmp", "wcmp", "rcmp4", "rcmp6", "rcmp9", "yesno"]
 
+# 边界类型：界面展示中文；提交仍用英文 id。方案过多时默认保留约 5 个。
+EDGE_CASE_UI_LIMIT = 5
+EDGE_CASE_LABELS = {
+    "edge_T1": "多测 T=1",
+    "edge_Tmax": "多测 T 最大",
+    "edge_t1": "多测 T=1",
+    "edge_tmax": "多测 T 最大",
+    "edge_n1": "n 最小（通常=1）",
+    "edge_n2": "n=2",
+    "edge_nmax": "n 最大",
+    "edge_n_min": "n 最小",
+    "edge_n_max": "n 最大",
+    "edge_m0": "边数/规模为 0",
+    "edge_m1": "边数/规模为 1",
+    "edge_m_min": "边数最小",
+    "edge_m_max": "边数最大",
+    "edge_mmax": "边数最大",
+    "edge_all_eulerian_cycle": "欧拉回路（全偶度连通）",
+    "edge_all_eulerian_path": "欧拉通路（恰 2 奇度）",
+    "edge_connected": "连通图",
+    "edge_disconnected": "不连通图",
+    "edge_two_odd_degree": "恰 2 个奇度点",
+    "edge_four_odd_degree": "恰 4 个奇度点",
+    "edge_single_node_loop": "单点自环",
+    "edge_color_reuse": "少量颜色大量复用",
+    "edge_long_words": "最长颜色名",
+    "edge_same_color_both_ends": "两端同色木棍",
+    "disconnected": "不连通",
+    "random_sparse": "稀疏随机图",
+    "connected": "连通",
+    "connected_tree": "树（连通 n-1 边）",
+    "chain": "链状",
+    "star": "菊花/星形",
+    "all_equal": "全相等",
+    "descending": "严格递减",
+    "all_negative": "全负",
+    "all_max_value": "全取最大值",
+    "two_values": "仅两种取值",
+    "big_T_small_n": "大 T + 小 n",
+    "small_T_big_n": "小 T + 大 n",
+    "single_max_case": "单组最大规模",
+    "sum_full": "sum 顶满",
+    "edge_W1": "容量/权值最小",
+    "edge_Wmax": "容量/权值最大",
+    "all_heavy": "全重物",
+    "all_light": "全轻物",
+    "edge_11": "1×1",
+    "row": "单行",
+    "col": "单列",
+    "all_zero": "全零",
+    "all_max": "全最大",
+    "q1": "查询数=1",
+    "qmax": "查询数最大",
+    "point_queries": "点查询",
+    "full_range": "整段查询",
+    "all_same": "全相同字符",
+    "pattern_at_start": "模式在开头",
+    "pattern_at_end": "模式在结尾",
+    "no_match": "无匹配",
+    "long_run": "长连续段",
+    "two_chars": "仅两种字符",
+    "all_prime": "全素数",
+    "coprime_pair": "互质对",
+    "all_even": "全偶数",
+    "include_one": "含 1",
+    "convex_hull": "凸包",
+    "simple_polygon": "简单多边形",
+    "random_points": "随机点集",
+    "collinear": "共线",
+    "same_x": "同 x 坐标",
+    "negative_cycle_reachable": "可达负环",
+    "negative_cycle_unreachable": "不可达负环",
+    "no_negative_cycle": "无负环",
+    "dag_acyclic": "DAG 无环",
+    "bipartite": "二分图",
+}
+
+
+def _edge_case_zh(edge_id: str) -> str:
+    """英文边界 id → 中文说明；未知则按关键词猜一句。"""
+    e = (edge_id or "").strip()
+    if not e:
+        return ""
+    if e in EDGE_CASE_LABELS:
+        return EDGE_CASE_LABELS[e]
+    low = e.lower()
+    rules = (
+        ("eulerian_cycle", "欧拉回路"),
+        ("eulerian_path", "欧拉通路"),
+        ("disconnected", "不连通"),
+        ("connected", "连通"),
+        ("negative_cycle", "负环相关"),
+        ("hamilton", "哈密顿"),
+        ("bipartite", "二分图"),
+        ("dag", "有向无环"),
+        ("sparse", "稀疏"),
+        ("dense", "稠密"),
+        ("complete", "完全图"),
+        ("chain", "链"),
+        ("star", "星/菊花"),
+        ("tmax", "T 最大"),
+        ("t1", "T=1"),
+        ("mmax", "边数最大"),
+        ("m0", "边数/规模为 0"),
+        ("m1", "边数/规模为 1"),
+        ("nmax", "n 最大"),
+        ("n1", "n=1"),
+        ("n2", "n=2"),
+        ("long", "长串/大规模"),
+        ("odd", "奇度相关"),
+        ("loop", "自环"),
+        ("reuse", "复用"),
+    )
+    for key, zh in rules:
+        if key in low:
+            return zh
+    return e.replace("_", " ")
+
+
+def _trim_edge_cases(edges: list, limit: int = EDGE_CASE_UI_LIMIT) -> list[str]:
+    """保留约 limit 个边界：优先最小/最大规模与结构边界，保序。"""
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for e in edges or []:
+        if not isinstance(e, str):
+            continue
+        name = e.strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        cleaned.append(name)
+    if len(cleaned) <= limit:
+        return cleaned
+
+    def _score(name: str) -> int:
+        low = name.lower()
+        s = 0
+        if any(k in low for k in ("m0", "n1", "n2", "empty", "min", "_1")):
+            s += 100
+        if any(k in low for k in ("mmax", "nmax", "tmax", "max")):
+            s += 90
+        if any(k in low for k in ("euler", "cycle", "path", "dag", "hamilton")):
+            s += 75
+        if any(k in low for k in ("disconnect", "connect", "bipartite")):
+            s += 65
+        if any(k in low for k in ("odd", "loop", "sparse", "dense")):
+            s += 55
+        if any(k in low for k in ("t1", "tmax", "sum")):
+            s += 40
+        return s
+
+    ranked = sorted(enumerate(cleaned), key=lambda iv: (-_score(iv[1]), iv[0]))
+    keep_idx = {i for i, _ in ranked[:limit]}
+    return [e for i, e in enumerate(cleaned) if i in keep_idx]
+
+
 # 使用 ttkbootstrap 主题，可选：darkly / flatly / litera / minty / pulse / superhero 等
 _DEFAULT_THEME = os.getenv("GUI_THEME", "flatly")
 
@@ -224,8 +380,8 @@ class App:
         self.builtin_checker = tk.StringVar(value="无")
         self.count_var = tk.StringVar(value="")  # 常规样例数（不含特殊样例）
         self.special_count_var = tk.StringVar(value="1")  # 每方案样例数（默认 1 组即可）
-        self.time_limit_var = tk.StringVar(value="")  # time_limit_ms
-        self.memory_limit_var = tk.StringVar(value="")  # memory_limit_mb
+        self.time_limit_var = tk.StringVar(value="5000")  # time_limit_ms，默认 5s
+        self.memory_limit_var = tk.StringVar(value="1024")  # memory_limit_mb，默认 1024MB
         self.special_desc_var = tk.StringVar(value="")
         self.auto_discover_special_var = tk.BooleanVar(value=False)  # 无提示时自动挖特殊方案
         self.special_schemes: list[dict] = []  # Range 阶段挖出的特殊方案（含 selected）
@@ -724,8 +880,31 @@ class App:
 
         edge_frm = ttk.Labelframe(panes, text="边界类型 edge_cases", padding=4)
         panes.add(edge_frm, weight=1)
-        self.edge_list = ttk.Treeview(edge_frm, height=4, show="tree", bootstyle="info")
+        edge_ops = ttk.Frame(edge_frm)
+        edge_ops.pack(fill="x", padx=2, pady=(0, 2))
+        ttk.Button(
+            edge_ops, text="删除选中", bootstyle="danger-outline", width=10,
+            command=self._delete_selected_edge,
+        ).pack(side="left")
+        ttk.Label(
+            edge_ops,
+            text="中文说明 · 建议约 5 个 · Delete 可删",
+            bootstyle="secondary",
+        ).pack(side="left", padx=8)
+        self.edge_list = ttk.Treeview(
+            edge_frm,
+            columns=("zh", "id"),
+            show="headings",
+            height=5,
+            bootstyle="info",
+        )
+        self.edge_list.heading("zh", text="说明")
+        self.edge_list.heading("id", text="标识")
+        self.edge_list.column("zh", width=180, stretch=True)
+        self.edge_list.column("id", width=140, stretch=True)
         self.edge_list.pack(fill="both", expand=True, padx=2, pady=2)
+        self.edge_list.bind("<Delete>", lambda _e: self._delete_selected_edge())
+        self.edge_list.bind("<BackSpace>", lambda _e: self._delete_selected_edge())
 
         self._plan_sash_inited = False
 
@@ -1967,17 +2146,71 @@ class App:
         self.special_schemes = []
         self.count_var.set("")
         self.special_count_var.set("1")
-        self.time_limit_var.set("")
-        self.memory_limit_var.set("")
+        self.time_limit_var.set("5000")
+        self.memory_limit_var.set("1024")
         self._set_special_desc("")
         self.auto_discover_special_var.set(False)
         for i in self.cons_tree.get_children():
             self.cons_tree.delete(i)
-        for i in self.edge_list.get_children():
-            self.edge_list.delete(i)
+        self._clear_edge_list_ui()
         self._refresh_scheme_tree()
         self.plan_status.set("尚未生成方案 — 提交时将从「写 range」开始")
         self._update_total_count_label()
+
+    def _clear_edge_list_ui(self):
+        for i in self.edge_list.get_children():
+            self.edge_list.delete(i)
+
+    def _refresh_edge_list_ui(self, edges: list | None = None):
+        """把 edge_cases 刷到界面（中文说明 + 英文 id）。"""
+        self._clear_edge_list_ui()
+        src = edges
+        if src is None and isinstance(self.range_data, dict):
+            src = self.range_data.get("edge_cases") or []
+        for e in src or []:
+            if not isinstance(e, str) or not e.strip():
+                continue
+            eid = e.strip()
+            # Treeview iid 不能有空格等；边界名一般是标识符
+            iid = eid.replace(" ", "_")
+            try:
+                self.edge_list.insert(
+                    "", "end", iid=iid, values=(_edge_case_zh(eid), eid),
+                )
+            except tk.TclError:
+                # iid 冲突时跳过重复
+                continue
+
+    def _collect_edges_from_ui(self) -> list[str]:
+        """从界面读回英文 edge id 列表。"""
+        out: list[str] = []
+        for item in self.edge_list.get_children():
+            vals = self.edge_list.item(item, "values") or ()
+            eid = ""
+            if len(vals) >= 2 and str(vals[1]).strip():
+                eid = str(vals[1]).strip()
+            elif item:
+                eid = str(item).strip()
+            if eid and eid not in out:
+                out.append(eid)
+        return out
+
+    def _delete_selected_edge(self):
+        """删除选中的边界类型（可多选）。"""
+        sel = list(self.edge_list.selection() or ())
+        if not sel:
+            messagebox.showinfo("提示", "请先选中要删除的边界类型")
+            return
+        for item in sel:
+            try:
+                self.edge_list.delete(item)
+            except tk.TclError:
+                pass
+        edges = self._collect_edges_from_ui()
+        if isinstance(self.range_data, dict):
+            self.range_data["edge_cases"] = edges
+        n = len(edges)
+        self.plan_status.set(f"已更新边界类型：当前 {n} 种（提交将使用界面列表）")
 
     @staticmethod
     def _parse_positive_int(raw: str):
@@ -1995,6 +2228,11 @@ class App:
 
         count 在 range.json 中代表总样例数；UI 的 count_entry 代表常规样例数。
         """
+        try:
+            from pipeline.gen_data import normalize_range_json
+            data = normalize_range_json(dict(data or {}))
+        except Exception:
+            data = dict(data or {})
         ptype = (problem_type or data.get("problem_type") or "").strip()
         total_count = int(data.get("count") or 15)
         special_count = int(data.get("special_samples_count") or 0)
@@ -2037,25 +2275,25 @@ class App:
             else:
                 regular_count = max(0, total_count - special_count)
 
-        time_limit = self._parse_positive_int(str(data.get("time_limit_ms") or ""))
-        memory_limit = self._parse_positive_int(str(data.get("memory_limit_mb") or ""))
+        time_limit = self._parse_positive_int(str(data.get("time_limit_ms") or "")) or 5000
+        memory_limit = self._parse_positive_int(str(data.get("memory_limit_mb") or "")) or 1024
         special_constraints = [
             str(x).strip() for x in (data.get("special_constraints") or []) if str(x).strip()
         ]
+        raw_edges = list(data.get("edge_cases") or [])
+        edges = _trim_edge_cases(raw_edges, EDGE_CASE_UI_LIMIT)
         self.range_data = {
             "count": regular_count + special_count,
             "constraints": dict(data.get("constraints") or {}),
-            "edge_cases": list(data.get("edge_cases") or []),
+            "edge_cases": edges,
             "special_samples_count": special_count,
             "special_samples_desc": special_desc_for_box or special_desc,
             "special_schemes": self.special_schemes,
             "auto_discover_special": bool(data.get("auto_discover_special")),
             "special_constraints": special_constraints,
+            "time_limit_ms": time_limit,
+            "memory_limit_mb": memory_limit,
         }
-        if time_limit is not None:
-            self.range_data["time_limit_ms"] = time_limit
-        if memory_limit is not None:
-            self.range_data["memory_limit_mb"] = memory_limit
         if "auto_discover_special" in data:
             self.auto_discover_special_var.set(bool(data.get("auto_discover_special")))
         if ptype:
@@ -2063,18 +2301,15 @@ class App:
             if ptype in PROBLEM_TYPES:
                 self.ptype.set(ptype)
         self.count_var.set(str(regular_count))
-        self.time_limit_var.set("" if time_limit is None else str(time_limit))
-        self.memory_limit_var.set("" if memory_limit is None else str(memory_limit))
+        self.time_limit_var.set(str(time_limit))
+        self.memory_limit_var.set(str(memory_limit))
         self._set_special_desc(special_desc_for_box)
         for i in self.cons_tree.get_children():
             self.cons_tree.delete(i)
         for name, bounds in self.range_data["constraints"].items():
             lo, hi = bounds[0], bounds[1] if isinstance(bounds, (list, tuple)) and len(bounds) >= 2 else ("?", "?")
             self.cons_tree.insert("", "end", values=(name, lo, hi))
-        for i in self.edge_list.get_children():
-            self.edge_list.delete(i)
-        for e in self.range_data["edge_cases"]:
-            self.edge_list.insert("", "end", text=f"  •  {e}")
+        self._refresh_edge_list_ui(self.range_data["edge_cases"])
         self._refresh_scheme_tree()
         self._update_total_count_label()
         type_s = f" · 题型 {ptype}" if ptype else ""
@@ -2087,16 +2322,14 @@ class App:
             if special or self.special_schemes
             else ""
         )
-        limit_parts = []
-        if time_limit is not None:
-            limit_parts.append(f"时限 {time_limit}ms")
-        if memory_limit is not None:
-            limit_parts.append(f"内存 {memory_limit}MB")
-        limit_s = (" · " + " · ".join(limit_parts)) if limit_parts else ""
+        limit_s = f" · 时限 {time_limit}ms · 内存 {memory_limit}MB"
+        trim_note = ""
+        if len(raw_edges) > len(edges):
+            trim_note = f"（已从 {len(raw_edges)} 精简为 {len(edges)}，可再删）"
         self.plan_status.set(
             f"已就绪：总 {total} 组{special_s}{limit_s} · "
             f"{len(self.range_data['constraints'])} 个变量 · "
-            f"{len(self.range_data['edge_cases'])} 种边界{type_s} — 提交将跳过写 range"
+            f"{len(self.range_data['edge_cases'])} 种边界{trim_note}{type_s} — 提交将跳过写 range"
         )
 
     def collect_range_from_ui(self):
@@ -2127,29 +2360,19 @@ class App:
                 cons[str(name)] = [int(lo), int(hi)]
             except (TypeError, ValueError):
                 continue
-        edges = []
-        for item in self.edge_list.get_children():
-            t = self.edge_list.item(item, "text").strip().lstrip("•").strip()
-            if t:
-                edges.append(t)
+        edges = self._collect_edges_from_ui()
         total_count = regular_count + special_count
         if total_count <= 0 or not cons:
             return None
         out = {"count": total_count, "constraints": cons, "edge_cases": edges}
         time_limit = self._parse_positive_int(self.time_limit_var.get())
         memory_limit = self._parse_positive_int(self.memory_limit_var.get())
-        if time_limit is not None:
-            out["time_limit_ms"] = time_limit
-        elif isinstance(self.range_data, dict):
-            tl = self._parse_positive_int(str(self.range_data.get("time_limit_ms") or ""))
-            if tl is not None:
-                out["time_limit_ms"] = tl
-        if memory_limit is not None:
-            out["memory_limit_mb"] = memory_limit
-        elif isinstance(self.range_data, dict):
-            ml = self._parse_positive_int(str(self.range_data.get("memory_limit_mb") or ""))
-            if ml is not None:
-                out["memory_limit_mb"] = ml
+        if time_limit is None and isinstance(self.range_data, dict):
+            time_limit = self._parse_positive_int(str(self.range_data.get("time_limit_ms") or ""))
+        if memory_limit is None and isinstance(self.range_data, dict):
+            memory_limit = self._parse_positive_int(str(self.range_data.get("memory_limit_mb") or ""))
+        out["time_limit_ms"] = time_limit if time_limit is not None else 5000
+        out["memory_limit_mb"] = memory_limit if memory_limit is not None else 1024
         if isinstance(self.range_data, dict):
             sc = [
                 str(x).strip()
@@ -2173,6 +2396,12 @@ class App:
             out["problem_type"] = ptype
         elif isinstance(self.range_data, dict) and self.range_data.get("problem_type"):
             out["problem_type"] = self.range_data["problem_type"]
+        # 无多测 T 时剔除 edge_T1 等；与服务端 normalize 对齐
+        try:
+            from pipeline.gen_data import normalize_range_json
+            out = normalize_range_json(dict(out))
+        except Exception:
+            pass
         return out
 
     def on_propose_range(self):

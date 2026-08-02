@@ -413,7 +413,7 @@ def run(
                 )
             return "已写出 range.json（write_range 成功后自动结束）"
 
-        # write_* 缺 content / 参数截断：立刻强提醒，避免空转 TypeError
+        # write_* 缺 content / 参数截断 / 截断恢复：立刻强提醒，避免空转
         missing_content = any(
             act.name in _WRITE_CODE_TOOLS
             and isinstance(results[i], str)
@@ -422,15 +422,20 @@ def run(
                 or "参数不完整" in results[i]
                 or "参数疑似截断" in results[i]
                 or "JSON 解析失败" in results[i]
+                or "来自截断 JSON 恢复" in results[i]
             )
             for i, act in enumerate(actions)
         )
         if missing_content:
             follow = (
-                "【硬错误】上一轮 write_* 没有带上完整 content（空参数或 JSON 被截断）。"
-                "下一轮必须重新调用同一个 write_*，arguments 只含完整源码字段 content；"
-                "若需旧版：先 read_file(\"gen.cpp\") 或对应文件，再整份写出。"
-                "禁止再次空调用 write_gen/write_validate；禁止提交 __OMITTED_SOURCE__。"
+                "【硬错误 · content 书写】上一轮 write_* 的 content 不完整"
+                "（空参数、工具 JSON 被截断、或 recovered 残缺源码）。"
+                "下一轮必须重新调用同一个 write_*，arguments 形如 "
+                '{"content":"#include ... 完整可编译源码到 main 结尾 }"}；'
+                "宜短而全，避免再次截断。"
+                "若磁盘已有旧版：先 read_file(\"gen.cpp\") / validator.cpp，再整份写出。"
+                "禁止再次空调用；禁止 __OMITTED_SOURCE__ /「其余不变」摘要。"
+                "同时对照题面+标程+range 写全 edge_cases 分支与 opt 参数。"
             )
             messages.append({"role": "user", "content": follow})
             if on_event:

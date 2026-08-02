@@ -717,6 +717,7 @@ def run_gen(seed: int, type: str = "random", index: int = -1, count: int = 15) -
     超时硬上限 5 秒。超时直接判定 gen 算法不达标（通常是 O(n^2) 枚举），
     返回明确的 TIMEOUT 错误，提示 Agent 重写 gen.cpp。
     若 range.json 含 memory_limit_mb，则同步限制生成器内存。
+    允许空 stdout（EOF 空输入合法时）；是否合法由 validator/标程判定。
     """
     if index < 0:
         index = seed
@@ -743,7 +744,9 @@ def run_gen(seed: int, type: str = "random", index: int = -1, count: int = 15) -
                 f"必要时调高 range.json 的 memory_limit_mb。"
             )
         return f"ERROR gen rc={rc}: {(err or '').strip()}"
-    return out if out else f"ERROR gen: empty output (stderr={(err or '').strip()})"
+    # 允许空 stdout：部分题（EOF 读入、m=0）合法输入就是空文件；
+    # 是否合法由后续 validator / 标程判定，不再在此一律 ERROR。
+    return out if out is not None else ""
 
 
 def run_validate(input_text: str) -> str:
@@ -834,7 +837,12 @@ def _triple_check(
             )
         return f"FAIL type={typ} seed={seed}: std rc={rc} {(err or '').strip()}", "", ""
     # rc==0 时允许空 stdout（合法 .out）；套件级再检查是否「全部」为空
-    inp = (gen_out or "").rstrip("\n") + "\n"
+    # 空输入：保留真正空文件（EOF），不要强行补换行，否则 edge_m0 等会失真
+    raw_in = gen_out if isinstance(gen_out, str) else ""
+    if not raw_in.strip():
+        inp = ""
+    else:
+        inp = raw_in.rstrip("\n") + "\n"
     raw = out or ""
     ans = raw if raw.endswith("\n") else (raw + "\n")
     msg = (
@@ -855,6 +863,68 @@ def _clear_out_pairs(out_dir: Path, count: int) -> None:
                     p.unlink()
                 except Exception:
                     pass
+
+
+def _persist_self_check_fail(text: str) -> None:
+    """把完整自检失败文本写入工作目录 self_check_last_fail.txt。"""
+    try:
+        (_wd() / "self_check_last_fail.txt").write_text(text or "", encoding="utf-8")
+    except Exception:
+        pass
+
+
+def format_self_check_for_progress(
+    text: str,
+    *,
+    ok_limit: int = 500,
+    fail_limit: int = 8000,
+) -> str:
+    """进度日志用：成功短预览；失败保留全部 FAIL/TIMEOUT 行，避免在数字中间截断。
+
+    完整正文已由 _persist_self_check_fail 落盘时，进度里仍尽量带齐 FAIL 行。
+    """
+    s = text or ""
+    if not s.startswith("ERROR") and "\nFAIL " not in ("\n" + s):
+        return s if len(s) <= ok_limit else s[:ok_limit] + "…"
+
+    lines = s.splitlines()
+    keep: list[str] = []
+    # 头几行（mode / constraints）
+    for ln in lines[:4]:
+        keep.append(ln)
+    for ln in lines[4:]:
+        u = ln.upper()
+        if (
+            ln.startswith("FAIL")
+            or ln.startswith("ERROR")
+            or "TIMEOUT" in u
+            or "MEMORY_LIMIT" in u
+            or "STACK_OVERFLOW" in u
+            or ln.startswith("请根据 FAIL")
+            or "【TIMEOUT" in ln
+            or "有效状态预算" in ln
+        ):
+            keep.append(ln)
+    # 若没抓到 FAIL（异常格式），退回全文前 fail_limit
+    body = "\n".join(keep) if any(x.startswith("FAIL") for x in keep) else s
+    if len(body) <= fail_limit:
+        return body
+    # 超长时保头+全部 FAIL 行，必要时再截但按整行
+    out_lines: list[str] = []
+    n = 0
+    for ln in body.splitlines():
+        add = len(ln) + 1
+        if out_lines and n + add > fail_limit and ln.startswith("FAIL"):
+            # FAIL 行优先保留：丢掉较早的非 FAIL 头以外行
+            while out_lines and n + add > fail_limit and not out_lines[-1].startswith("FAIL"):
+                dropped = out_lines.pop()
+                n -= len(dropped) + 1
+        if n + add > fail_limit:
+            out_lines.append(f"…(进度摘要截断，完整见 self_check_last_fail.txt，共 {len(s)} 字)")
+            break
+        out_lines.append(ln)
+        n += add
+    return "\n".join(out_lines)
 
 
 def run_self_check(
@@ -1047,30 +1117,47 @@ def run_self_check(
             continue
         if (ans or "").strip():
             nonempty_out += 1
-        if slot is not None and inp:
+        # 成功即落盘（含空 .in：允许空输入题）
+        if slot is not None:
             out_dir.mkdir(parents=True, exist_ok=True)
-            (out_dir / f"{slot}.in").write_text(inp, encoding="utf-8")
+            (out_dir / f"{slot}.in").write_text(inp if inp is not None else "", encoding="utf-8")
             (out_dir / f"{slot}.out").write_text(ans if ans is not None else "", encoding="utf-8")
             written += 1
 
     if fails:
-        fix_hint = (
-            "请根据 FAIL 修复 gen_special.cpp 后重新 write_special_gen 再 run_self_check。"
-            if special_only
-            else "请根据 FAIL 修复 gen/validator 后重新 write_* 再 run_self_check。"
+        timeoutish = any(
+            ("TIMEOUT" in f) or ("MEMORY_LIMIT" in f) for f in fails
         )
-        return (
+        if special_only:
+            fix_hint = (
+                "请根据 FAIL 修复 gen_special.cpp 后重新 write_special_gen 再 run_self_check。"
+            )
+        elif timeoutish:
+            fix_hint = (
+                "请根据 FAIL 修复 gen/validator 后重新 write_* 再 run_self_check。"
+                "【TIMEOUT/MEMORY】优先对照 gen_plan「有效状态预算」降低该 type 在最大档的状态密度"
+                "（唯一顶点/字符串/权值种类等）；满 constraints 上界 ≠ 状态数拉满；勿只靠加时限/内存。"
+            )
+        else:
+            fix_hint = (
+                "请根据 FAIL 修复 gen/validator 后重新 write_* 再 run_self_check。"
+            )
+        result = (
             "ERROR: self_check failed\n"
             + "\n".join(lines)
             + "\n" + fix_hint
         )
+        _persist_self_check_fail(result)
+        return result
     if nonempty_out == 0:
-        return (
+        result = (
             "ERROR: self_check failed: 全部测例 stdout 为空"
             "（标程可能未输出，或 gen 从未生成查询类操作）\n"
             + "\n".join(lines)
             + "\n请保证至少部分测例含会触发输出的操作/查询，或检查标程是否写了输出。"
         )
+        _persist_self_check_fail(result)
+        return result
     if not fast_mode and not tiny_mode:
         lines.append(f"persisted {written}/{count} pairs to out/ for batch reuse")
     return "OK: self_check passed\n" + "\n".join(lines)
@@ -1444,17 +1531,20 @@ TOOL_SCHEMAS = [
     _schema(
         "write_gen",
         "把【完整】生成器 C++ 源码写到工作目录 gen.cpp 并 g++ 编译。"
-        "必填 content=完整源码字符串；禁止空调用、禁止省略 content。"
+        "【content 硬约束】arguments 必须含 content=从 #include 到 main 结尾 } 的完整源码；"
+        "禁止空调用、省略 content、半截文件、__OMITTED_SOURCE__；宜短而全，避免 JSON 截断（recovered/missing_content）。"
         "树/图/几何题优先 #include \"generator.h\" + using namespace generator::all；"
         "树/图必须先 t.gen()，再 cout << t，或 for (auto &e : t.edges())；"
         "get_edges() / Tree::shuffle() / 访问 _edges 不存在，写错会编译失败。"
         "仍须 registerGen + --seed/--type/--index/--count。random 分支必须用 --index/--count 分层取规模。"
-        "禁止 std::shuffle(...,rnd)；禁止枚举 O(n^2) 边池。",
+        "禁止 std::shuffle(...,rnd)；禁止枚举 O(n^2) 边池。"
+        "实现须对照题面+标程+range（多测 T、edge_cases 分支、约束变量全部 opt）。",
         {
             "content": {
                 "type": "string",
                 "description": (
-                    "【必填】完整 gen.cpp 源码全文，不能为空、不能是摘要。"
+                    "【必填·完整上下文】完整 gen.cpp 源码全文（含全部函数与 main 结尾 }），"
+                    "不能为空、不能截断、不能是摘要。宜短而全。"
                     "树/图：t.gen(); cout << t 或 t.edges()；禁止 get_edges/shuffle。"
                 ),
             }
@@ -1533,15 +1623,15 @@ TOOL_SCHEMAS = [
     _schema(
         "write_validate",
         "把【完整】校验器 C++ 源码写到工作目录 validator.cpp 并 g++ 编译。"
-        "content 必须是完整源码，禁止摘要。建议 registerValidation + readEof。"
-        "结构性质可用 ensuref 校验；若只有范围/格式约束，也可不加 ensuref，"
-        "以编译通过、运行 validate 不报错为准。",
+        "【content 硬约束】必须传完整源码字符串；禁止空调用、半截、摘要；宜短而全，避免工具参数截断。"
+        "读入顺序须与标程一致。建议 registerValidation + readEof。"
+        "结构性质可用 ensuref；仅范围/格式也可不加 ensuref；以编译/运行通过为准。",
         {
             "content": {
                 "type": "string",
                 "description": (
-                    "完整 validator.cpp。"
-                    "需 registerValidation + readEof；"
+                    "【必填·完整上下文】完整 validator.cpp 全文（含 main 结尾 }），"
+                    "不能为空/截断/摘要。需 registerValidation + readEof；"
                     "有结构约束时加 ensuref，否则按范围/格式校验即可。"
                 ),
             }
@@ -1702,16 +1792,17 @@ def normalize_tool_args(name: str, args: dict | None) -> tuple[dict, str | None]
             raw.pop(key, None)
         hint = (
             f"ERROR: {name} 缺少必填参数 content（完整源码/正文）。"
-            "禁止空调用；禁止只传函数名。"
-            "请立即重新调用，arguments 形如 "
-            '{"content":"#include ... 完整源码 ..."}。'
+            "这是 content 书写错误：禁止空调用、禁止只传函数名、禁止省略 content。"
+            "请立即重新调用，arguments 只能是 "
+            '{"content":"#include ... 从首行到 main 结尾 } 的完整源码"}。'
+            "宜短而全，避免再次被 JSON 截断。"
             "若上一版已在磁盘，先 read_file 读出再整份 write；"
             "禁止把 __OMITTED_SOURCE__ 摘要写回。"
         )
         if parse_failed:
             hint += (
-                f" 另：工具参数 JSON 解析失败（可能被截断），预览={raw_preview!r}。"
-                "请重新提交完整 content（一次写全，勿截断）。"
+                f" 另：工具参数 JSON 解析失败（常见于 content 过长被截断），预览={raw_preview!r}。"
+                "请缩短实现后重新提交【完整】content（一次写全，勿半截）。"
             )
         if name == "write_file" and not raw.get("path"):
             hint += " write_file 还需要 path。"
@@ -1736,11 +1827,12 @@ def dispatch(name: str, args: dict) -> str:
     fn = FUNCTIONS.get(name)
     if fn is None:
         return f"ERROR: unknown tool {name!r}"
+    recovered = bool((args or {}).get("_args_recovered"))
     clean, err = normalize_tool_args(name, args)
     if err:
         return err
     try:
-        return str(fn(**clean))
+        result = str(fn(**clean))
     except TypeError as e:
         msg = str(e)
         if "content" in msg or "required positional" in msg:
@@ -1752,3 +1844,13 @@ def dispatch(name: str, args: dict) -> str:
         return f"ERROR: bad args for {name}: {e}"
     except Exception as e:
         return f"ERROR: {name} raised {type(e).__name__}: {e}"
+    # 截断恢复出的正文常不完整：即使编译碰巧过，也强制提醒整份重写 content
+    if recovered and name in _WRITE_CONTENT_TOOLS:
+        clen = len(str(clean.get("content") or ""))
+        warn = (
+            f"\nWARN: {name} 的 content 来自截断 JSON 恢复（约 {clen} chars），"
+            "很可能不完整。请立即用【完整】content 重新调用同一 write_*（宜短而全），"
+            "禁止空调用；对照题面+标程+range 写全上下文。"
+        )
+        result = result + warn
+    return result

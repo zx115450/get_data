@@ -61,7 +61,7 @@ def validate_range_json(rj) -> list:
       - edge_cases: 字符串列表（每个是 gen.py --type 能接受的取值）
     可选字段：
       - std_cmd（后端会强制注入）
-      - time_limit_ms、memory_limit_mb（正整数；缺省表示不限制内存）
+      - time_limit_ms、memory_limit_mb（正整数；缺省由 normalize 补为 5000 / 1024）
       - special_constraints: 字符串列表，题面里提取出的特殊结构约束
         （如 "图是 DAG"、"图必须存在哈密顿路径"）。缺省视为 []。
     """
@@ -131,10 +131,35 @@ def validate_range_json(rj) -> list:
     return errs
 
 
+# 仅在多测（constraints 含 T/t）时才有意义的边界名；无 T 时 normalize 会剔除
+_MULTI_T_ONLY_EDGES = frozenset({
+    "edge_T1", "edge_Tmax", "edge_t1", "edge_tmax",
+    "edge_T_min", "edge_T_max", "edge_t_min", "edge_t_max",
+    "big_T_small_n", "small_T_big_n", "max_tests", "min_tests",
+})
+
+
+def _constraints_have_multi_t(constraints) -> bool:
+    """constraints 是否声明多测组数 T/t。"""
+    if not isinstance(constraints, dict):
+        return False
+    for k in constraints:
+        if str(k).strip().lower() == "t":
+            return True
+    return False
+
+
+# 未写时限/内存时的默认（与 GUI / Range 提示一致）
+DEFAULT_TIME_LIMIT_MS = 5000
+DEFAULT_MEMORY_LIMIT_MB = 1024
+
+
 def normalize_range_json(rj: dict) -> dict:
     """清洗 range.json：去掉 edge_cases 里的 'random'（系统会自动补），去重保序；count 缺省补 15。
 
     若启用特殊样例（special_samples_desc 非空），确保 count 至少为 special_samples_count + 1。
+    无多测 T 时剔除 edge_T1 / edge_Tmax 等仅多测边界。
+    缺省补 time_limit_ms=5000、memory_limit_mb=1024。
     """
     if not isinstance(rj, dict):
         return rj
@@ -144,13 +169,33 @@ def normalize_range_json(rj: dict) -> dict:
     if isinstance(ec, list):
         seen = set()
         cleaned = []
+        drop_multi_t = not _constraints_have_multi_t(rj.get("constraints"))
         for e in ec:
             if not isinstance(e, str) or not e or e == "random" or e == "special_samples":
+                continue
+            if drop_multi_t and e in _MULTI_T_ONLY_EDGES:
                 continue
             if e not in seen:
                 seen.add(e)
                 cleaned.append(e)
         rj["edge_cases"] = cleaned
+
+    # 时限 / 内存：缺省或非法时用默认 5s / 1024MB
+    tl = rj.get("time_limit_ms")
+    try:
+        tl_i = int(tl) if tl is not None and not isinstance(tl, bool) else 0
+    except (TypeError, ValueError):
+        tl_i = 0
+    if tl_i <= 0:
+        rj["time_limit_ms"] = DEFAULT_TIME_LIMIT_MS
+
+    ml = rj.get("memory_limit_mb")
+    try:
+        ml_i = int(ml) if ml is not None and not isinstance(ml, bool) else 0
+    except (TypeError, ValueError):
+        ml_i = 0
+    if ml_i <= 0:
+        rj["memory_limit_mb"] = DEFAULT_MEMORY_LIMIT_MB
 
     # LLM 常写 "special_samples_desc": "" / null；有键却为空会过不了 validate，直接删掉
     ssd = rj.get("special_samples_desc")
@@ -339,7 +384,11 @@ def generate(range_json: dict, work_dir: str, out_dir: str, verbose: bool = True
                     if verbose:
                         print(f"[{i+1}/{count}] attempt {attempt+1}/{max_retries+1} {last_error}")
                     continue
-                inp = inp.rstrip("\n") + "\n"
+                # 空输入保留真正空文件；非空再统一补末尾换行
+                if not (inp or "").strip():
+                    inp = ""
+                else:
+                    inp = inp.rstrip("\n") + "\n"
 
                 rc, _, err = safe_run(
                     validator_cmd,

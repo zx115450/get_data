@@ -55,9 +55,33 @@ WORKFLOW = """工作流程：
 8. run_self_check 返回 OK -> 调 finish。
 """
 
+# write_* 工具参数 content 书写硬约束（Coder / Fixer / Rewrite 共用，置顶强调）
+WRITE_CONTENT_GATE = """【硬约束 · write_* 的 content 书写 —— 最高优先级】
+调用 write_gen / write_validate / write_special_gen / write_checker 时，arguments 必须形如：
+  {"content": "#include ... 从首行到 main 结尾 } 的完整可编译源码"}
+禁止：
+  1) 空调用、省略 content、只传函数名或 path；
+  2) 半截文件、省略中间函数、「其余不变」「见上文」「已写入」等摘要；
+  3) 提交 `__OMITTED_SOURCE__` / 历史对话摘要冒充源码；
+  4) 为炫技写超长代码导致工具 JSON 被截断（常见症状：chars 很小 + recovered、missing_content、编译到一半报错）。
+必须：
+  A) 一次写全：content 内含全部 #include、辅助函数、main，以最后一个 } 结束；
+  B) 宜短而全：优先短小清晰实现（通常 gen+validator 各数百～三千字足够），避免一次塞入过长正文；
+  C) 若返回「缺少必填参数 content」「参数疑似截断」「JSON 解析失败」：下一轮立刻重新 write_*，
+     先 read_file 读磁盘上的旧版（若有）再整份写出；禁止再次空调用；
+  D) 并行写时可同轮 write_gen + write_validate，但每个调用各自带完整 content，互不省略。
+
+【硬约束 · 题面/标程/range 上下文必须写进实现】
+写 gen/validator 时必须同时对照：题面输入格式、标程读入顺序、range.json 的 constraints 与 edge_cases。
+  - 每个 edge_cases 名都必须有 --type 分支；random 分支必须用 index/count 分层；
+  - 多测先打 T；无多测禁止伪造 T；自环/有向/边权/EOF 空输入以标程为准；
+  - 禁止只抄 few-shot 模板而丢掉本题上下文。
+"""
+
 CLI_CONTRACT = """【硬性 CLI 契约，必须遵守】
 你只能创建/修改：range.json, gen.cpp, validator.cpp（及 checker）。不要写别的大文件，不要直接写测例数据。
-修改 gen/validator 必须用 write_gen / write_validate（会自动编译）；content 必须一次给完整源码，禁止截断或摘要。
+修改 gen/validator 必须用 write_gen / write_validate（会自动编译）；
+【content】必须一次给完整源码，禁止截断或摘要（详见上方 WRITE_CONTENT_GATE）。
 需要看上一版源码时：read_file("gen.cpp") 或 read_file("validator.cpp")（路径相对工作目录）。
 range.json 必须是合法 JSON，含：
   - count: 整数，默认 15（用户未特别要求时必须写 15）；启用特殊样例时由系统叠加特殊组后改写为总数
@@ -65,7 +89,7 @@ range.json 必须是合法 JSON，含：
   - edge_cases: 数组，边界类型名；每个名字必须是你 gen --type 能接受的取值
   - 禁止在 edge_cases 里写 "random"：系统会给非边界组自动补 random（可写 random_tree / random_sparse 等具体名）
   - 建议写 time_limit_ms（毫秒）与 memory_limit_mb（MB）：系统会对 gen/validator/std 强制限时限内存；
-    超限分别返回 TIMEOUT / MEMORY_LIMIT。题面未写内存时可省略（不限制）或写 256。
+    超限分别返回 TIMEOUT / MEMORY_LIMIT。题面未写时默认 5000ms / 1024MB。
 """
 
 RANGE_CONTRACT = """range.json 必须含：
@@ -73,14 +97,16 @@ RANGE_CONTRACT = """range.json 必须含：
 - count: 正整数；本阶段写【常规样例数】。用户未特别要求时必须写 15（禁止写成 14/10/20 等其它数）；
   有特殊样例时仍写 15，系统稍后会把 count 改成 常规 + 特殊。
 - constraints: 对象，变量名 -> [min, max]（整数）
-- edge_cases: 字符串数组（边界类型名，禁止含 "random"）
+- edge_cases: 字符串数组（边界类型名，禁止含 "random"）。
+  数量控制在 4～6 个（优先：最小规模、最大规模、1～3 个题面结构边界）；不要堆砌十几个。
+  仅当 constraints 含 T（或 t）时才写 edge_T1 / edge_Tmax；无多测禁止写这两项。
 - special_constraints: 字符串数组，列出题面里所有「特殊结构约束」（如 DAG、连通、二分图、哈密顿、欧拉、平面图、竞赛图、树等）。
   没有特殊约束时写空数组 []。每条用简短中文描述，如 "图是 DAG"、"图必须存在哈密顿路径"、"图连通"。
 可选：
 - special_samples_desc: 可选；有特殊样例意图时写非空字符串。无特殊样例时不要写该字段（禁止写 ""）
 - special_samples_count: 可省略（由系统按方案决定）；本阶段不要自行加减 count
-- time_limit_ms: 正整数（毫秒），标程时限
-- memory_limit_mb: 正整数（MB），会限制 gen/validator/std 进程内存；题面有内存限制时务必填写
+- time_limit_ms: 正整数（毫秒），标程时限；题面未写时默认 5000（5 秒）
+- memory_limit_mb: 正整数（MB）；题面未写时默认 1024
 
 【提取 special_constraints 的方法】
 1. 仔细读题面，找出所有「保证」「约定」「满足...」「是 X 图」「存在...」等结构性质描述。
@@ -143,10 +169,13 @@ BASE_GEN_RULES = """gen.cpp 必须满足（testlib / ACM-generator 写法）：
   - 只向 stdout 打印测例（printf/cout），调试信息走 stderr（fprintf(stderr,...)）
   - 禁止 std::shuffle(..., rnd)；打乱用 for+swap+rnd.next(0,i)
   - 未声明的标识符不要用（不要写 clock()/clamp 等除非自己实现或正确头文件）
-  - 【写 gen 时必须携带完整上下文】gen.cpp 的每个分支必须同时对照题面、标程输入格式、range.json 的 constraints 与 edge_cases。不要遗漏多测 T、sum 约束、自环/有向/边权、特殊结构约束等关键要求；每个 edge_case 名称都必须在 --type 分支里有对应实现。
+  - 【写 gen 时必须携带完整上下文】见 WRITE_CONTENT_GATE：每个分支对照题面、标程、range；每个 edge_case 必须有 --type 分支。
+  - 【空输入合法】若题面/约束允许空输入（如 m=0、EOF 空文件），对应 edge（如 edge_m0）可输出空 stdout；不要为了过框架检查硬塞一行假数据。
   - 【从 range.json 读取全部必要参数】task 中已给出 range.json，直接用其中的 constraints 对象里的所有变量名（如 n、m、a、b、k 等）。每个变量名必须在 gen.cpp 中通过 opt<T>("name") 注册并用于生成本组数据；固定参数 index、count、type 也必须注册。若某个变量名在算法里不需要直接使用，也须用 opt<T>(...) 消费掉，避免 testlib 报 "unused key" 错误。
-  - 【禁止截断 / 摘要】调用 write_gen / write_validate / write_checker 时，arguments.content 必须一次写全完整可编译 C++（含全部函数与 main 结尾 }）。
-    禁止半截文件、禁止 `__OMITTED_SOURCE__` /「已写入」等摘要。工具参数被截断会导致编译失败；代码宜短而全，不要为炫技写超长再被截断。
+  - 【禁止截断 content】严格遵守 WRITE_CONTENT_GATE：write_* 的 content 一次写全、宜短而全；出现 missing_content / recovered / 截断时立即整份重写。
+  - 【满规模 ≠ 满状态】constraints 上界（如 n/m 最大）只约束输出规模；有效状态（唯一顶点/字符串/权值种类等）
+    必须遵守 gen_plan「有效状态预算」。边界语义用最小充分结构表达，再用池内边/自环/重复边等把规模凑满；
+    禁止默认「一边一个新状态」把状态数拉到与输出规模同阶（易致 std TIMEOUT）。
 
 ACM-generator（generator.h）硬性契约（using namespace generator::all）——写错会直接编不过：
   【正确 · 默认输出格式就是「n + 边列表」时】
@@ -213,8 +242,12 @@ TYPE_GRAPH = """【图题型模块 — graph / weighted_graph】
   仍须 registerGen(argc,argv,1) 与 --seed/--type/--index/--count 契约。
 
 【多测】若标程先读 T：stdout 第一行必须是 T∈约束，再输出 T 组数据；禁止照抄「第一行 n m」。
-【n=1】禁止自环时 edge_n1 应 m=0；允许自环时可输出 (1,1,w)。随机采样须有尝试上限，禁止 while+continue 死循环。
+  仅此时 edge_cases 才写 edge_T1/edge_Tmax；无多测（EOF/单组）禁止写 edge_T1。
+【n=1】禁止自环时 edge_n1 应 m=0（可空输出）；允许自环时可输出 (1,1,w)。随机采样须有尝试上限，禁止 while+continue 死循环。
 【完全图】控制 n 使边数不超过 m 上界，避免 O(n^2) TIMEOUT。
+【空输入】若约束允许 m=0 / 空边集 / EOF 空文件，gen 对应分支可打印空 stdout，框架允许。
+【content】图题 gen 分支宜精简，仍须完整 content 一次写出（见 WRITE_CONTENT_GATE）。
+【复杂度】严格按 gen_plan.md「复杂度与规模预算 / 有效状态预算」实现；满边数时勿把唯一顶点数默认拉满。
 
 图性质（无自环/无重边/连通等）以题面为准；validator 校验与题面一致的性质。
 """
@@ -346,6 +379,7 @@ def build_full_prompt(
     """
     parts = [
         COMMON_CORE,
+        WRITE_CONTENT_GATE,
         TOOLS_FULL,
         WORKFLOW,
         CLI_CONTRACT,
@@ -378,7 +412,8 @@ def build_range_prompt() -> str:
         TOOLS_RANGE,
         RANGE_CONTRACT,
         PROBLEM_TYPE_RANGE_HINT.strip(),
-        "edge_cases 要覆盖最小/最大/典型边界；多测 T 时建议含 edge_T1、edge_Tmax 等。",
+        "edge_cases 要覆盖最小/最大/典型边界；"
+        "仅当 constraints 含 T/t 时才写 edge_T1、edge_Tmax；无多测禁止写。",
         "只允许 write_range 与 finish；不要读文件。write_range 成功后立刻 finish，不要重复 write_range。"
         "看到 ERROR 要修正后再 write_range。",
         RULES,
@@ -389,8 +424,8 @@ PLANNER_PROMPT = """你是算法竞赛测试数据生成器设计专家。任务
 
 要求：
 1. 只输出 Markdown 计划正文，不要调用任何工具，不要写完整代码，不要解释。
-2. 【篇幅】全文目标约 1200～1500 字，硬上限 2000 字。用短句/子弹；禁止复述题面、禁止大段伪代码、禁止重复 range.json。
-3. 必须含以下 7 个小节（标题用「## 1. …」或「1. …」），每节结论明确、尽量短：
+2. 【篇幅】全文目标约 1300～1700 字，硬上限 2200 字。用短句/子弹；禁止复述题面、禁止大段伪代码、禁止重复 range.json。
+3. 必须含以下 8 个小节（标题用「## 1. …」或「1. …」），每节结论明确、尽量短：
    - 1. 输入格式：首行是否 T；每组字段顺序；分隔符。1～3 行即可。
    - 2. 范围参数：列出 constraints 变量 [min,max]；并写须注册 seed/index/count/type。一行列表即可。
    - 3. 多测与 sum：有则写处理要点；无则写「无多测」。
@@ -398,7 +433,15 @@ PLANNER_PROMPT = """你是算法竞赛测试数据生成器设计专家。任务
    - 5. edge_cases 映射：每个名字占一行「- name: 一句构造要点」。
        树/图：注明 Tree/Chain/Flower 等；写法用「t.gen(); cout << t」或 edges()；禁止 get_edges/shuffle。
    - 6. validator：说明结构性质校验策略（有则用 ensuref，无则 read* + readEof）；提及 readEof。以编译/运行通过为准。
-   - 7. 实现顺序：最多 3 条子弹（写 gen → 写 validator → 自检）。
+   - 7. 复杂度与规模预算（必写，Coder 按此实现；缺「有效状态预算」视为不合格）：
+       * 标程瓶颈：根据标程源码估计最大数据下的真实瓶颈（I/O、map/Trie、DSU、字符串离散化等）+ time_limit_ms。
+       * gen / validator 目标时间复杂度（gen 须在约 5s 硬时限内；通常 O(输出规模)）。
+       * 【有效状态预算 · 强制】给出最大档下允许的「有效状态上界」（如唯一顶点数、唯一字符串数、
+         离散值种类、邻接表点数等具体数字或相对表达式）。
+         原则：constraints 输出规模上界 ≠ 有效状态上界；语义边界用最小充分结构，再用池内边/重复边等凑满规模。
+       * 每个会冲最大档的 edge_case 用一句话写清：如何在状态预算内表达语义并凑满上界。
+       * 禁止：O(n^2) 建边池、无界重试、「状态数默认拉到输出规模」等易超时规划。
+   - 8. 实现顺序：最多 3 条子弹（写 gen → 写 validator → 自检）；注明须遵守第 7 节有效状态预算。
 4. 不要编造题面没有的范围或约束；不确定处一句话标注即可。
 
 只输出 Markdown 计划，然后结束。"""
@@ -445,11 +488,12 @@ _GEN_API_GATE = """【generator.h 树/图 API 用法 — 写错会编译失败�
 CODER_PROMPT = """你是 ACM 数据生成器 / 校验器编码专家。任务：根据当前工作目录的 gen_plan.md 和 range.json，写出完整可编译的 gen.cpp 与 validator.cpp。
 
 注意：特殊样例（gen_special.cpp）由后续独立阶段编写，本阶段不要写 gen_special，也不要在 gen.cpp 里实现 special_samples 分支。
+【务必先读文首 WRITE_CONTENT_GATE】write_* 必须带完整 content；题面/标程/range 上下文必须写进实现。
 
 可用工具：
 - read_file(path): 首轮只读 gen_plan.md（range.json 已在 task 中，不必再读）；写入后如需对照再读 gen.cpp / validator.cpp
-- write_gen(content): 写完整 gen.cpp 并自动编译
-- write_validate(content): 写完整 validator.cpp 并自动编译（见下方 validator 写法建议）
+- write_gen(content): 【必填 content=完整源码】写 gen.cpp 并自动编译；禁止空调用/截断
+- write_validate(content): 【必填 content=完整源码】写 validator.cpp 并自动编译
 - run_self_check(): 快速自检（系统也会在写入成功后自动跑；通过后才能 finish）
 - finish(summary): 自检通过后调用
 
@@ -459,7 +503,7 @@ CODER_PROMPT = """你是 ACM 数据生成器 / 校验器编码专家。任务：
 1. 第一步只 read_file("gen_plan.md") 一次；range.json 已在用户 task 里，禁止再 read_file("range.json")。
 2. 【few-shot 仅参考】若 task 含参考范例：只借鉴 registerGen / --type 分支 / generator.h API；
    输入格式、是否多测 T、是否自环/有向/边权、edge_cases 语义一律以本题标程与 gen_plan 为准，禁止照抄范例第一行格式。
-3. 读完 plan 后同一步或下一步直接 write_gen + write_validate（可并行）。禁止重复读 gen_plan.md。
+3. 读完 plan 后同一步或下一步直接 write_gen + write_validate（可并行，各自带完整 content）。禁止重复读 gen_plan.md。
    【首轮禁止空读】首轮没有 gen.cpp / validator.cpp：禁止写入前读它们。
 4. gen.cpp 必须 #include "testlib.h" 或 "generator.h"，main 里 registerGen(argc, argv, 1)。
 5. 必须解析所有 opt：seed、type、index、count，以及 range.json 中所有 constraints 变量名，避免 "unused key" 错误。
@@ -467,20 +511,22 @@ CODER_PROMPT = """你是 ACM 数据生成器 / 校验器编码专家。任务：
 7. validator 按建议写：有结构性质则 ensuref；只有范围/格式则 read* + readEof。以编译/运行通过为准。
 8. 【硬门禁】只允许写一轮完整 gen.cpp + validator.cpp（可同轮并行 write_gen + write_validate）。
    写入编译成功后，系统会自动跑 run_self_check(fast)；不要在未自检前连续多次 write。
-9. 【禁止截断】write_* 的 content 必须一次写全可编译源码；宁可短而完整。
-10. 自检 OK → finish；FAIL → 只允许再修正一轮完整源码。
-11. 禁止 __OMITTED_SOURCE__ 等摘要；骨架重写时先 read 旧文件再整份重写。
-12. 【上下文】写 gen.cpp 时必须完整使用 task 中的题面、标程、range.json 信息；edge_cases 分支必须与题面约束一致，禁止遗漏多测 T、sum、自环/有向/边权等关键要求。"""
+9. 【content 书写】严格遵守文首 WRITE_CONTENT_GATE：一次写全、宜短而全；截断/空 content 必须立刻整份重写。
+10. 【复杂度 / 满规模≠满状态】严格按 gen_plan「有效状态预算」实现；输出规模可取上界，状态数不得无预算膨胀。
+11. 自检 OK → finish；FAIL → 只允许再修正一轮完整源码（仍须完整 content）。
+12. 禁止 __OMITTED_SOURCE__ 等摘要；骨架重写时先 read 旧文件再整份重写。
+13. 【题面上下文】写 gen 时必须完整使用 task 中的题面、标程、range.json；edge_cases 与约束不得遗漏。"""
 
 
 CODER_REWRITE_PROMPT = """你是 ACM 数据生成器 / 校验器编码专家。当前第一版 gen.cpp / validator.cpp 的骨架存在结构性问题，需按 gen_plan.md 重新写出完整新版。
 
 注意：不要写 gen_special.cpp；特殊样例由后续独立阶段处理。
+【务必先读文首 WRITE_CONTENT_GATE】重写时 write_* 必须整份完整 content，禁止截断/空调用。
 
 可用工具：
 - read_file(path): 读取 gen_plan.md / range.json / gen.cpp / validator.cpp
-- write_gen(content): 写完整 gen.cpp 并自动编译
-- write_validate(content): 写完整 validator.cpp 并自动编译（见下方 validator 写法建议）
+- write_gen(content): 【必填完整 content】写 gen.cpp 并自动编译
+- write_validate(content): 【必填完整 content】写 validator.cpp 并自动编译
 - run_self_check(): 快速自检（系统也会在写入成功后自动跑；通过后才能 finish）
 - finish(summary): 自检通过后调用
 
@@ -491,17 +537,17 @@ CODER_REWRITE_PROMPT = """你是 ACM 数据生成器 / 校验器编码专家。�
 2. 再 read_file 当前 gen.cpp / validator.cpp，了解上一次失败的实现，但**不要局部修补丁**：要按 plan 重新设计骨架。
 3. 常见需重写信号：
    - 大量 edge_cases 缺分支或大规模 FAIL；
-   - gen TIMEOUT / MEMORY（O(n^2) 枚举或预建大池子）；
+   - gen TIMEOUT / MEMORY（超出 plan 复杂度预算、O(n^2) 枚举等）；
+   - std TIMEOUT：对照 gen_plan「有效状态预算」降密度（满规模≠满状态），勿只加内存；外层会再强制 full；
    - 输入格式与标程读入顺序不匹配；
-   - 连续多轮 Fixer 无法收敛的同类错误；
-   - write_validate 编译失败或运行 validate 报错；
-   - write_gen 编译失败或运行时报错。
+   - write_* 截断/空 content / 编译半截失败（必须整份重写 content）；
+   - 连续多轮 Fixer 无法收敛的同类错误。
 4. 树/图必须遵守【generator.h API 硬性契约】：t.gen(); cout << t 或 t.edges()；禁止 get_edges/shuffle。
 5. 【硬门禁】只写一轮完整 gen.cpp / validator.cpp（可同轮并行），写入成功后系统自动跑快速自检；禁止未自检连续改写。
-6. 【禁止截断】write_* 的 content 必须一次写全可编译源码，勿半截、勿摘要。
+6. 【content】严格遵守文首 WRITE_CONTENT_GATE；重写时一次写全，宜短而全，禁止半截/摘要。
 7. 自检 OK → finish；自检 FAIL → 只允许再修正一轮，写完再次自动自检。
 8. 禁止把 __OMITTED_SOURCE__ 等历史摘要写回文件；如需查看旧版，先 read_file。
-9. 自检通过后 finish，说明本次重写针对的根因与改动。"""
+9. 自检通过后 finish，说明本次重写针对的根因与改动；复杂度须符合 gen_plan 第 7 节。"""
 
 
 def _with_type_modules(base_parts: list[str], problem_type: str = "") -> str:
@@ -515,13 +561,16 @@ def _with_type_modules(base_parts: list[str], problem_type: str = "") -> str:
 
 def build_coder_prompt(problem_type: str = "") -> str:
     """返回 Coder 阶段（硬自检）的 System Prompt。"""
-    return _with_type_modules([CODER_PROMPT, BASE_GEN_RULES, BASE_VAL_RULES], problem_type)
+    return _with_type_modules(
+        [WRITE_CONTENT_GATE, CODER_PROMPT, BASE_GEN_RULES, BASE_VAL_RULES], problem_type
+    )
 
 
 def build_coder_rewrite_prompt(problem_type: str = "") -> str:
     """返回 Coder Rewrite（骨架重写）阶段的 System Prompt。"""
     return _with_type_modules(
-        [CODER_REWRITE_PROMPT, BASE_GEN_RULES, BASE_VAL_RULES], problem_type
+        [WRITE_CONTENT_GATE, CODER_REWRITE_PROMPT, BASE_GEN_RULES, BASE_VAL_RULES],
+        problem_type,
     )
 
 
@@ -689,8 +738,8 @@ GEN_FIXER_CORE = """你是 ACM 数据生成器修复专家。当前 Coder 已写
 
 GEN_FIXER_TOOLS = """可用工具：
 - read_file(path): 读取 gen.cpp / validator.cpp / range.json / 失败日志
-- write_gen(content): 写完整 gen.cpp 并自动编译
-- write_validate(content): 写完整 validator.cpp 并自动编译（以编译/运行通过为准）
+- write_gen(content): 【必填完整 content】写 gen.cpp 并自动编译；禁止空调用/截断
+- write_validate(content): 【必填完整 content】写 validator.cpp 并自动编译
 - run_gen(seed, type, index, count): 单独运行 gen，验证单组
 - run_validate(input_text): 单独验证输入
 - run_std(input_text): 单独跑标程
@@ -703,9 +752,10 @@ GEN_FIXER_WORKFLOW = """修复流程：
 2. 判断根因：
    - write_gen / 编译报 get_edges / shuffle / private _edges：改成 t.gen(); cout << t 或 for (auto &e : t.edges())。
    - write_validate 编译/运行报错：有结构性质则补 ensuref；仅范围/格式则检查 read* + readEof。
-   - gen TIMEOUT / MEMORY / rc != 0：生成器算法或规模控制问题，修 gen.cpp。
+   - gen TIMEOUT / MEMORY / rc != 0：生成器算法超出 plan 复杂度预算，修 gen.cpp。
    - validate FAILED：gen 输出违反约束；优先修 gen.cpp，必要时再调整 validator.cpp（不能为了过校验而牺牲正确性）。
-   - std FAILED / TIMEOUT / MEMORY / STACK_OVERFLOW：数据规模对标程太大、格式不匹配或栈溢出；修 gen.cpp 降低规模 / 对齐格式（勿把单组空 stdout 当失败——全更新无查询时为空合法）。
+   - std FAILED / TIMEOUT / MEMORY / STACK_OVERFLOW：对照 gen_plan「复杂度与规模预算」下调最大档构造或对齐格式
+     （勿把单组空 stdout 当失败——全更新无查询时为空合法；勿只靠加内存）。
    - 全部测例 stdout 为空：套件级失败——补 random/混合测例的查询操作，或检查标程是否写了输出；不要破坏 *_update 边界语义。
    - 缺分支 / 覆盖不全：补 edge_case 分支或完善 random 分层。
 3. 【硬门禁】每轮只允许写一次（可同轮 write_gen + write_validate）。写入编译成功后，系统会自动跑 run_self_check(fast)；禁止未自检连续改写。
@@ -713,14 +763,15 @@ GEN_FIXER_WORKFLOW = """修复流程：
 5. 自检通过后调 finish，说明改动点与根因。
 """
 
-GEN_FIXER_RULES = """规则：
+GEN_FIXER_RULES = """规则（文首已有 WRITE_CONTENT_GATE，此处再强调）：
 1. 只修改 gen.cpp 和/或 validator.cpp，不要改 range.json、checker.cpp、标程、gen_special.cpp。
-2. write_gen / write_validate 时 content 必须一次写全完整可编译源码，禁止截断、摘要或占位符。
+2. write_* 的 content 必须一次写全；若上一轮 recovered/missing_content/编译半截，本轮必须整份重写 content。
 3. 树/图：t.gen(); cout << t 或 t.edges()；禁止 get_edges()/t.shuffle()/访问 _edges。
 4. validator 写法：有结构用 ensuref；仅范围/格式用 read* + readEof。以编译/运行通过为准。
 5. 不要为修一个问题引入新 bug；优先小范围改动，避免推翻整个 plan。
 6. 写一次 → 等自动快速自检 → 再决定 finish 或结束本轮；禁止空转连写。
 7. 【空输出合法】单组 std stdout 为空不一定是错误（全更新无查询时答案本就为空）。若失败摘要写「全部测例 stdout 为空」，再补查询/混合操作或检查标程；不要为过检给 *_update 边界硬塞查询。
+8. TIMEOUT：对照 gen_plan「有效状态预算」降低最大档状态密度（满规模≠满状态）；勿只靠加时限/内存。
 """
 
 SPECIAL_PLANNER_PROMPT = """你是算法竞赛特殊样例生成器设计专家。任务：在已有 gen.cpp / validator.cpp 的前提下，为当前特殊方案写一份 gen_special.cpp 的生成计划。
@@ -890,6 +941,7 @@ def build_gen_fixer_prompt(problem_type: str = "") -> str:
     """返回阶段 2（Gen Agent 自检失败后）Fixer Agent 的 System Prompt。"""
     return _with_type_modules(
         [
+            WRITE_CONTENT_GATE,
             GEN_FIXER_CORE,
             _GEN_API_GATE,
             GEN_FIXER_TOOLS,

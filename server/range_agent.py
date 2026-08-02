@@ -26,9 +26,9 @@ range.json 必须含：
 - edge_cases: 字符串数组（边界类型名，禁止含 "random"）
 - special_constraints: 字符串数组，列出题面里所有「特殊结构约束」（如 DAG、连通、二分图、哈密顿、欧拉、平面图、竞赛图、树等）。
   没有特殊约束时写空数组 []。每条用简短中文描述，如 "图是 DAG"、"图必须存在哈密顿路径"、"图连通"。
-可选：
-- time_limit_ms: 正整数（毫秒），标程时限
-- memory_limit_mb: 正整数（MB），会限制 gen/validator/std 进程内存；题面有内存限制时务必填写
+可选（建议填写；未写时系统默认 time_limit_ms=5000、memory_limit_mb=1024）：
+- time_limit_ms: 正整数（毫秒），标程时限；默认 5000
+- memory_limit_mb: 正整数（MB）；默认 1024
 
 【提取 special_constraints 的方法 — 极重要】
 1. 仔细读题面，找出所有「保证」「约定」「满足...」「是 X 图」「存在...」等结构性质描述。
@@ -43,8 +43,10 @@ range.json 必须含：
 
 规则：
 1. 只调用 write_range，不要写 gen/validator，不要编造测例正文。
-2. edge_cases 要覆盖最小/最大/典型边界；多测 T 时建议含 edge_T1、edge_Tmax 等。
-3. edge_cases 必须覆盖 special_constraints 里每一条约束对应的边界。
+2. edge_cases 要覆盖最小/最大/典型边界，总数控制在 4～6 个（不要超过 8）。
+   【多测】仅当 constraints 含 T（或 t）时才写 edge_T1 / edge_Tmax；
+   无多测（EOF 读入 / 单组）禁止写 edge_T1 / edge_Tmax。
+3. edge_cases 应覆盖 special_constraints 的核心结构边界（可合并同类，不必一条约束对应多个 edge）。
 4. write_range 成功后立刻 finish，不要重复 write_range。
 5. 看到 ERROR 要修正后再 write_range。
 """
@@ -62,11 +64,12 @@ _TYPE_EDGE_HINTS = {
         "flower_chain", "caterpillar", "broom",
     ],
     "graph": [
-        "edge_T1", "edge_Tmax",  # 多测时优先；单测可省略
+        # 无脑勿加 edge_T1/edge_Tmax：仅当 constraints 含 T 时再加
         "edge_n1", "edge_nmax", "edge_m_min", "edge_m_max",
         "disconnected", "random_sparse",
         # 以下按题意选用，勿无脑全抄：connected_tree / path / star / complete /
-        # bipartite / dag_acyclic / negative_cycle_reachable
+        # bipartite / dag_acyclic / negative_cycle_reachable /
+        # edge_T1 / edge_Tmax（仅多测）
     ],
     "string": [
         "edge_n1", "edge_nmax", "all_same", "pattern_at_start", "pattern_at_end",
@@ -109,8 +112,9 @@ _TYPE_HINT_HEADER = {
     "tree": "树题：建议 edge_cases 覆盖以下边界（按需挑选，不要全抄）。生成优先用 generator.h 的 Tree/Chain/Flower",
     "graph": (
         "图题：建议按需挑选下列边界，不要全抄。"
-        "有多测 T 时务必含 edge_T1/edge_Tmax；输入格式跟标程（先 T 再各组）。"
-        "edge_n1：无自环则 m=0，允许自环可用 (1,1)。"
+        "仅当 constraints 含 T 时才写 edge_T1/edge_Tmax；无多测禁止写。"
+        "有多测时输入格式跟标程（先 T 再各组）。"
+        "edge_n1：无自环则 m=0（空边列表合法时可空输出），允许自环可用 (1,1)。"
         "complete 须控制 n 使边数≤m 上界。"
         "再按题意补结构边界（负环/DAG/连通/二分图等）"
     ),
@@ -151,7 +155,8 @@ def _build_all_type_hints_block() -> str:
         header = _TYPE_HINT_HEADER.get(typ, typ)
         lines.append(f"- {typ}: {header} → {', '.join(examples)}")
     lines.append(
-        "最终 edge_cases 必须与题面/标程一致；有特殊结构约束时额外加对应边界。\n"
+        "最终 edge_cases 必须与题面/标程一致；有特殊结构约束时额外加对应边界。"
+        "无多测 T（constraints 无 T/t）时禁止写 edge_T1/edge_Tmax。\n"
     )
     return "\n".join(lines)
 
@@ -264,7 +269,8 @@ def propose_range_json(
         f"{special_block}"
         f"\ncount 必须写 15（常规样例数默认；用户未另行指定时禁止写其它数字）。"
         f"constraints 覆盖题面中的规模变量（如 n、T、m）。"
-        f"edge_cases 用简短英文标识符。写完 write_range 后 finish。"
+        f"edge_cases 用简短英文标识符，总数 4～6 个即可（含最小/最大规模与关键结构边界）。"
+        f"写完 write_range 后 finish。"
         f"务必填写 special_constraints 字段（即使为空数组也要写）。\n"
         f"务必填写 problem_type（与题面一致的英文标识符）。\n"
     )

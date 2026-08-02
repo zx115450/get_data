@@ -88,13 +88,25 @@ def _run_job_impl(
         else:
             brief = {k: (str(v)[:40] if not isinstance(v, (int, float, bool)) else v)
                      for k, v in list(args.items())[:4]}
-        # 自检失败需要完整 FAIL 行复盘；其它事件仍短预览
-        if name == "run_self_check" and isinstance(preview, str) and preview.startswith("ERROR"):
-            pv = preview if len(preview) <= 4000 else preview[:3200] + "…\n" + preview[-600:]
+        # 自检失败：完整落盘 + 进度保留 FAIL 行；其它事件仍短预览
+        if name == "run_self_check" and isinstance(preview, str) and (
+            preview.startswith("ERROR") or "\nFAIL " in ("\n" + preview)
+        ):
             try:
-                (job_dir / "self_check_last_fail.txt").write_text(preview, encoding="utf-8")
+                from agent.tools import (
+                    _persist_self_check_fail,
+                    format_self_check_for_progress,
+                )
+                _persist_self_check_fail(preview)
+                pv = format_self_check_for_progress(preview)
             except Exception:
-                pass
+                pv = preview if len(preview) <= 4000 else preview[:3200] + "…\n" + preview[-600:]
+                try:
+                    (job_dir / "self_check_last_fail.txt").write_text(
+                        preview, encoding="utf-8"
+                    )
+                except Exception:
+                    pass
         else:
             pv = preview if len(preview) <= 100 else preview[:100] + "…"
         job_store.add_progress(job, f"[step {step}] {name} {brief} -> {pv}")
