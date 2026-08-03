@@ -1,0 +1,30 @@
+{
+  "count": 15,
+  "constraints": {
+    "t": [
+      1,
+      10
+    ],
+    "n": [
+      1,
+      1000
+    ],
+    "m": [
+      0,
+      1000
+    ]
+  },
+  "edge_cases": [
+    "edge_Tmax",
+    "edge_n1",
+    "edge_nmax",
+    "edge_dag_chain",
+    "edge_dag_cycle"
+  ],
+  "time_limit_ms": 5000,
+  "memory_limit_mb": 1024,
+  "special_constraints": [
+    "前置关系构成有向图（可能存在环）"
+  ],
+  "problem_type": "graph"
+}

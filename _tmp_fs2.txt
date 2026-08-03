@@ -1,0 +1,1 @@
+('未配置 Embedding，使用题型模板: array', True, False)
