@@ -78,6 +78,7 @@ def pack_sources(work_dir: str, sources_zip_path: str) -> str:
         "range.json",
         "gen.cpp",
         "gen_special.cpp",
+        "check_special.cpp",
         "gen.py",
         "validator.cpp",
         "validate.py",
@@ -92,11 +93,11 @@ def pack_sources(work_dir: str, sources_zip_path: str) -> str:
             f = _resolve_pack_file(work, name)
             if f is not None:
                 z.write(f, name)
-        # Finder 留痕（若有）
-        findings = work / "special_findings"
-        if findings.is_dir():
-            for f in findings.rglob("*"):
-                if f.is_file() and f.suffix.lower() in {".cpp", ".json", ".in", ".txt", ".md"}:
+        # Special 决策记忆（若有）
+        meta = work / "special_meta"
+        if meta.is_dir():
+            for f in meta.rglob("*"):
+                if f.is_file() and f.suffix.lower() in {".json", ".md", ".txt"}:
                     z.write(f, f.relative_to(work).as_posix())
 
     return str(sources_zip_path)

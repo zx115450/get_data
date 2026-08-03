@@ -30,6 +30,6 @@ int main(int argc, char *argv[]) {
     // 若满足：quitf(_ok, "accepted");
     // 否则：quitf(_wa, "...");
 
-    // 默认占位：直接认为通过。模型必须替换上述 TODO 逻辑。
-    quitf(_ok, "accepted by template placeholder");
+    // 默认占位：未替换 TODO 时必须失败，避免不读 ouf 就 _ok 触发 dirt/PE。
+    quitf(_fail, "TODO: replace template placeholder");
 }

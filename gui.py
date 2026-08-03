@@ -36,7 +36,36 @@ PROBLEM_TYPES = [
     "interactive",
 ]
 LANGS = ["python", "cpp"]
-BUILTIN_CHECKER_OPTIONS = ["无", "lcmp", "wcmp", "rcmp4", "rcmp6", "rcmp9", "yesno"]
+# 界面中文 → API 英文 id（空字符串表示不使用内置 checker）
+BUILTIN_CHECKER_LABEL_TO_ID = {
+    "无": "",
+    "按行比较": "lcmp",
+    "按词比较": "wcmp",
+    "浮点比较·1e-4": "rcmp4",
+    "浮点比较·1e-6": "rcmp6",
+    "浮点比较·1e-9": "rcmp9",
+    "Yes/No 比较": "yesno",
+}
+BUILTIN_CHECKER_ID_TO_LABEL = {v: k for k, v in BUILTIN_CHECKER_LABEL_TO_ID.items() if v}
+BUILTIN_CHECKER_ID_TO_LABEL[""] = "无"
+BUILTIN_CHECKER_OPTIONS = list(BUILTIN_CHECKER_LABEL_TO_ID.keys())
+
+
+def _builtin_checker_label_from_any(value: str) -> str:
+    """把工作区/API 里的英文 id 或中文标签规范成界面中文。"""
+    v = (value or "").strip()
+    if not v or v == "无":
+        return "无"
+    if v in BUILTIN_CHECKER_LABEL_TO_ID:
+        return v
+    return BUILTIN_CHECKER_ID_TO_LABEL.get(v.lower(), "无")
+
+
+def _builtin_checker_id_from_label(label: str) -> str:
+    """界面中文 → 提交用的英文 id；「无」为空串。"""
+    return BUILTIN_CHECKER_LABEL_TO_ID.get(
+        _builtin_checker_label_from_any(label), ""
+    )
 
 # 边界类型：界面展示中文；提交仍用英文 id。方案过多时默认保留约 5 个。
 EDGE_CASE_UI_LIMIT = 5
@@ -529,7 +558,7 @@ class App:
         self._checker_lbl.pack(side="left", padx=(8, 0))
         self._checker_cb = ttk.Combobox(
             opts, textvariable=self.builtin_checker,
-            values=BUILTIN_CHECKER_OPTIONS, width=8, state="readonly",
+            values=BUILTIN_CHECKER_OPTIONS, width=14, state="readonly",
         )
         self._checker_cb.pack(side="left", padx=2)
 
@@ -730,7 +759,7 @@ class App:
         tip4 = ttk.Frame(tab_plan)
         tip4.pack(fill="x", padx=4, pady=(4, 8))
         self._plan_tip_label = ttk.Label(
-            tip4, text="先点「生成方案」让大模型只写 range；提交全流程时若已有方案则跳过写 range",
+            tip4, text="可先点「生成方案」：常规样例数由 AI 自定（≥15）；提交时审核 range（合理复用/不合理重写）",
             bootstyle="secondary",
         )
         self._plan_tip_label.pack(side="left")
@@ -1370,7 +1399,7 @@ class App:
             self.btn_download_menu.config(text="下载" if mode == "narrow" else "下载 ▼")
             self._sj_chk.config(text="SPJ" if compact else "Special Judge")
             self._checker_lbl.config(text="Ck:" if mode == "narrow" else "Checker:")
-            self._checker_cb.config(width=6 if mode == "narrow" else 8)
+            self._checker_cb.config(width=10 if mode == "narrow" else 14)
         except (tk.TclError, AttributeError):
             pass
 
@@ -2050,7 +2079,7 @@ class App:
 
         tip = ttk.Label(
             frm,
-            text="must_hold / construct_hint / 模式会直接影响后续 Finder 与 SpecialCoder",
+            text="must_hold / construct_hint / 模式会直接影响 SpecialCoder 与 property_check",
             bootstyle="secondary",
         )
         tip.grid(row=9, column=0, columnspan=2, sticky="w", pady=(8, 0))
@@ -2329,7 +2358,7 @@ class App:
         self.plan_status.set(
             f"已就绪：总 {total} 组{special_s}{limit_s} · "
             f"{len(self.range_data['constraints'])} 个变量 · "
-            f"{len(self.range_data['edge_cases'])} 种边界{trim_note}{type_s} — 提交将跳过写 range"
+            f"{len(self.range_data['edge_cases'])} 种边界{trim_note}{type_s} — 提交时将审核该方案（合理复用/不合理重写）"
         )
 
     def collect_range_from_ui(self):
@@ -2505,9 +2534,7 @@ class App:
                 ptype = plan.get("problem_type") or ""
         else:
             ptype = ""
-        bc = self.builtin_checker.get()
-        if bc == "无":
-            bc = ""
+        bc = _builtin_checker_id_from_label(self.builtin_checker.get())
         try:
             per_scheme = int(self.special_count_var.get().strip() or "1")
         except ValueError:
@@ -3704,7 +3731,8 @@ class App:
             "input_desc": _get(self.range_desc),
             "output_desc": _get(self.output_desc),
             "special_judge": bool(self.special_judge_var.get()),
-            "builtin_checker": self.builtin_checker.get() or "无",
+            # 工作区存英文 id（与 API 一致）；空/无 存「无」便于旧逻辑兼容
+            "builtin_checker": _builtin_checker_id_from_label(self.builtin_checker.get()) or "无",
             "last_job_id": self.job_id or "",
             "range_plan": self.collect_range_from_ui(),
         })
@@ -3743,8 +3771,7 @@ class App:
         else:
             self.ptype.set("自动")
         self.special_judge_var.set(bool(ws.get("special_judge")))
-        bc = ws.get("builtin_checker") or "无"
-        self.builtin_checker.set(bc if bc in BUILTIN_CHECKER_OPTIONS else "无")
+        self.builtin_checker.set(_builtin_checker_label_from_any(ws.get("builtin_checker") or "无"))
         src = ws.get("source") or ""
         if src == "problem":
             self.current_problem_id = str(ws.get("id") or "")
@@ -3861,7 +3888,7 @@ class App:
         names = []
         for name in (
             "range.json", "gen.cpp", "gen.py", "validator.cpp", "validate.py",
-            "gen_special.cpp", "checker.cpp", "gen_plan.md",
+            "gen_special.cpp", "checker.cpp", "gen_plan.md", "checker_plan.md",
             "gen.cpp.good", "validator.cpp.good", "gen.py.good", "validate.py.good",
             "out.good",
         ):
@@ -3894,7 +3921,7 @@ class App:
         if has_range:
             return (
                 "range_only",
-                "父任务仅有数据方案（range）：复用后仍会重新编写 gen/validator，只能跳过写 range。",
+                "父任务仅有数据方案（range）：复用后会先审核 range（合理复用/不合理重写），再编写 gen/validator。",
             )
         return (
             "empty",

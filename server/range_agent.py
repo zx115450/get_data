@@ -9,7 +9,13 @@ from pathlib import Path
 from agent import tools
 from agent.core import run as agent_run
 from agent.tools import _schema
-from pipeline.gen_data import normalize_range_json, validate_range_json
+from pipeline.gen_data import (
+    MIN_REGULAR_COUNT,
+    _clamp_regular_count,
+    infer_regular_count,
+    normalize_range_json,
+    validate_range_json,
+)
 from server.struct_hints import scan_structural_hints, scan_structural_titles
 from utils.markup import to_plain_for_llm
 
@@ -21,7 +27,7 @@ RANGE_ONLY_PROMPT = """你是出题数据规划助手。任务：根据题面与
 
 range.json 必须含：
 - problem_type: 题型标识符（与题面/标程匹配的英文枚举，见 task 里的可选项与分类原则）
-- count: 正整数，默认 15
+- count: 正整数，由你根据覆盖需求自定，不得小于 15（三维小中大全组合建议 ≥27）
 - constraints: 对象，变量名 -> [min, max]（整数）
 - edge_cases: 字符串数组（边界类型名，禁止含 "random"）
 - special_constraints: 字符串数组，列出题面里所有「特殊结构约束」（如 DAG、连通、二分图、哈密顿、欧拉、平面图、竞赛图、树等）。
@@ -44,8 +50,9 @@ range.json 必须含：
 规则：
 1. 只调用 write_range，不要写 gen/validator，不要编造测例正文。
 2. edge_cases 要覆盖最小/最大/典型边界，总数控制在 4～6 个（不要超过 8）。
-   【多测】仅当 constraints 含 T（或 t）时才写 edge_T1 / edge_Tmax；
-   无多测（EOF 读入 / 单组）禁止写 edge_T1 / edge_Tmax。
+   【多测】仅当 constraints 含 T（或 t）时才写 edge_Tmax（可配 big_T_small_n）；
+   【不要写 edge_T1】T=1 已被 edge_nmax / small_T_big_n / 攻 n 覆盖，无额外测点。
+   无多测（EOF 读入 / 单组）禁止写 edge_Tmax / edge_T1。
 3. edge_cases 应覆盖 special_constraints 的核心结构边界（可合并同类，不必一条约束对应多个 edge）。
 4. write_range 成功后立刻 finish，不要重复 write_range。
 5. 看到 ERROR 要修正后再 write_range。
@@ -64,12 +71,12 @@ _TYPE_EDGE_HINTS = {
         "flower_chain", "caterpillar", "broom",
     ],
     "graph": [
-        # 无脑勿加 edge_T1/edge_Tmax：仅当 constraints 含 T 时再加
+        # 无脑勿加 edge_Tmax：仅当 constraints 含 T 时再加；不要写 edge_T1
         "edge_n1", "edge_nmax", "edge_m_min", "edge_m_max",
         "disconnected", "random_sparse",
         # 以下按题意选用，勿无脑全抄：connected_tree / path / star / complete /
         # bipartite / dag_acyclic / negative_cycle_reachable /
-        # edge_T1 / edge_Tmax（仅多测）
+        # edge_Tmax / big_T_small_n（仅多测；不要 edge_T1）
     ],
     "string": [
         "edge_n1", "edge_nmax", "all_same", "pattern_at_start", "pattern_at_end",
@@ -84,7 +91,7 @@ _TYPE_EDGE_HINTS = {
         "random_points", "collinear", "same_x",
     ],
     "multi_test": [
-        "edge_T1", "edge_Tmax", "edge_n_min", "edge_nmax",
+        "edge_Tmax", "edge_n_min", "edge_nmax",
         "big_T_small_n", "small_T_big_n", "single_max_case",
     ],
     "dp": [
@@ -112,7 +119,7 @@ _TYPE_HINT_HEADER = {
     "tree": "树题：建议 edge_cases 覆盖以下边界（按需挑选，不要全抄）。生成优先用 generator.h 的 Tree/Chain/Flower",
     "graph": (
         "图题：建议按需挑选下列边界，不要全抄。"
-        "仅当 constraints 含 T 时才写 edge_T1/edge_Tmax；无多测禁止写。"
+        "仅当 constraints 含 T 时才写 edge_Tmax（可配 big_T_small_n）；不要写 edge_T1。"
         "有多测时输入格式跟标程（先 T 再各组）。"
         "edge_n1：无自环则 m=0（空边列表合法时可空输出），允许自环可用 (1,1)。"
         "complete 须控制 n 使边数≤m 上界。"
@@ -121,7 +128,10 @@ _TYPE_HINT_HEADER = {
     "string": "字符串题：建议 edge_cases 覆盖以下边界（按需挑选，不要全抄）",
     "number_theory": "数论题：建议 edge_cases 覆盖以下边界（按需挑选，不要全抄）",
     "geometry": "几何题：建议 edge_cases 覆盖以下边界（按需挑选，不要全抄）。优先用 ConvexHull/SimplePolygon/RandomPoints",
-    "multi_test": "多测题：建议 edge_cases 覆盖以下边界（按需挑选，不要全抄）",
+    "multi_test": (
+        "多测题：建议 edge_cases 覆盖以下边界（按需挑选，不要全抄）。"
+        "优先 edge_Tmax / big_T_small_n / edge_nmax；不要写 edge_T1（与 edge_nmax/攻n 重复）。"
+    ),
     "dp": "DP 题：建议覆盖规模边界与退化背包/转移情形",
     "matrix": "矩阵题：建议覆盖 1×1、满规模、单行/单列",
     "range_query": "区间查询题：建议覆盖 n/q 极值与点询/整段询",
@@ -156,7 +166,8 @@ def _build_all_type_hints_block() -> str:
         lines.append(f"- {typ}: {header} → {', '.join(examples)}")
     lines.append(
         "最终 edge_cases 必须与题面/标程一致；有特殊结构约束时额外加对应边界。"
-        "无多测 T（constraints 无 T/t）时禁止写 edge_T1/edge_Tmax。\n"
+        "无多测 T（constraints 无 T/t）时禁止写 edge_Tmax/edge_T1；"
+        "有多测时不要写 edge_T1（T=1 已被 edge_nmax/攻n 覆盖）。\n"
     )
     return "\n".join(lines)
 
@@ -177,7 +188,7 @@ def _build_special_samples_block(
             "1. edge_cases 不要写 special_samples；\n"
             "2. 不要在本阶段规划特殊构造方案或 gen_special；"
             "系统会在写出 range 后单独调用大模型（题面+标程）理解特殊样例，并产出 1 条方案（mode 由模型选，用户可手改）。\n"
-            "3. count 必须写 15（常规样例数）；特殊组由后续选中方案叠加，不要自行加减。\n"
+            "3. count 由你自定（常规样例数，不得小于 15）；特殊组由后续选中方案叠加，不要自行加减。\n"
         )
     if auto_discover_special:
         return (
@@ -187,7 +198,7 @@ def _build_special_samples_block(
             "1. edge_cases 不要写 special_samples；\n"
             "2. 不要在本阶段规划特殊构造方案；"
             "系统将单独调用大模型根据标程/题面理解后产出 1 条方案（mutate/build 由模型选择）。\n"
-            "3. count 必须写 15（常规样例数）。\n"
+            "3. count 由你自定（常规样例数，不得小于 15）。\n"
         )
     return ""
 
@@ -267,7 +278,8 @@ def propose_range_json(
         f"{pre_titles_block}"
         f"{struct_hint_block}"
         f"{special_block}"
-        f"\ncount 必须写 15（常规样例数默认；用户未另行指定时禁止写其它数字）。"
+        f"\ncount 由你根据覆盖需求自定（常规样例数），不得小于 {MIN_REGULAR_COUNT}；"
+        f"若需组数×规模×数值小中大全组合，建议 ≥27；用户未另行指定时不要无故写成小于 {MIN_REGULAR_COUNT}。"
         f"constraints 覆盖题面中的规模变量（如 n、T、m）。"
         f"edge_cases 用简短英文标识符，总数 4～6 个即可（含最小/最大规模与关键结构边界）。"
         f"写完 write_range 后 finish。"
@@ -305,11 +317,11 @@ def propose_range_json(
             apply_schemes_to_range,
             discover_special_schemes,
         )
-        # 用户未提供数据方案：常规样例数固定默认 15，不信任 LLM 写的 count
-        regular = 15
+        # 常规样例数信任 LLM（≥下限）；若残留旧特殊计数先剥掉再叠加
+        regular = infer_regular_count(data)
         print(
             f"[range_agent] discover special schemes "
-            f"(hint_len={len(hint)}, auto={bool(auto_discover_special)}, type={typ})",
+            f"(hint_len={len(hint)}, auto={bool(auto_discover_special)}, type={typ}, regular={regular})",
             flush=True,
         )
         schemes = discover_special_schemes(
@@ -332,14 +344,15 @@ def propose_range_json(
         )
         print(f"[range_agent] special schemes = {len(schemes)}", flush=True)
     else:
-        data["count"] = 15
+        data["count"] = _clamp_regular_count(data.get("count"))
         data.pop("special_samples_desc", None)
         if not data.get("special_schemes"):
             data.pop("special_samples_count", None)
             data.pop("special_schemes", None)
         print(
-            "[range_agent] skip special discover "
-            "(no special_samples_desc and auto_discover_special=false); count forced to 15",
+            f"[range_agent] skip special discover "
+            f"(no special_samples_desc and auto_discover_special=false); "
+            f"count={data['count']} (AI-chosen, min={MIN_REGULAR_COUNT})",
             flush=True,
         )
 

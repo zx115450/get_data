@@ -20,6 +20,7 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from sandbox.run import EXIT_MEMORY, is_stack_overflow, parse_memory_limit_mb, safe_run
+from pipeline.gen_data import DEFAULT_REGULAR_COUNT
 
 # testlib.h / generator.h / 内置 checker 源码（随项目分发）
 # 编译时用 -I sandbox，job 目录不再落盘头文件；打包源码时从 sandbox 取头文件。
@@ -44,6 +45,9 @@ CHECKER_TEMPLATES = (
     "matching",            # 匹配/配对方案验证
     "tree_parent",         # 树父节点/边集验证
 )
+
+# SPJ 单测墙钟硬超时（秒）：与 prompts.CHECKER_COMPLEXITY_RULES 一致（设计 ≤1s，硬超时 2s）
+CHECKER_TIMEOUT_S = 2
 
 # 题型里通常会用到 generator.h 的集合（供 runner / 提示词参考）
 GENERATOR_PROBLEM_TYPES = frozenset({
@@ -73,16 +77,12 @@ def _include_flags() -> str:
     return f'-I"{inc}"'
 
 
-# Finder：适度加大栈（勿用默认 ~1MB）。不宜过大——Windows Job Object 的
-# ProcessMemoryLimit 会计入已提交栈，256MB 栈会严重挤占堆预算导致假 OOM。
-FINDER_STACK_BYTES = 32 * 1024 * 1024  # 32MB，迭代搜索足够
-FINDER_STACK_MB = FINDER_STACK_BYTES // (1024 * 1024)
-FINDER_DEFAULT_TIMEOUT_SEC = 5
-FINDER_DEFAULT_MEMORY_MB = 1024
-FINDER_MAX_TIMEOUT_SEC = 15
-FINDER_MAX_MEMORY_MB = 2048
-FINDER_MAX_HITS = 1
-FINDER_DIR_NAME = "special_findings"
+SPECIAL_META_DIR_NAME = "special_meta"
+
+# Windows MinGW 默认栈约 1MB，树/图 gen·validator 递归判连通在链上易炸；对齐标程 16MB。
+# POSIX 链接 -z stack-size 可能不被支持，运行时再用 RLIMIT_STACK（stack_limit_mb）兜底。
+DEFAULT_STACK_BYTES = 16 * 1024 * 1024  # 16MB
+DEFAULT_STACK_MB = DEFAULT_STACK_BYTES // (1024 * 1024)
 
 
 def _stack_link_flags(stack_bytes: int | None) -> str:
@@ -94,6 +94,13 @@ def _stack_link_flags(stack_bytes: int | None) -> str:
         return f" -Wl,--stack,{n}"
     # GNU gold/lld 支持；GNU ld 可能失败，调用方应准备重试
     return f" -Wl,-z,stack-size={n}"
+
+
+def _runtime_stack_limit_mb() -> int | None:
+    """POSIX 运行时抬高 RLIMIT_STACK；Windows 栈靠链接参数，此处返回 None。"""
+    if os.name == "nt":
+        return None
+    return DEFAULT_STACK_MB
 
 
 def _compile_cpp(
@@ -153,6 +160,7 @@ class JobContext:
     last_gen_hash: str = ""
     last_val_hash: str = ""
     last_special_gen_hash: str = ""
+    last_special_check_hash: str = ""
 
 
 _job_ctx: ContextVar[JobContext | None] = ContextVar("agent_job_context", default=None)
@@ -172,6 +180,28 @@ def _wd() -> Path:
 
 def _std() -> str:
     return get_context().std_cmd
+
+
+def _resolve_std_cmd() -> str:
+    """解析可用的标程命令：优先 job 目录下已编译的 std，返回绝对路径。"""
+    local = _wd() / _exe("std")
+    if local.is_file():
+        return str(local.resolve())
+    cmd = (_std() or "").strip()
+    if not cmd:
+        return ""
+    p = Path(cmd)
+    if p.is_file():
+        return str(p.resolve())
+    # 相对项目根的路径：拼成绝对路径（若存在）
+    try:
+        root = Path(__file__).resolve().parent.parent
+        cand = (root / cmd).resolve()
+        if cand.is_file():
+            return str(cand)
+    except Exception:
+        pass
+    return cmd
 
 
 def set_context(work_dir: str, std_cmd: str) -> JobContext:
@@ -243,6 +273,8 @@ def write_file(path: str, content: str) -> str:
         return write_gen(content)
     if name == "gen_special.cpp":
         return write_special_gen(content)
+    if name == "check_special.cpp":
+        return write_special_check(content)
     if name in ("validator.cpp", "validate.py"):
         return write_validate(content)
     if name == "range.json":
@@ -304,11 +336,13 @@ def write_gen(content: str) -> str:
 
     (ctx.work_dir / "gen.cpp").write_text(content, encoding="utf-8")
     compile_timeout = 120 if _needs_generator(content) else 60
-    rc, out, err = _compile_cpp("gen.cpp", "gen", timeout=compile_timeout)
+    rc, out, err = _compile_cpp(
+        "gen.cpp", "gen", timeout=compile_timeout, stack_bytes=DEFAULT_STACK_BYTES
+    )
     if rc != 0:
         return _compile_err("gen.cpp", rc, out, err)
     ctx.last_gen_hash = h
-    return f"OK: wrote & compiled gen ({len(content)} chars)"
+    return f"OK: wrote & compiled gen ({len(content)} chars, stack={DEFAULT_STACK_MB}MB)"
 
 
 def write_special_gen(content: str) -> str:
@@ -329,11 +363,73 @@ def write_special_gen(content: str) -> str:
 
     (ctx.work_dir / "gen_special.cpp").write_text(content, encoding="utf-8")
     compile_timeout = 120 if _needs_generator(content) else 60
-    rc, out, err = _compile_cpp("gen_special.cpp", "gen_special", timeout=compile_timeout)
+    rc, out, err = _compile_cpp(
+        "gen_special.cpp",
+        "gen_special",
+        timeout=compile_timeout,
+        stack_bytes=DEFAULT_STACK_BYTES,
+    )
     if rc != 0:
         return _compile_err("gen_special.cpp", rc, out, err)
     ctx.last_special_gen_hash = h
-    return f"OK: wrote & compiled gen_special ({len(content)} chars)"
+    return (
+        f"OK: wrote & compiled gen_special "
+        f"({len(content)} chars, stack={DEFAULT_STACK_MB}MB)"
+    )
+
+
+def write_special_check(content: str) -> str:
+    """写入 check_special.cpp：判定特殊样例 must_hold（stdin→exit 0/1）。"""
+    ctx = get_context()
+    if _looks_like_omitted_stub(content):
+        return (
+            "ERROR: content 像是摘要，不是完整 check_special.cpp。"
+            "请输出完整源码：从 stdin 读入与 gen 同格式的输入，"
+            "must_hold 成立 exit 0，否则 exit 1 并在 stderr 写原因。"
+        )
+    if "main" not in (content or ""):
+        return "ERROR: check_special.cpp 必须包含 main"
+    banned = re.search(
+        r"\b(system|popen|_popen|execve|fork|CreateProcess)\s*\(",
+        content or "",
+        re.I,
+    )
+    if banned:
+        return "ERROR: check_special 禁止 system/popen/fork 等进程调用"
+    h = _content_hash(content)
+    exe_path = ctx.work_dir / _exe("check_special")
+    if h == ctx.last_special_check_hash and exe_path.exists():
+        (ctx.work_dir / "check_special.cpp").write_text(content, encoding="utf-8")
+        return f"OK: check_special unchanged (hash={h[:12]}…), skipped recompile"
+    (ctx.work_dir / "check_special.cpp").write_text(content, encoding="utf-8")
+    rc, out, err = _compile_cpp("check_special.cpp", "check_special", timeout=60)
+    if rc != 0:
+        return _compile_err("check_special.cpp", rc, out, err)
+    ctx.last_special_check_hash = h
+    return f"OK: wrote & compiled check_special ({len(content)} chars)"
+
+
+def run_property_check(input_text: str) -> str:
+    """把 input 喂给 check_special；exit 0 → OK，否则 ERROR。"""
+    exe = _wd() / _exe("check_special")
+    if not exe.is_file():
+        return "ERROR: check_special 未编译，请先 write_special_check"
+    mem_mb = _memory_limit_mb()
+    rc, out, err = safe_run(
+        _exe("check_special"),
+        stdin=input_text if input_text is not None else "",
+        timeout=10,
+        cwd=str(_wd()),
+        memory_limit_mb=mem_mb,
+    )
+    if rc == 0:
+        return "OK: property_check passed"
+    if rc == 124:
+        return "ERROR: property_check TIMEOUT"
+    if rc == EXIT_MEMORY:
+        return f"ERROR: property_check MEMORY_LIMIT ({mem_mb} MB)"
+    detail = (err or out or "").strip()[:500]
+    return f"ERROR: property_check failed rc={rc}: {detail or '(no stderr)'}"
 
 
 def write_validate(content: str) -> str:
@@ -353,11 +449,16 @@ def write_validate(content: str) -> str:
         return f"OK: validator unchanged (hash={h[:12]}…), skipped recompile"
 
     (ctx.work_dir / "validator.cpp").write_text(content, encoding="utf-8")
-    rc, out, err = _compile_cpp("validator.cpp", "validator", timeout=60)
+    rc, out, err = _compile_cpp(
+        "validator.cpp", "validator", timeout=60, stack_bytes=DEFAULT_STACK_BYTES
+    )
     if rc != 0:
         return _compile_err("validator.cpp", rc, out, err)
     ctx.last_val_hash = h
-    return f"OK: wrote & compiled validator ({len(content)} chars)"
+    return (
+        f"OK: wrote & compiled validator "
+        f"({len(content)} chars, stack={DEFAULT_STACK_MB}MB)"
+    )
 
 
 def ensure_self_check_prereqs(
@@ -371,11 +472,12 @@ def ensure_self_check_prereqs(
       （除非 skip_recompile 含该名字——本步 write_* 刚编译失败时不要用同一份坏源码再编一次）
     - 若源码也不存在 / 跳过重编译：返回缺失项，由调用方提示 Agent 先 write_*
 
-    skip_recompile: 可选 {"gen", "validator", "gen_special"}，表示本步已确认编译失败，禁止重试。
+    skip_recompile: 可选 {"gen", "validator", "gen_special", "check_special"}，
+      表示本步已确认编译失败，禁止重试。
     require_special:
       - None：按 range.json 是否启用特殊样例自动决定
       - False：不要求 gen_special（普通 Gen 阶段）
-      - True：若启用特殊样例则必须有 gen_special（SpecialCoder 阶段）
+      - True：若启用特殊样例则必须有 gen_special + check_special（SpecialCoder 阶段）
 
     返回 (ready, message)。
     """
@@ -432,6 +534,25 @@ def ensure_self_check_prereqs(
                 notes.append("已从磁盘重编译 gen_special")
             else:
                 missing.append("gen_special")
+        # 仅 SpecialCoder（require_special=True）强制性质检查器
+        if require_special is True:
+            check_exe = _wd() / _exe("check_special")
+            check_src = _wd() / "check_special.cpp"
+            if not check_exe.exists():
+                if "check_special" in skip:
+                    missing.append("check_special")
+                    just_failed.append("check_special")
+                elif check_src.is_file():
+                    try:
+                        content = check_src.read_text(encoding="utf-8")
+                    except Exception as e:
+                        return False, f"读取 check_special.cpp 失败: {type(e).__name__}: {e}"
+                    msg = write_special_check(content)
+                    if not str(msg).startswith("OK"):
+                        return False, f"尝试重编译 check_special.cpp 失败: {msg}"
+                    notes.append("已从磁盘重编译 check_special")
+                else:
+                    missing.append("check_special")
 
     if not val_exe.exists():
         if "validator" in skip:
@@ -461,6 +582,16 @@ def ensure_self_check_prereqs(
                 hints.append("本步 write_special_gen 已编译失败，请修复 gen_special.cpp 后重新 write_special_gen（勿用同一份坏源码空转）")
             else:
                 hints.append("range.json 启用了特殊样例，请先 write_special_gen 写出完整可编译的 gen_special.cpp")
+        if "check_special" in missing:
+            if "check_special" in just_failed:
+                hints.append(
+                    "本步 write_special_check 已编译失败，请修复 check_special.cpp 后重新 write_special_check"
+                )
+            else:
+                hints.append(
+                    "请先 write_special_check 写出完整可编译的 check_special.cpp"
+                    "（判定 must_hold：成立 exit 0，否则 exit 1）"
+                )
         if "validator" in missing:
             if "validator" in just_failed:
                 hints.append(
@@ -472,6 +603,46 @@ def ensure_self_check_prereqs(
         return False, "缺少已编译产物: " + "、".join(missing) + "。" + "；".join(hints)
 
     return True, ("；".join(notes) if notes else "gen/validator 已就绪")
+
+
+def _invalidate_checker_exe() -> None:
+    """删除 checker 可执行文件，避免编译失败后仍跑旧模板/旧二进制。"""
+    exe = _wd() / _exe("checker")
+    try:
+        if exe.exists():
+            exe.unlink()
+    except OSError:
+        pass
+
+
+def _checker_exe_stale_or_placeholder() -> str | None:
+    """若 checker 源码与 exe 不一致或仍是未替换模板，返回 SYSTEM 原因；否则 None。"""
+    wd = _wd()
+    src = wd / "checker.cpp"
+    exe = wd / _exe("checker")
+    if not exe.exists():
+        return "checker 未编译（无可执行文件）"
+    if not src.exists():
+        return None
+    try:
+        if src.stat().st_mtime > exe.stat().st_mtime + 0.05:
+            return (
+                "checker.cpp 新于 checker 可执行文件（上次编译失败后残留旧 exe 已失效或未重编）"
+            )
+    except OSError:
+        pass
+    try:
+        body = src.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    markers = (
+        "TODO: replace template placeholder",
+        "accepted by template placeholder",
+        "template placeholder",
+    )
+    if any(m in body for m in markers):
+        return "checker.cpp 仍是未替换的模板占位（quitf(_fail/placeholder)），请 write_checker 写入完整判定逻辑"
+    return None
 
 
 def write_checker(content: str) -> str:
@@ -487,6 +658,8 @@ def write_checker(content: str) -> str:
     (_wd() / "checker.cpp").write_text(content, encoding="utf-8")
     rc, out, err = _compile_cpp("checker.cpp", "checker", timeout=60)
     if rc != 0:
+        # 编译失败时清掉旧 exe，防止自检误跑模板/上一版并报假 PE/LOGIC
+        _invalidate_checker_exe()
         return _compile_err("checker.cpp", rc, out, err)
     return f"OK: wrote & compiled checker ({len(content)} chars)"
 
@@ -519,9 +692,10 @@ def use_builtin_checker(name: str) -> str:
 
 
 def use_checker_template(name: str) -> str:
-    """使用 checker 模板（目前支持 construct_verify），生成骨架 checker.cpp 并编译。
+    """使用 checker 模板生成骨架 checker.cpp 并编译。
 
-    模板会提供一个可编译通过的骨架，模型后续用 read_file + write_checker 替换 TODO 部分。
+    骨架以 quitf(_fail, \"TODO: replace template placeholder\") 占位，
+    不可直接用于自检；模型必须再用 write_checker 替换完整判定逻辑。
     """
     name = (name or "").strip().lower()
     if name not in CHECKER_TEMPLATES:
@@ -536,6 +710,7 @@ def use_checker_template(name: str) -> str:
     shutil.copyfile(src, dst)
     rc, out, err = _compile_cpp("checker.cpp", "checker", timeout=60)
     if rc != 0:
+        _invalidate_checker_exe()
         return _compile_err(f"checker template {name}", rc, out, err)
     return f"OK: installed checker template {name} -> checker.cpp ({len(src.read_text(encoding='utf-8'))} chars)"
 
@@ -558,13 +733,28 @@ def run_checker(input_text: str, output_text: str, answer_text: str) -> str:
         ouf.write_text(output_text, encoding="utf-8")
         ans.write_text(answer_text, encoding="utf-8")
 
-        rc, out, err = safe_run(
-            f"{_exe('checker')} {inf} {ouf} {ans}",
-            timeout=10,
-            cwd=str(_wd()),
+        # 绝对路径，避免 cwd/相对路径导致 testlib 报 Output file not found
+        cmd = (
+            f'"{exe.resolve()}" '
+            f'"{inf.resolve()}" "{ouf.resolve()}" "{ans.resolve()}"'
         )
+        rc, out, err = safe_run(cmd, timeout=CHECKER_TIMEOUT_S, cwd=str(_wd()))
         out_s = (out or "").strip()
         err_s = (err or "").strip()
+        # safe_run 超时常见：rc 非 0 且 stderr/stdout 含 TIMEOUT
+        timed_out = (
+            "TIMEOUT" in (out or "").upper()
+            or "TIMEOUT" in (err or "").upper()
+            or "超时" in (err or "")
+            or "超时" in (out or "")
+        )
+        if timed_out:
+            return (
+                f"checker TIMEOUT after {CHECKER_TIMEOUT_S}s (SPJ 复杂度超规：设计≤1s / 硬超时{CHECKER_TIMEOUT_S}s)\n"
+                f"exit_code={rc}\n"
+                f"stdout: {out_s[:500]}{'...' if len(out_s) > 500 else ''}\n"
+                f"stderr: {err_s[:1500]}{'...' if len(err_s) > 1500 else ''}"
+            )
         return (
             f"checker exit_code={rc}\n"
             f"stdout: {out_s[:500]}{'...' if len(out_s) > 500 else ''}\n"
@@ -592,34 +782,101 @@ def _mutate_output(output: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _checker_fail_kind(text: str) -> str:
+    """区分 checker 自检失败：SYSTEM（环境/标程）vs LOGIC（判定逻辑）。"""
+    t = (text or "").lower()
+    system_markers = (
+        "找不到指定的路径",
+        "no such file",
+        "cannot find",
+        "the system cannot find",
+        "std failed",
+        "gen failed",
+        "未编译",
+        "标程不可用",
+        "not found",
+        "errno 2",
+        "winerror 2",
+        "新于 checker",
+        "残留旧",
+        "未替换的模板",
+        "template placeholder",
+        "replace template",
+    )
+    if any(m in t for m in system_markers):
+        return "SYSTEM"
+    return "LOGIC"
+
+
 def run_checker_self_check(count: int = 3) -> str:
     """用当前 gen + std + checker 做 reactive 自检。
 
     正例：用 gen 生成输入，std 跑出答案，把答案同时当 ouf/ans 跑 checker，必须返回 _ok。
-    负例：把答案轻微扰动后当 ouf 跑 checker，必须返回非 _ok（_wa / _pe 均可）。
-    全部通过返回 OK；任一失败返回 ERROR 详情。
+    负例：把答案轻微扰动后当 ouf 跑 checker，必须返回非 _ok（优先 _wa；_pe 也可）。
+    模板占位 / 源码新于 exe / 未编译 → [SYSTEM]。全部通过返回 OK。
     """
     exe = _wd() / _exe("checker")
     if not exe.exists():
-        return "ERROR: checker 未编译，请先 write_checker 或 use_builtin_checker / use_checker_template"
+        return (
+            "ERROR: checker_self_check failed [SYSTEM]\n"
+            "checker 未编译，请先 write_checker 或 use_builtin_checker / use_checker_template"
+        )
+    stale = _checker_exe_stale_or_placeholder()
+    if stale:
+        return (
+            f"ERROR: checker_self_check failed [SYSTEM]\n"
+            f"{stale}\n"
+            "请 write_checker 写出完整可编译判定逻辑后再自检（勿用未替换模板跑自检）。"
+        )
     if not (_wd() / _exe("gen")).exists():
-        return "ERROR: gen 未编译，无法为 checker 生成测试输入"
-    if not (_wd() / _exe("std")).exists() and not _std():
-        return "ERROR: 标程不可用，无法为 checker 生成标准答案"
+        return (
+            "ERROR: checker_self_check failed [SYSTEM]\n"
+            "gen 未编译，无法为 checker 生成测试输入"
+        )
+    if not _resolve_std_cmd():
+        return (
+            "ERROR: checker_self_check failed [SYSTEM]\n"
+            "标程不可用，无法为 checker 生成标准答案"
+        )
 
     rj = _load_range_json()
     edge_cases = list(rj.get("edge_cases") or [])
-    total_count = int(rj.get("count") or 15)
+    total_count = max(1, int(rj.get("count") or DEFAULT_REGULAR_COUNT))
 
-    checks = []
-    # 正例：count 个不同规模 / 边界
-    for i in range(count):
-        idx = min(i, total_count - 1)
-        checks.append(("random", 2000 + i, idx, True))
-    if edge_cases:
-        checks.append((edge_cases[0], 2002, 0, True))
-    # 负例：同样输入，扰动输出
-    checks.append(("random", 3000, 0, False))
+    # 优先小规模 edge，避免 edge_nmax 导致标程输出爆炸拖垮自检
+    checks: list[tuple[str, int, int, bool]] = []
+    small_edges = [
+        e for e in edge_cases
+        if e in ("edge_n1", "edge_n2", "edge_T1")
+        or e.endswith("_n1")
+        or e.endswith("_n2")
+        or "n1" in e
+        or "n2" in e
+    ]
+    for i, name in enumerate(small_edges[:2]):
+        checks.append((name, 2100 + i, 0, True))
+    # 再补一个低档 random（index=0）
+    checks.append(("random", 2000, 0, True))
+    if not small_edges and edge_cases:
+        # 无小 edge 时取第一个非 nmax 的
+        for e in edge_cases:
+            if "nmax" in e.lower() or "max" == e.lower():
+                continue
+            checks.append((e, 2002, 0, True))
+            break
+    # 负例：优先小 edge
+    neg_type = small_edges[0] if small_edges else "random"
+    checks.append((neg_type, 3000, 0, False))
+    # 去重保序
+    seen_keys = set()
+    uniq_checks = []
+    for c in checks:
+        key = (c[0], c[1], c[3])
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        uniq_checks.append(c)
+    checks = uniq_checks[: max(3, count + 1)]
 
     lines = [f"checker_self_check start: count={count} planned_checks={len(checks)}"]
     fails = []
@@ -638,20 +895,47 @@ def run_checker_self_check(count: int = 3) -> str:
 
         ouf = std_out if is_positive else _mutate_output(std_out)
         result = run_checker(gen_out, ouf, std_out)
-        ok = result.startswith("checker exit_code=0") or "_ok" in result
+        timed_out = "TIMEOUT" in (result or "").upper() or "复杂度超规" in (result or "")
+        ok = (
+            not timed_out
+            and (result.startswith("checker exit_code=0") or "_ok" in result)
+        )
         status = "OK" if ok else "NOT_OK"
         expected = "expected _ok" if is_positive else "expected _wa or _pe"
+        if timed_out:
+            expected = (
+                f"expected finish within {CHECKER_TIMEOUT_S}s "
+                f"(SPJ 设计≤1s；超时=复杂度超规)"
+            )
         lines.append(f"{status} type={typ} seed={seed} positive={is_positive} {expected}\n{result[:400]}")
-        if is_positive and not ok:
+        if timed_out:
+            fails.append((typ, seed, "checker TIMEOUT / complexity exceeded"))
+        elif is_positive and not ok:
             fails.append((typ, seed, "positive case rejected by checker"))
         elif not is_positive and ok:
             fails.append((typ, seed, "negative case accepted by checker"))
 
     if fails:
+        detail = "\n".join(lines)
+        kind = _checker_fail_kind(detail)
+        if kind == "SYSTEM":
+            hint = (
+                "【SYSTEM】环境/标程/生成器问题，不是 checker 逻辑。"
+                "不要 rewrite checker；请直接再调用 run_checker_self_check()。"
+                "若仍 SYSTEM，finish 并说明环境失败（不计入 write_checker 次数）。"
+            )
+        else:
+            hint = (
+                "【LOGIC】checker 判定逻辑有误或复杂度超规（设计≤1s / 硬超时 "
+                f"{CHECKER_TIMEOUT_S}s）。"
+                "请根据失败信息修复 checker.cpp 后重新 write_checker，再 run_checker_self_check。"
+                "超时须改用线性/近线性验证，禁止 MITM/指数/大 N 的 N^2。"
+            )
         return (
-            "ERROR: checker_self_check failed\n"
-            + "\n".join(lines)
-            + "\n请根据失败信息修复 checker.cpp 后重新 write_checker，再 run_checker_self_check。"
+            f"ERROR: checker_self_check failed [{kind}]\n"
+            + detail
+            + "\n"
+            + hint
         )
     return "OK: checker_self_check passed\n" + "\n".join(lines)
 
@@ -672,12 +956,20 @@ def _run_gen_raw(seed: int, typ: str, idx: int, count: int) -> str:
 
 
 def _run_std_raw(input_text: str) -> str:
-    """内部：跑标程返回原始输出，失败返回 ERROR 开头字符串。"""
+    """内部：跑标程返回原始输出，失败返回 ERROR 开头字符串。
+
+    使用绝对路径标程，不强制 cwd=job_dir（避免相对 std_cmd 找不到）。
+    """
+    cmd = _resolve_std_cmd()
+    if not cmd:
+        return "ERROR: std failed (rc=-1): 标程路径不可用"
+    timeout = _std_timeout_s()
+    mem_mb = _memory_limit_mb()
     rc, out, err = safe_run(
-        _std(),
+        cmd,
         stdin=input_text,
-        timeout=30,
-        cwd=str(_wd()),
+        timeout=timeout,
+        memory_limit_mb=mem_mb,
     )
     if rc != 0:
         return f"ERROR: std failed (rc={rc}): {err or out}"
@@ -710,7 +1002,7 @@ def _memory_limit_mb(rj: dict | None = None):
     return parse_memory_limit_mb(rj if rj is not None else _load_range_json())
 
 
-def run_gen(seed: int, type: str = "random", index: int = -1, count: int = 15) -> str:
+def run_gen(seed: int, type: str = "random", index: int = -1, count: int = -1) -> str:
     """跑编译好的 gen 二进制：`./gen --seed N --type T [--index i --count C]`，返回 stdout。
 
     若 type == "special_samples" 且存在 gen_special 二进制，则自动转调 gen_special。
@@ -721,6 +1013,11 @@ def run_gen(seed: int, type: str = "random", index: int = -1, count: int = 15) -
     """
     if index < 0:
         index = seed
+    if count is None or int(count) < 0:
+        try:
+            count = int((_load_range_json() or {}).get("count") or DEFAULT_REGULAR_COUNT)
+        except Exception:
+            count = DEFAULT_REGULAR_COUNT
     mem_mb = _memory_limit_mb()
     exe_name = _pick_gen_exe(type)
     rc, out, err = safe_run(
@@ -728,6 +1025,7 @@ def run_gen(seed: int, type: str = "random", index: int = -1, count: int = 15) -
         timeout=5,
         cwd=str(_wd()),
         memory_limit_mb=mem_mb,
+        stack_limit_mb=_runtime_stack_limit_mb(),
     )
     if rc != 0:
         if rc == 124:
@@ -742,6 +1040,12 @@ def run_gen(seed: int, type: str = "random", index: int = -1, count: int = 15) -
                 f"ERROR gen MEMORY_LIMIT ({mem_mb} MB) type={type} seed={seed}: "
                 f"生成器内存超限。请降低单组规模，或避免 O(n^2) 大数组/边池；"
                 f"必要时调高 range.json 的 memory_limit_mb。"
+            )
+        if is_stack_overflow(rc):
+            return (
+                f"ERROR gen STACK_OVERFLOW type={type} seed={seed}: "
+                f"递归过深导致栈溢出（已链接 {DEFAULT_STACK_MB}MB 栈）；"
+                f"请改为迭代/显式栈，或降低链深度"
             )
         return f"ERROR gen rc={rc}: {(err or '').strip()}"
     # 允许空 stdout：部分题（EOF 读入、m=0）合法输入就是空文件；
@@ -758,11 +1062,18 @@ def run_validate(input_text: str) -> str:
         timeout=10,
         cwd=str(_wd()),
         memory_limit_mb=mem_mb,
+        stack_limit_mb=_runtime_stack_limit_mb(),
     )
     if rc == 0:
         return "OK: valid"
     if rc == EXIT_MEMORY:
         return f"ERROR validate MEMORY_LIMIT ({mem_mb} MB): {(err or '').strip()}"
+    if is_stack_overflow(rc):
+        return (
+            "ERROR validate STACK_OVERFLOW: 递归过深导致栈溢出"
+            f"（已链接 {DEFAULT_STACK_MB}MB 栈）；"
+            "请将连通性等检查改为并查集/BFS/显式栈，禁止深递归 DFS"
+        )
     return f"ERROR validate rc={rc}: {err.strip()}"
 
 
@@ -800,6 +1111,11 @@ def read_range() -> str:
     return p.read_text(encoding="utf-8")
 
 
+def _is_special_type(typ: str) -> bool:
+    t = (typ or "").strip()
+    return t == "special_samples" or t.startswith("special:")
+
+
 def _triple_check(
     seed: int,
     typ: str,
@@ -808,7 +1124,7 @@ def _triple_check(
     std_timeout: int,
     mem_mb=None,
 ) -> tuple[str, str, str]:
-    """单组 gen→validate→std。
+    """单组 gen→validate→[property_check]→std。
 
     返回 (msg, input_text, output_text)。
     成功时 msg 以 OK 开头，input/output 为可落盘内容；失败时后两者为空。
@@ -819,6 +1135,17 @@ def _triple_check(
     val = run_validate(gen_out)
     if not val.startswith("OK"):
         return f"FAIL type={typ} seed={seed} validate: {val}", "", ""
+    if _is_special_type(typ):
+        if not (_wd() / _exe("check_special")).is_file():
+            return (
+                f"FAIL type={typ} seed={seed}: check_special 未编译，"
+                f"请先 write_special_check",
+                "",
+                "",
+            )
+        prop = run_property_check(gen_out if isinstance(gen_out, str) else "")
+        if not (isinstance(prop, str) and prop.startswith("OK")):
+            return f"FAIL type={typ} seed={seed} property_check: {prop}", "", ""
     # 直接调 safe_run 以便用 std_timeout（run_std 会再读 range，此处统一）
     rc, out, err = safe_run(
         _std(), stdin=gen_out, timeout=std_timeout, memory_limit_mb=mem_mb
@@ -965,7 +1292,7 @@ def run_self_check(
         return f"ERROR: range.json 非法: {e}"
 
     rj = normalize_range_json(dict(rj))
-    count = int(rj.get("count") or 15)
+    count = int(rj.get("count") or DEFAULT_REGULAR_COUNT)
     edge_cases = list(rj.get("edge_cases") or [])
     scheme_schedule = _selected_scheme_schedule(rj)
     special_count = sum(n for _, n in scheme_schedule) if scheme_schedule else int(
@@ -982,6 +1309,11 @@ def run_self_check(
         return "ERROR: gen 未编译，请先 write_gen"
     if has_special and not (_wd() / _exe("gen_special")).exists():
         return "ERROR: range.json 启用了特殊样例，但 gen_special 未编译，请先 write_special_gen"
+    if special_only and not (_wd() / _exe("check_special")).exists():
+        return (
+            "ERROR: special_only 需要 check_special，请先 write_special_check"
+            "（判定 must_hold：成立 exit 0，否则 exit 1）"
+        )
     if not (_wd() / _exe("validator")).exists():
         return "ERROR: validator 未编译，请先 write_validate"
 
@@ -1163,307 +1495,15 @@ def run_self_check(
     return "OK: self_check passed\n" + "\n".join(lines)
 
 
-# ---- Finder：搜索特殊样例并留痕 ----
-_FINDER_BANNED_RE = re.compile(
-    r"\b(system|popen|_popen|execve|execl|fork|CreateProcess|ShellExecute|"
-    r"std::system)\s*\(",
-    re.I,
-)
-_FINDER_HUGE_ARRAY_RE = re.compile(
-    r"(?:int|long|char|double|float|bool|auto)\s+\w+\s*"
-    r"\[\s*(\d{8,}|\d+\s*\*\s*\d+\s*\*\s*\d+)\s*\]"
-)
-
-
+# ---- Special 元数据目录（decision.json 等）----
 def _sanitize_scheme_id(scheme_id: str) -> str:
     sid = re.sub(r"[^a-zA-Z0-9_]", "_", (scheme_id or "special").strip()).strip("_")
     return sid or "special"
 
 
-def finder_dir(scheme_id: str) -> Path:
-    """special_findings/<scheme_id>/ 目录。"""
-    return _wd() / FINDER_DIR_NAME / _sanitize_scheme_id(scheme_id)
-
-
-_FINDER_HUGE_ALLOC_RE = re.compile(
-    r"(?:"
-    # 显式 1e6/1e7 级分配
-    r"vector\s*<[^;]{0,80}>\s*\w+\s*\([^;]{0,60}(?:1e[6-9]|[1-9]\d{6,})"
-    r"|\[\s*(?:1e[6-9]|[1-9]\d{6,})\s*\]"
-    r"|(?:vis|sieve|minp|prime|is_prime|lp|phi|mu)\w*\s*\(\s*(?:N\s*\+\s*)?(?:1e[6-9]|[1-9]\d{6,})"
-    r"|(?:const\s+)?(?:int|long|long\s+long|size_t)\s+N\s*=\s*(?:1e[6-9]|[1-9]\d{6,})\b"
-    r"|#define\s+N\s+(?:1e[6-9]|[1-9]\d{6,})\b"
-    r"|new\s+(?:int|long|bool|char|long\s+long)\s*\[\s*(?:1e[6-9]|[1-9]\d{6,})"
-    r")",
-    re.I,
-)
-
-
-def _finder_static_check(content: str) -> str | None:
-    """控制 finder 源码：禁危险调用、禁超大静态/动态数组、要求复杂度声明。"""
-    if _FINDER_BANNED_RE.search(content or ""):
-        return (
-            "ERROR: finder 禁止 system/popen/fork/exec/CreateProcess 等进程调用；"
-            "只允许纯计算搜索。"
-        )
-    if _FINDER_HUGE_ARRAY_RE.search(content or "") or _FINDER_HUGE_ALLOC_RE.search(content or ""):
-        return (
-            "ERROR: 检测到 1e7 量级大数组/筛（静态或 vector）。"
-            "请改用小窗口搜索与局部判定（避免 1e7 级全表），不要为 Finder 开全量预处理表。"
-        )
-    # 要求源码注释里写清复杂度，便于审查
-    low = (content or "").lower()
-    if "time" not in low and "o(" not in low and "复杂度" not in (content or ""):
-        return (
-            "ERROR: finder.cpp 顶部必须用注释写明时间/空间复杂度上界"
-            "（例如 // time: O(n*tries) space: O(n)，n<=...）。"
-        )
-    if "main" not in (content or ""):
-        return "ERROR: finder.cpp 必须包含 main"
-    return None
-
-
-def _parse_finder_hits(stdout: str, max_hits: int) -> list[str]:
-    """从 finder stdout 解析 ---BEGIN--- ... ---END--- 块。"""
-    text = stdout or ""
-    hits: list[str] = []
-    pattern = re.compile(
-        r"---BEGIN---\s*\n(.*?)---END---",
-        re.S,
-    )
-    for m in pattern.finditer(text):
-        body = (m.group(1) or "").strip("\n")
-        if body.strip():
-            hits.append(body if body.endswith("\n") else body + "\n")
-        if len(hits) >= max_hits:
-            break
-    return hits
-
-
-def write_finder(content: str, scheme_id: str = "special") -> str:
-    """写入 special_findings/<id>/finder.cpp 并带大栈编译。"""
-    if _looks_like_omitted_stub(content):
-        return (
-            "ERROR: content 像是摘要不是完整 finder.cpp。"
-            "请输出完整 C++ 源码（含复杂度注释与 ---BEGIN---/---END--- 输出协议）。"
-        )
-    static_err = _finder_static_check(content)
-    if static_err:
-        return static_err
-
-    sid = _sanitize_scheme_id(scheme_id)
-    fdir = finder_dir(sid)
-    hits_dir = fdir / "hits"
-    fdir.mkdir(parents=True, exist_ok=True)
-    hits_dir.mkdir(parents=True, exist_ok=True)
-    src = fdir / "finder.cpp"
-    src.write_text(content, encoding="utf-8")
-
-    rc, out, err = _compile_cpp(
-        "finder.cpp",
-        "finder",
-        timeout=60,
-        stack_bytes=FINDER_STACK_BYTES,
-        cwd=fdir,
-    )
-    if rc != 0:
-        return _compile_err(f"finder[{sid}]", rc, out, err)
-
-    meta = {
-        "scheme_id": sid,
-        "stack_bytes": FINDER_STACK_BYTES,
-        "stack_mb": FINDER_STACK_MB,
-        "compiled": True,
-        "source_chars": len(content),
-    }
-    (fdir / "meta.json").write_text(
-        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8",
-    )
-    note = (
-        f"OK: wrote & compiled finder for {sid} "
-        f"(stack={FINDER_STACK_MB}MB link/runtime, {len(content)} chars)"
-    )
-    if err and "RLIMIT_STACK" in err:
-        note += f"\n{err.strip()}"
-    return note
-
-
-def run_finder(
-    scheme_id: str = "special",
-    seed: int = 1,
-    max_hits: int = FINDER_MAX_HITS,
-    timeout_sec: int = FINDER_DEFAULT_TIMEOUT_SEC,
-    memory_limit_mb: int = FINDER_DEFAULT_MEMORY_MB,
-) -> str:
-    """运行已编译 finder，解析命中输入并落盘 hits/ + meta.json。"""
-    sid = _sanitize_scheme_id(scheme_id)
-    fdir = finder_dir(sid)
-    exe = fdir / _exe("finder")
-    if not exe.is_file():
-        return f"ERROR: 未找到 {exe}，请先 write_finder"
-    try:
-        max_hits = max(1, min(int(max_hits or FINDER_MAX_HITS), FINDER_MAX_HITS))
-    except (TypeError, ValueError):
-        max_hits = FINDER_MAX_HITS
-    try:
-        timeout_sec = max(
-            1,
-            min(int(timeout_sec or FINDER_DEFAULT_TIMEOUT_SEC), FINDER_MAX_TIMEOUT_SEC),
-        )
-    except (TypeError, ValueError):
-        timeout_sec = FINDER_DEFAULT_TIMEOUT_SEC
-    try:
-        memory_limit_mb = max(
-            64,
-            min(int(memory_limit_mb or FINDER_DEFAULT_MEMORY_MB), FINDER_MAX_MEMORY_MB),
-        )
-    except (TypeError, ValueError):
-        memory_limit_mb = FINDER_DEFAULT_MEMORY_MB
-
-    hits_dir = fdir / "hits"
-    hits_dir.mkdir(parents=True, exist_ok=True)
-    # 清旧 hits
-    for old in hits_dir.glob("*.in"):
-        try:
-            old.unlink()
-        except OSError:
-            pass
-
-    cmd = f'{_exe("finder")} --seed {int(seed)} --max-hits {max_hits}'
-    rc, out, err = safe_run(
-        cmd,
-        timeout=timeout_sec,
-        cwd=str(fdir),
-        memory_limit_mb=memory_limit_mb,
-        stack_limit_mb=FINDER_STACK_MB if os.name != "nt" else None,
-    )
-    (fdir / "run_log.txt").write_text(
-        f"cmd={cmd}\nrc={rc}\ntimeout_sec={timeout_sec}\n"
-        f"memory_limit_mb={memory_limit_mb}\nstack_mb={FINDER_STACK_MB}\n\n"
-        f"=== stdout ===\n{out or ''}\n\n=== stderr ===\n{err or ''}\n",
-        encoding="utf-8",
-    )
-
-    if rc == 124:
-        status = "timeout"
-        hits: list[str] = _parse_finder_hits(out or "", max_hits)
-    elif rc == EXIT_MEMORY:
-        status = "oom"
-        hits = []
-    elif is_stack_overflow(rc):
-        status = "stack_overflow"
-        hits = []
-    elif rc not in (0, 1):
-        # 约定：0=有命中，1=无命中但正常结束；其它为运行错误
-        status = "error"
-        hits = _parse_finder_hits(out or "", max_hits)
-    else:
-        hits = _parse_finder_hits(out or "", max_hits)
-        status = "ok" if hits else "none"
-
-    saved_paths: list[str] = []
-    for i, body in enumerate(hits, 1):
-        rel = f"hits/{i}.in"
-        (fdir / rel).write_text(body, encoding="utf-8")
-        saved_paths.append(f"{FINDER_DIR_NAME}/{sid}/{rel}")
-
-    # 可选：对命中做 validator 快筛（不阻断，结果写入 meta）
-    validated: list[dict] = []
-    for p in saved_paths:
-        text = (_wd() / p).read_text(encoding="utf-8")
-        v = run_validate(text)
-        validated.append({
-            "path": p,
-            "validate": "OK" if isinstance(v, str) and v.startswith("OK") else str(v)[:200],
-        })
-
-    meta_path = fdir / "meta.json"
-    meta = {}
-    if meta_path.is_file():
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            meta = {}
-    meta.update({
-        "scheme_id": sid,
-        "status": status,
-        "rc": rc,
-        "seed": int(seed),
-        "max_hits": max_hits,
-        "timeout_sec": timeout_sec,
-        "memory_limit_mb": memory_limit_mb,
-        "stack_bytes": FINDER_STACK_BYTES,
-        "stack_mb": FINDER_STACK_MB,
-        "hits": saved_paths,
-        "validated": validated,
-        "stderr_tail": (err or "")[-500:],
-    })
-    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    if status == "timeout":
-        return (
-            f"ERROR: finder TIMEOUT after {timeout_sec}s "
-            f"(partial_hits={len(saved_paths)}). "
-            f"允许 O(n^2)，但请缩小搜索上界/分层枚举，或提高 timeout_sec（≤{FINDER_MAX_TIMEOUT_SEC}）后重写。"
-            + (f"\nhits: {saved_paths}" if saved_paths else "")
-        )
-    if status == "oom":
-        # 已在 GB 级仍 OOM：几乎一定是代码开了全量大正表，再加 memory 无用
-        bump_hint = (
-            f"可试 memory_limit_mb≤{FINDER_MAX_MEMORY_MB}；"
-            if memory_limit_mb < FINDER_MAX_MEMORY_MB
-            else "已达内存上限，禁止再加 memory_limit_mb；"
-        )
-        return (
-            f"ERROR: finder MEMORY_LIMIT ({memory_limit_mb}MB，栈保留约 {FINDER_STACK_MB}MB)。"
-            f"{bump_hint}"
-            "必须重写为小内存搜索：禁止 1e7 级 vector/筛/全局表；"
-            "只用 O(窗口) 或 O(1) 局部变量 + 试除/枚举；不要递归爆栈。"
-        )
-    if status == "stack_overflow":
-        return (
-            "ERROR: finder STACK_OVERFLOW（已扩栈仍溢出）。"
-            "请改为迭代/显式栈，或减小递归深度。"
-        )
-    if status == "error":
-        return (
-            f"ERROR: finder 运行失败 rc={rc}\n{(err or out or '')[:800]}\n"
-            f"已保存 hits={len(saved_paths)}"
-        )
-    if not saved_paths:
-        return (
-            "OK: finder 正常结束但未找到命中（status=none）。"
-            "可调整策略再 run_finder，或放弃 Finder 走纯构造。"
-        )
-    lines = [f"OK: finder 找到 {len(saved_paths)} 组命中（已留痕）"]
-    for item in validated:
-        lines.append(f"  - {item['path']}: validate={item['validate']}")
-    lines.append(f"meta: {FINDER_DIR_NAME}/{sid}/meta.json")
-    return "\n".join(lines)
-
-
-def list_finder_hits(scheme_id: str = "special") -> str:
-    """列出某方案已保存的 finder 命中路径与预览。"""
-    sid = _sanitize_scheme_id(scheme_id)
-    fdir = finder_dir(sid)
-    meta_path = fdir / "meta.json"
-    if not meta_path.is_file():
-        return f"OK: no finder meta for {sid}"
-    try:
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as e:
-        return f"ERROR: meta.json 损坏: {e}"
-    hits = meta.get("hits") or []
-    if not hits:
-        return f"OK: finder status={meta.get('status')} hits=0"
-    parts = [f"OK: status={meta.get('status')} hits={len(hits)}"]
-    for p in hits:
-        fp = _wd() / p
-        preview = ""
-        if fp.is_file():
-            preview = fp.read_text(encoding="utf-8")[:400]
-        parts.append(f"--- {p} ---\n{preview}")
-    return "\n".join(parts)
+def special_meta_dir(scheme_id: str) -> Path:
+    """special_meta/<scheme_id>/ 目录。"""
+    return _wd() / SPECIAL_META_DIR_NAME / _sanitize_scheme_id(scheme_id)
 
 
 # ---- 函数表 ----
@@ -1474,15 +1514,14 @@ FUNCTIONS = {
     "write_range": write_range,
     "write_gen": write_gen,
     "write_special_gen": write_special_gen,
+    "write_special_check": write_special_check,
     "write_validate": write_validate,
     "write_checker": write_checker,
     "use_builtin_checker": use_builtin_checker,
     "use_checker_template": use_checker_template,
-    "write_finder": write_finder,
-    "run_finder": run_finder,
-    "list_finder_hits": list_finder_hits,
     "run_gen": run_gen,
     "run_validate": run_validate,
+    "run_property_check": run_property_check,
     "run_std": run_std,
     "run_self_check": run_self_check,
     "run_checker": run_checker,
@@ -1524,7 +1563,7 @@ TOOL_SCHEMAS = [
     ),
     _schema(
         "write_range",
-        "把数据范围写到 range.json。content 为合法 JSON：count 默认 15；constraints；edge_cases（不要含 random；含 edge_n1/edge_nmax 等最小最大边界）。",
+        "把数据范围写到 range.json。content 为合法 JSON：count 由你自定且不得小于 15；constraints；edge_cases（不要含 random；含 edge_n1/edge_nmax 等最小最大边界）。",
         {"content": {"type": "string", "description": "range.json 的完整 JSON 字符串"}},
         ["content"],
     ),
@@ -1536,7 +1575,10 @@ TOOL_SCHEMAS = [
         "树/图/几何题优先 #include \"generator.h\" + using namespace generator::all；"
         "树/图必须先 t.gen()，再 cout << t，或 for (auto &e : t.edges())；"
         "get_edges() / Tree::shuffle() / 访问 _edges 不存在，写错会编译失败。"
-        "仍须 registerGen + --seed/--type/--index/--count。random 分支必须用 --index/--count 分层取规模。"
+        "仍须 registerGen；seed/type/index/count 必须在 type 分支前全部 opt<>() 消费"
+        "（type 必须 string type=opt<string>(\"type\",\"random\")，禁止 opt<int>(\"type\")/type==0；"
+        "禁止只在 random 里读，否则 edge_* 报 unused key）。"
+        "random 分支用 --index/--count 分层取规模。"
         "禁止 std::shuffle(...,rnd)；禁止枚举 O(n^2) 边池。"
         "实现须对照题面+标程+range（多测 T、edge_cases 分支、约束变量全部 opt）。",
         {
@@ -1569,69 +1611,41 @@ TOOL_SCHEMAS = [
         ["content"],
     ),
     _schema(
-        "write_finder",
-        "把【完整】特殊样例搜索器 C++ 写到 special_findings/<scheme_id>/finder.cpp 并编译。"
-        f"系统强制栈约 {FINDER_STACK_MB}MB（非默认栈）；禁止 system/popen/fork；允许 O(n^2)，"
-        f"默认时限 {FINDER_DEFAULT_TIMEOUT_SEC}s / 内存 {FINDER_DEFAULT_MEMORY_MB}MB；"
-        "内存必须 O(窗口)/O(1)，禁止全量筛表；顶部注释须写复杂度与搜索上界。"
-        "命中输出协议：每组用 ---BEGIN--- / ---END--- 包裹完整输入；支持 --seed/--max-hits。",
+        "write_special_check",
+        "把【完整】特殊样例性质检查器写到 check_special.cpp 并编译。"
+        "从 stdin 读入与 gen 同格式输入；must_hold 全部成立则 exit 0，否则 exit 1 并在 stderr 写原因。"
+        "禁止搜索/大表；只做 O(输入) 判定。空区间/端点平凡真必须判 FAIL。",
         {
             "content": {
                 "type": "string",
-                "description": "完整 finder.cpp（含复杂度注释与 BEGIN/END 输出协议）",
-            },
-            "scheme_id": {
-                "type": "string",
-                "description": "方案 id，对应 special_findings 子目录",
-            },
+                "description": "完整 check_special.cpp（读 stdin，exit 0/1）",
+            }
         },
-        ["content", "scheme_id"],
+        ["content"],
     ),
     _schema(
-        "run_finder",
-        "运行已编译的 finder（限时/限内存/大栈），解析命中并落盘 hits/*.in + meta.json。"
-        f"默认 timeout {FINDER_DEFAULT_TIMEOUT_SEC}s、memory {FINDER_DEFAULT_MEMORY_MB}MB"
-        f"（上限 {FINDER_MAX_TIMEOUT_SEC}s / {FINDER_MAX_MEMORY_MB}MB）。"
-        "允许 O(n^2)；超时/OOM 可缩小规模或在上限内调高时限/内存后重试。",
+        "run_property_check",
+        "把 input_text 喂给已编译的 check_special，判定 must_hold 是否成立。",
         {
-            "scheme_id": {"type": "string", "description": "方案 id"},
-            "seed": {"type": "integer", "description": "随机种子，默认 1"},
-            "max_hits": {"type": "integer", "description": "最多保存命中数，默认 1，上限 1"},
-            "timeout_sec": {
-                "type": "integer",
-                "description": (
-                    f"运行时限秒，默认 {FINDER_DEFAULT_TIMEOUT_SEC}，"
-                    f"上限 {FINDER_MAX_TIMEOUT_SEC}"
-                ),
-            },
-            "memory_limit_mb": {
-                "type": "integer",
-                "description": (
-                    f"内存上限 MB，默认 {FINDER_DEFAULT_MEMORY_MB}，"
-                    f"上限 {FINDER_MAX_MEMORY_MB}"
-                ),
-            },
+            "input_text": {
+                "type": "string",
+                "description": "待检查的完整输入（通常来自 run_gen）",
+            }
         },
-        ["scheme_id"],
-    ),
-    _schema(
-        "list_finder_hits",
-        "列出 special_findings/<scheme_id> 下已保存的命中输入预览，供 SpecialCoder 参考。",
-        {"scheme_id": {"type": "string", "description": "方案 id"}},
-        ["scheme_id"],
+        ["input_text"],
     ),
     _schema(
         "write_validate",
         "把【完整】校验器 C++ 源码写到工作目录 validator.cpp 并 g++ 编译。"
         "【content 硬约束】必须传完整源码字符串；禁止空调用、半截、摘要；宜短而全，避免工具参数截断。"
-        "读入顺序须与标程一致。建议 registerValidation + readEof。"
+        "读入顺序须与标程一致。建议 registerValidation + 每行 readEoln + 最后 readEof。"
         "结构性质可用 ensuref；仅范围/格式也可不加 ensuref；以编译/运行通过为准。",
         {
             "content": {
                 "type": "string",
                 "description": (
                     "【必填·完整上下文】完整 validator.cpp 全文（含 main 结尾 }），"
-                    "不能为空/截断/摘要。需 registerValidation + readEof；"
+                    "不能为空/截断/摘要。需 registerValidation + 每行 readEoln + 最后 readEof；"
                     "有结构约束时加 ensuref，否则按范围/格式校验即可。"
                 ),
             }
@@ -1641,8 +1655,20 @@ TOOL_SCHEMAS = [
     _schema(
         "write_checker",
         "把【完整】special judge / checker C++ 源码写到工作目录 checker.cpp 并 g++ 编译。"
-        "仅当答案不唯一或需额外判定时使用；若只需按行/词/浮点/YesNo 比较，请改用 use_builtin_checker。",
-        {"content": {"type": "string", "description": "完整 checker.cpp（#include \"testlib.h\"，registerTestlibCmd(...)）"}},
+        "仅当答案不唯一或需额外判定时使用；若只需按行/词/浮点/YesNo 比较，请改用 use_builtin_checker。"
+        "SPJ 只验答案合法性（_ok/_wa），不验输出格式；读完后 seekEof 排空再 quit。"
+        "复杂度：设计 ≤1s，运行硬超时 2s；须符合 plan 第 6 节预算。"
+        "只用 testlib 真实 API；禁止 isNumber；编译失败会删除旧 exe 且不计写次数额度。"
+        "带空格整句用 readLine，禁止 readToken(\"s\")。",
+        {
+            "content": {
+                "type": "string",
+                "description": (
+                    "完整 checker.cpp（#include \"testlib.h\"，registerTestlibCmd(...)；"
+                    "只判合法性；quit 前排空 ouf；禁止 isNumber / 严格格式 _pe）"
+                ),
+            }
+        },
         ["content"],
     ),
     _schema(
@@ -1660,7 +1686,7 @@ TOOL_SCHEMAS = [
     ),
     _schema(
         "use_checker_template",
-        "安装 checker 模板，生成可编译的骨架 checker.cpp。"
+        "安装 checker 模板，生成可编译的骨架 checker.cpp（占位 quitf(_fail)，不可直接当正式 checker）。"
         "可选模板：\n"
         "- construct_verify: 通用构造/方案验证\n"
         "- any_of_answers: 多解但可推导正确答案条件\n"
@@ -1671,7 +1697,7 @@ TOOL_SCHEMAS = [
         "- point_set: 点集/几何构造验证\n"
         "- matching: 匹配/配对方案验证\n"
         "- tree_parent: 树父节点/边集验证\n"
-        "安装后应 read_file(\"checker.cpp\") 查看并用 write_checker 替换 TODO 部分。",
+        "安装后必须 write_checker 替换 TODO；未替换模板跑自检会判 [SYSTEM]。",
         {
             "name": {
                 "type": "string",
@@ -1687,7 +1713,7 @@ TOOL_SCHEMAS = [
             "seed": {"type": "integer", "description": "随机种子"},
             "type": {"type": "string", "description": "edge_cases 中的类型名，或 random"},
             "index": {"type": "integer", "description": "组号 0..count-1，用于规模分层；默认=seed"},
-            "count": {"type": "integer", "description": "总组数，默认 15"},
+            "count": {"type": "integer", "description": "总组数，默认 30"},
         },
         ["seed"],
     ),
@@ -1716,6 +1742,7 @@ TOOL_SCHEMAS = [
     _schema(
         "run_checker",
         "运行编译好的 checker，用一组 (input, output, answer) 测试其判定行为。"
+        f"单测硬超时 {CHECKER_TIMEOUT_S}s（SPJ 设计目标 ≤1s）；超时视为复杂度超规。"
         "input_text 对应 inf，output_text 对应 ouf，answer_text 对应 ans。"
         "返回退出码与 stdout/stderr 摘要。",
         {
@@ -1728,8 +1755,9 @@ TOOL_SCHEMAS = [
     _schema(
         "run_checker_self_check",
         "用当前 gen + std + checker 做 reactive 自检："
-        "正例（标程输出当 ouf/ans）必须返回 _ok；负例（扰动输出当 ouf）必须返回 _wa 或 _pe。"
-        "全部通过才返回 OK；失败返回 ERROR 详情。write_checker 后建议调用。",
+        "正例（标程输出当 ouf/ans）必须返回 _ok；负例（扰动输出当 ouf）必须返回非 _ok（优先 _wa）。"
+        "未替换模板 / 源码新于 exe / 未编译 → [SYSTEM]；判定错 → [LOGIC]。"
+        "全部通过才返回 OK；失败返回 ERROR 详情。write_checker 编译成功后建议调用。",
         {},
         [],
     ),
@@ -1749,8 +1777,8 @@ TOOL_SCHEMAS = [
 
 
 _WRITE_CONTENT_TOOLS = frozenset({
-    "write_gen", "write_special_gen", "write_validate", "write_checker",
-    "write_range", "write_finder", "write_file",
+    "write_gen", "write_special_gen", "write_special_check", "write_validate",
+    "write_checker", "write_range", "write_file",
 })
 
 # 模型常把源码塞进这些键名而不是 content

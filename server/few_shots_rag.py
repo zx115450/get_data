@@ -429,7 +429,7 @@ def retrieve_few_shots(
 
 
 def format_rag_few_shots(examples: list[dict]) -> str:
-    """把召回的范例列表格式化成可塞进 Agent prompt 的字符串。"""
+    """把召回的范例列表格式化成可塞进 Agent prompt 的字符串（完整源码版）。"""
     if not examples:
         return ""
     blocks = []
@@ -444,6 +444,130 @@ def format_rag_few_shots(examples: list[dict]) -> str:
         + "\n\n请重点参照上面 RAG 召回的范例风格（与本次题目最相似），"
         "为本次题目写 gen.cpp 和 validator.cpp。"
     )
+
+
+def compress_few_shot_content(content: str) -> str:
+    """把完整 few-shot（含大段 gen/validator 源码）压成 Planner 用的结构要点。
+
+    只保留通用骨架：registerGen/opt、type 分支、index 分层、generator.h API、
+    validator 的 read*/readEoln/readEof/ensuref 模式；不贴大段代码，
+    不输出范例输入字段形状（几行几个数 / 是否 T / 边列表形态等）。
+    """
+    text = (content or "").strip()
+    if not text:
+        return ""
+
+    bullets: list[str] = []
+
+    # 标题行（【参考范例：…】）
+    title_m = re.search(r"【[^】]*范例[^】]*】", text)
+    if title_m:
+        bullets.append(f"来源：{title_m.group(0)}")
+
+    # edge_cases / --type 分支
+    edge_names: list[str] = []
+    ec_m = re.search(r'"edge_cases"\s*:\s*\[([^\]]*)\]', text)
+    if ec_m:
+        edge_names = re.findall(r'"([^"]+)"', ec_m.group(1))
+    if not edge_names:
+        edge_names = re.findall(r'typ\s*==\s*"([^"]+)"', text)
+    # 去重保序
+    seen: set[str] = set()
+    uniq_edges: list[str] = []
+    for n in edge_names:
+        if n not in seen:
+            seen.add(n)
+            uniq_edges.append(n)
+    # 只保留通用骨架信号；不写「先输出 T / n+数组」等输入字段形状
+    org_parts = ["registerGen + opt(seed/type/index/count)（分支前全部消费）"]
+    if uniq_edges:
+        org_parts.append("--type 分支名可参考: " + "/".join(uniq_edges[:12]) + "（具体构造以本题为准）")
+    # 多测 T+sum：保留三桶分层骨架（不贴范例常数 / 字段形状）
+    multi_bucket = (
+        ("bucket" in text and ("force_small_n" in text or "force_large_n" in text))
+        or ("攻 T" in text and "攻 n" in text)
+        or ("大 T" in text and "小 n" in text)
+        or ("index * 3" in text or "idx * 3" in text)
+    )
+    if multi_bucket or ("sum_n" in text and ("T_MAX" in text or "edge_Tmax" in text)) or ("bA" in text and "bB" in text):
+        org_parts.append(
+            "多测：random 用 index 解组数/规模/数值轴的小中大全组合"
+            "（如 bA=i%3,bB=(i/3)%3,bC=(i/9)%3；轴名以本题 constraints 为准）；"
+            "有 sum 时禁止组数与单组规模双顶格；禁止 random 恒组数=1"
+        )
+        if "bC" in text or "a_lo" in text or "mag_bucket" in text:
+            org_parts.append(
+                "数值轴亦分小/中/大；套件内各轴组合都要出现（默认 count≈30 覆盖 3×3×3）"
+            )
+    elif "pickSized" in text or ("index" in text and "count" in text and "span" in text):
+        org_parts.append(
+            "random 用 index 对规模/数值轴做小中大组合（轴名取自本题 constraints；禁止数值全程打满）"
+        )
+    bullets.append("分支组织：" + "；".join(org_parts))
+
+    # API
+    api_parts: list[str] = []
+    if "generator.h" in text:
+        api_parts.append('#include "generator.h"')
+        found_structs: list[str] = []
+        # 先匹配带命名空间的完整类型，避免短名 Tree 误命中
+        for name in (
+            "unweight::Tree", "unweight::Chain", "unweight::Flower", "unweight::Graph",
+            "edge_weight::Tree", "edge_weight::Graph", "edge_weight::Chain", "edge_weight::Flower",
+        ):
+            if re.search(rf"(?<![A-Za-z_]){re.escape(name)}\b", text):
+                found_structs.append(name)
+        if not found_structs:
+            for name in ("Tree", "Chain", "Flower", "Graph"):
+                if re.search(rf"\b{name}\b", text):
+                    found_structs.append(name)
+        if found_structs:
+            api_parts.append("结构: " + ", ".join(found_structs[:6]))
+        api_parts.append("用法: obj.gen(); cout << obj 或 for (auto &e : obj.edges())")
+        api_parts.append("禁止: get_edges() / shuffle() / weight:: / set_weight_limit / rnd.next(..., 1e9)")
+    elif "testlib.h" in text:
+        api_parts.append('#include "testlib.h"')
+        api_parts.append("纯 testlib 手写构造 + printf/cout 输出")
+    if "registerGen" in text:
+        api_parts.append("registerGen(argc, argv, 1)")
+    if api_parts:
+        bullets.append("API：" + "；".join(api_parts))
+
+    # validator：只保留读入骨架模式，不描述范例字段顺序
+    val_parts: list[str] = []
+    if "registerValidation" in text:
+        val_parts.append("registerValidation")
+    if "ensuref" in text:
+        val_parts.append("有结构性质时用 ensuref（具体性质以本题题面为准）")
+    else:
+        val_parts.append("仅范围题：read* + 每行 readEoln + readEof")
+    if "readEof" in text or "readEoln" in text:
+        val_parts.append("readEoln/readEof 模式（字段顺序以本题标程为准）")
+    bullets.append("validator：" + "；".join(val_parts))
+
+    bullets.append(
+        "禁令：只借 registerGen/opt/readEoln/各轴小中大全组合等通用骨架；"
+        "禁止借范例输入字段形状与范例约束常数；"
+        "轴名与上下界只以本题 constraints/标程为准；禁止 random 恒组数=1、禁止数值全程打满"
+    )
+
+    return "\n".join(f"- {b}" for b in bullets)
+
+
+def format_rag_few_shots_compact(examples: list[dict]) -> str:
+    """把召回范例压成 Planner 用的结构要点块（无大段源码）。"""
+    if not examples:
+        return ""
+    blocks = []
+    for ex in examples:
+        label = "模板" if ex.get("source") == _SOURCE_TEMPLATE else "历史任务"
+        header = f"【结构要点：{label} {ex['key']} (相似度 {ex['score']})】"
+        body = compress_few_shot_content(ex.get("content") or "")
+        if body:
+            blocks.append(f"{header}\n{body}")
+        else:
+            blocks.append(header)
+    return "\n\n".join(blocks)
 
 
 def _is_quality_job(stats: dict | None, range_json: dict) -> bool:

@@ -1,8 +1,207 @@
 """Agent task 构建器。"""
 import json
+import re
 
 from server.text_agent import simplify_text, beautify_text
 from utils.markup import to_plain_for_llm
+
+
+CHECKER_PLAN_TARGET_CHARS = 1300
+CHECKER_PLAN_SOFT_MAX_CHARS = 2000
+
+
+def _brief_text(text: str, head: int, tail: int, label: str) -> str:
+    t = (text or "").strip()
+    if not t:
+        return ""
+    if len(t) <= head + tail + 80:
+        return t
+    return t[:head] + f"\n\n...（{label}已截断）...\n\n" + t[-tail:]
+
+
+def looks_like_unique_token_answer(
+    stmt_plain: str = "",
+    output_plain: str = "",
+    std_for_prompt: str = "",
+) -> bool:
+    """启发式：唯一答案（按词/整数比对）→ 宜用内置 wcmp，少开自定义 SPJ。"""
+    blob = "\n".join(
+        [(stmt_plain or ""), (output_plain or ""), (std_for_prompt or "")[:2000]]
+    )
+    blob_l = blob.lower()
+    if not blob.strip():
+        return False
+    # 多解/构造题：不自动 wcmp
+    if any(
+        h in blob
+        for h in ("构造一组", "构造一个", "输出任意", "不唯一", "多解", "任意一组", "任意一个")
+    ):
+        return False
+    if any(h in blob_l for h in ("special judge", "specialjudge")):
+        # 题面显式 SPJ 语义时仍可能唯一；仅排除「构造/多解」已在上面
+        pass
+    unique_hints = (
+        "输出一个整数", "输出一行一个整数", "答案唯一", "唯一答案",
+        "最小总代价", "最小值", "最大值", "最优解对应唯一",
+    )
+    out_hints = ("一个整数", "一行一个整数", "单个整数", "输出整数")
+    has_unique = any(h in blob for h in unique_hints) or any(
+        h in (output_plain or "") for h in out_hints
+    )
+    if not has_unique:
+        # 标程几乎只打一个数也算弱信号
+        std = std_for_prompt or ""
+        cout_n = len(re.findall(r"\bcout\s*<<", std))
+        printf_n = len(re.findall(r"\bprintf\s*\(", std))
+        if cout_n + printf_n == 0 or cout_n + printf_n > 4:
+            return False
+        # 仍需题面有「最小/最大/最优」之一，避免误伤
+        if not any(h in blob for h in ("最小", "最大", "最优", "唯一")):
+            return False
+    return True
+
+
+def parse_builtin_checker_from_plan(plan_text: str) -> str | None:
+    """从 checker_plan 解析「应使用内置 checker: wcmp」等。"""
+    text = plan_text or ""
+    m = re.search(
+        r"应使用内置\s*checker\s*[:：]\s*(lcmp|wcmp|rcmp4|rcmp6|rcmp9|yesno)",
+        text,
+        re.I,
+    )
+    if m:
+        return m.group(1).lower()
+    m2 = re.search(
+        r"使用内置\s*[:：]?\s*(lcmp|wcmp|rcmp4|rcmp6|rcmp9|yesno)",
+        text,
+        re.I,
+    )
+    if m2:
+        return m2.group(1).lower()
+    for name in ("lcmp", "wcmp", "rcmp4", "rcmp6", "rcmp9", "yesno"):
+        if re.search(rf"(?i)(?:模板|选型|builtin).{{0,40}}\b{name}\b", text):
+            if re.search(r"无需自定义|使用内置|内置 checker|应使用内置", text, re.I):
+                return name
+    return None
+
+
+def build_checker_planner_user(
+    stmt_plain: str,
+    range_plain: str,
+    output_plain: str,
+    std_for_prompt: str,
+    range_json: dict,
+) -> str:
+    """构造 Checker Planner 的 user prompt：题面为主，标程仅 I/O。"""
+    parts = [
+        "请为下面的题目写一份可执行的 checker 判定计划"
+        f"（目标约 {CHECKER_PLAN_TARGET_CHARS} 字，勿超过 {CHECKER_PLAN_SOFT_MAX_CHARS} 字）。\n"
+        "【分工】Plan 写清实现思路与判定规格；Coder 只翻译成代码。\n"
+        "【资料优先级】题面 > 输出描述 > 范围/I/O > 标程。"
+        "判定语义与状态转移必须来自题面；标程只用于核对读写格式，禁止把标程算法写进第 6 节"
+        "（多项式「验证是否合法」步骤除外）。\n"
+        "【唯一答案】若每组只需比对少数整数/词且答案唯一：第 1 节写"
+        "「应使用内置 checker: wcmp」（或 lcmp），第 2 节写同名，并写明无需自定义；"
+        "禁止为唯一最优值重写 Dijkstra/DP。\n"
+        "【SPJ】只校验答案合法性，不校验输出格式；勿把空白/换行/_pe 当核心条件。\n"
+        "【复杂度硬规范】设计 ≤1s / 运行超时 2s；首选 O(N)~O(N log N)；"
+        "禁止指数 MITM、N≥5000 的 O(N^2)、满数据不可行子集和；"
+        "第 6 节必须写死：复杂度预算：O(...) · N=… · 预计≤1s。\n"
+        "请把模板、合法条件、与 ans 关系、第 6 节实现步骤写死。\n",
+        f"\n【题面 · 判定语义主源】\n{(stmt_plain or '').strip()}",
+    ]
+    if (output_plain or "").strip():
+        parts.append(f"\n【输出描述 / 判定规则 · 次主源】\n{output_plain.strip()}")
+    parts.append(f"\n【数据范围】\n{(range_plain or '').strip()}")
+    parts.append(
+        f"\n【range.json】\n```json\n{json.dumps(range_json, ensure_ascii=False, indent=2)}\n```"
+    )
+    if (std_for_prompt or "").strip():
+        std_brief = _brief_text(std_for_prompt, 300, 200, "标程")
+        parts.append(
+            "\n【标程 · 仅 I/O 参考】只看 cin/cout（或读写）与每组输出形态；"
+            "忽略内部求最优/DP/公式，不得写入 plan 第 6 节。\n"
+            f"```\n{std_brief}\n```"
+        )
+    parts.append(
+        "\n要求：含 7 个小节；第 2 节写死模板名（唯一答案优先 wcmp）；"
+        "第 4 节合法条件须来自题面（不要写格式条件）；"
+        "第 6 节实现思路须为可落地的编号步骤且含「复杂度预算：O(...) · N=… · 预计≤1s」"
+        "（禁止空话、禁止指数 MITM、禁止 N≥5000 的 O(N^2)、禁止抄求最优；多项式验证可写）；"
+        "有保底/激活/门槛时第 6 节必须写清 if/else，禁止无条件 clamp 及未证明的「等价」；"
+        "只比最优值且必须自定义时才写 maxVal=simulate；唯一答案用内置即可；"
+        "第 7 节覆盖：标程正例 +（多解则）非标程正例特征或写明唯一 + 语义负例（_wa，勿主打 _pe）；"
+        "构造/多解禁止与 ans 字符串全等；只输出 Markdown 计划。"
+    )
+    return "\n".join(parts)
+
+
+def build_checker_coder_task(
+    stmt_plain: str,
+    range_plain: str,
+    output_plain: str,
+    std_for_prompt: str,
+    range_json: dict,
+    failure_context: str = "",
+) -> str:
+    """构造 Checker Coder task：plan 为主，题面语义兜底，标程极弱。"""
+    stmt_brief = _brief_text(stmt_plain, 800, 400, "题面")
+    range_brief = _brief_text(range_plain, 300, 150, "范围")
+    std_brief = _brief_text(std_for_prompt, 200, 150, "标程")
+    out_brief = (output_plain or "").strip()
+    if len(out_brief) > 600:
+        out_brief = out_brief[:600] + "\n...（输出描述已截断）..."
+
+    parts = [
+        "请把 checker_plan.md 逐条翻译成完整的 checker.cpp。\n"
+        "【分工】你只负责实现；禁止改判定类型/模板/合法条件/实现思路。\n"
+        "【资料优先级】checker_plan.md > 题面（状态转移不清时语义兜底）"
+        " > 输出描述（字段含义）> 标程（仅 ans/ouf 读写，不参与判定逻辑）。\n"
+        "【约束】只写 checker.cpp；不要改 gen/validator/range；write_checker 必须完整源码。\n"
+        "【SPJ】只验答案合法性（_ok/_wa），不验输出格式；读完所需字段后 "
+        "while (!ouf.seekEof()) ouf.readToken(); 再 quit，避免 dirt 假 PE。\n"
+        "【复杂度】严格按 plan 第 6 节预算实现（目标 ≤1s，超时 2s）；"
+        "禁止改用 MITM/指数/大 N 的 N^2。\n"
+        "【API】只用 testlib 真实接口（readInt/readToken/readLine/quitf 等）；"
+        "禁止 isNumber 等幻觉函数；readEoln/readEof/readSpace 返回 void，"
+        "禁止把 readEoln 当 bool；探测用 seekEoln/seekEof；"
+        "带空格整句用 readLine/readString，禁止 readToken 读整句或 readToken(\"s\")。\n",
+    ]
+    if stmt_brief:
+        parts.append(
+            f"\n【题面 · 语义兜底】plan 对保底/激活/门槛写不清或与题面冲突时以此为准"
+            f"（勿用标程算法覆盖）。\n{stmt_brief}"
+        )
+    if out_brief:
+        parts.append(f"\n【输出描述 · 字段含义】\n{out_brief}")
+    if range_brief:
+        parts.append(f"\n【数据范围摘要】\n{range_brief}")
+    parts.append(
+        f"\n【range.json】\n```json\n{json.dumps(range_json, ensure_ascii=False, indent=2)}\n```"
+    )
+    if std_brief:
+        parts.append(
+            "\n【标程 · 极弱参考】仅核对 ans/ouf 每组输出几个数；禁止照抄内部算法。\n"
+            f"```\n{std_brief}\n```"
+        )
+    if failure_context:
+        parts.append(f"\n{failure_context[:1000]}\n")
+    parts.append(
+        "\n要求：\n"
+        "1. 先 read_file('checker_plan.md') 一次；状态转移不清时可再读 "
+        "statement.txt / statement_simplified.txt。\n"
+        "2. 按 plan 第 2 节装模板，再严格按第 6 节「实现思路」步骤 write_checker"
+        "（每步最多一次；最多 2 次编译成功；编译失败不计次）。\n"
+        "3. 【规格优先级】plan 第 4/5/6/7 节为主；保底/激活等与题面冲突时服从题面；"
+        "禁止用标程覆盖判定逻辑。\n"
+        "4. 题意模拟按 plan/题面分支实现；禁止无条件 "
+        "`if (cur < k) cur = k`；最优值题必须先 simulate(ans) 再验 ouf。\n"
+        "5. 写完并编译成功后系统自动 run_checker_self_check()：正例须 _ok，负例须 _wa；"
+        "禁止未自检连写；禁止严格格式/_pe。\n"
+        "6. 自检 OK 后 finish；FAIL [LOGIC] 才允许第二轮成功 write_checker"
+        "（优先按题面修模拟语义，禁止改成与 ans 全等）。"
+    )
+    return "\n".join(parts)
 
 
 def build_checker_task(
@@ -13,45 +212,11 @@ def build_checker_task(
     range_json: dict,
     failure_context: str = "",
 ) -> str:
-    """为自定义 checker 构造 Agent 的 task（精简版）。"""
-    stmt_brief = (stmt_plain or "").strip()
-    if len(stmt_brief) > 1200:
-        stmt_brief = stmt_brief[:600] + "\n\n...（题面已截断）...\n\n" + stmt_brief[-400:]
-    range_brief = (range_plain or "").strip()
-    if len(range_brief) > 800:
-        range_brief = range_brief[:400] + "\n...（范围已截断）...\n" + range_brief[-200:]
-
-    parts = [
-        "【角色】Checker Agent\n"
-        "【目标】为本题写一个 checker.cpp（Special Judge）。\n"
-        "【约束】只写 checker.cpp；不要改 gen.cpp / validator.cpp / range.json；write_checker 必须完整源码。",
-        f"\n【题面摘要】\n{stmt_brief}",
-        f"\n【数据范围摘要】\n{range_brief}",
-    ]
-    if output_plain.strip():
-        parts.append(f"\n【输出描述 / 判定规则】\n{output_plain}")
-    if std_for_prompt.strip():
-        # 标程只保留输入读取相关头尾，checker 阶段不需要完整源码
-        std_brief = std_for_prompt
-        if len(std_brief) > 1500:
-            std_brief = std_brief[:600] + "\n\n...（标程已截断，可用 read_file 查看完整）...\n\n" + std_brief[-300:]
-        parts.append(f"\n【标程源码片段（供理解判定规则）】\n{std_brief}")
-    parts.append(
-        "\n【已有产物】\n"
-        f"- range.json: {json.dumps(range_json, ensure_ascii=False, indent=2)}\n"
-        "- 工作目录已有 gen.cpp / validator.cpp / 标程，可用 read_file 查看。\n"
+    """兼容旧名：等同 Checker Coder task。"""
+    return build_checker_coder_task(
+        stmt_plain, range_plain, output_plain, std_for_prompt, range_json,
+        failure_context=failure_context,
     )
-    if failure_context:
-        parts.append(f"\n{failure_context[:1000]}\n")
-    parts.append(
-        "\n要求：\n"
-        '1. 优先用 use_checker_template("construct_verify") 安装骨架，再 read_file("checker.cpp") 查看 TODO 位置。\n'
-        '2. 用 write_checker 写完整 checker.cpp，必须 #include "testlib.h" 并调用 registerTestlibCmd(argc, argv)。\n'
-        "3. 按 (inf, ouf, ans) 顺序读取文件并判定；多解时检查选手输出的合法性，不要直接字符串全等。\n"
-        "4. 编译成功后必须调用 run_checker_self_check()：正例（标程输出）必须 _ok，负例（扰动输出）必须 _wa/_pe。\n"
-        "5. run_checker_self_check() 返回 OK 后调 finish。"
-    )
-    return "\n".join(parts)
 
 
 def build_reviewer_task(
@@ -147,17 +312,29 @@ def build_gen_fixer_task(
         "【约束】只修改 gen.cpp / validator.cpp；禁止修改 gen_special.cpp、range.json、checker.cpp、标程；"
         "write_gen / write_validate 必须传【完整 content】（从 #include 到 main 结尾 }）；"
         "禁止空调用、半截、__OMITTED_SOURCE__；宜短而全，避免 JSON 截断。"
-        "修复时仍须对照题面+标程+range 上下文。"
+        "修复时优先遵守 gen_plan.md 策略，题面摘要仅作冲突对照。"
         "特殊样例由后续 SpecialCoder 处理，本阶段忽略 special_samples。",
         f"\n【题面摘要】\n{stmt_brief}",
         f"\n【数据范围摘要】\n{range_brief}",
         f"\n【range.json】\n```json\n{json.dumps(range_json, ensure_ascii=False, indent=2)}```",
         f"\n【自检失败摘要】\n```\n{error_log}\n```",
         "\n【动作】\n"
-        "1. 先 read_file(\"gen.cpp\") 和 read_file(\"validator.cpp\") 查看当前源码。\n"
-        "2. 根据失败类型判断根因：gen TIMEOUT/MEMORY → 优化算法；validate FAILED → 优先修 gen；"
-        "std FAILED → 对齐格式/降低规模。\n"
-        "3. 用 write_gen / write_validate 写完整修复后源码，编译失败时继续修正。"
+        "1. 先 read_file(\"gen_plan.md\") 对齐策略，再 read_file(\"gen.cpp\") / \"validator.cpp\"。\n"
+        "2. 根据失败类型判断根因：gen TIMEOUT/MEMORY → 优化算法；"
+        "validate FAILED → 先看 stderr：Unexpected white-space 修 validator 补 readSpace；"
+        "其余优先修 gen；std FAILED → 对齐格式/降低规模。\n"
+        "   unused key seed/type/index/count → 在 type 分支前补齐全部 opt<>()。\n"
+        "   编译 no match for operator== / opt<int>(\"type\") / if (type == 0) → "
+        "改成 string type = opt<string>(\"type\",\"random\")，并用字符串比较分支。\n"
+        "   Expected EOF → 先看 gen 是否只打了合法输入：是则 validator 补 readEoln 再 readEof；"
+        "若多打了答案/排列则修 gen。\n"
+        "   Unexpected white-space - token expected → validator 同行连续 readInt/readLong "
+        "缺 readSpace（或改用 readInts）；优先修 validator，勿删 gen 空格。\n"
+        "   Expected integer, but \"...\" 或读到答案文案/排列 → 优先怀疑 gen 打成了答案，"
+        "按 plan 第 1 节只打印输入，勿放宽 validator。\n"
+        "3. 用 write_gen / write_validate 写完整修复后源码，编译失败时继续修正；"
+        "不得推翻 plan 的 edge_cases/API 选型"
+        "（但若 plan 第 5/8 节误把答案当 gen 输出，以第 1 节输入格式为准修正 gen）。"
         "TIMEOUT 时按 gen_plan 有效状态预算降密度（满规模≠满状态）。\n"
         "4. 调用 run_self_check() 验证；通过后调 finish(summary) 说明改动点与根因。\n"
         f"这是第 {attempt}/{max_attempts} 轮自动修复；若本轮仍失败，将回退基线并中止本阶段。",
@@ -186,19 +363,21 @@ def build_coder_rewrite_task(
     parts = [
         "【角色】Coder Rewrite\n"
         "【目标】当前 gen.cpp / validator.cpp 骨架存在结构性问题，Fixer 无法收敛，需按 gen_plan.md 重新写出完整新版。\n"
-        "【约束】按 plan 重新设计骨架，不要局部补丁；"
+        "【约束】按 gen_plan.md 重新实现骨架，不要局部补丁、不要另起一套策略；"
         "write_gen / write_validate 必须传【完整 content】，宜短而全，禁止截断/空调用/__OMITTED_SOURCE__；"
-        "重写须带上题面+标程+range 全部上下文；禁止修改 range.json / 标程 / gen_special.cpp。"
+        "禁止修改 range.json / 标程 / gen_special.cpp。"
         "特殊样例由后续 SpecialCoder 处理。",
         f"\n【题面摘要】\n{stmt_brief}",
         f"\n【数据范围摘要】\n{range_brief}",
         f"\n【range.json】\n```json\n{json.dumps(range_json, ensure_ascii=False, indent=2)}```",
         f"\n【前序 Coder/Fixer 摘要】\n{gen_agent_summary[:500]}",
         f"\n【自检失败摘要（结构性信号）】\n```\n{error_log}\n```",
+        "\n【动作】先 read_file(\"gen_plan.md\")，再按 plan 第 5/6/7/8 节整份重写。\n"
+        "若 plan 第 5/8 节与第 1 节/标程读入矛盾（gen 打答案），以第 1 节输入格式为准。\n"
         "\n常见需重写信号：\n"
         "- 大量 edge_cases 缺分支或大规模 FAIL；\n"
         "- gen TIMEOUT / MEMORY（O(n^2) 枚举或预建大池子）；\n"
-        "- 输入格式与标程读入顺序不匹配；\n"
+        "- 输入格式与标程读入顺序不匹配；或 validate 像 gen 打成了答案；\n"
         "- 连续多轮 Fixer 无法收敛的同类错误。\n"
         "\n动作：\n"
         "1. 先 read_file(\"gen_plan.md\") 一次（range.json 已在 task 中，不必再读）。\n"
@@ -280,8 +459,8 @@ def build_batch_fixer_task(
     if special_only:
         parts = [
             "【角色】Special Batch Fixer\n"
-            "【目标】修复 gen_special.cpp，使特殊样例批量生成不再失败。\n"
-            "【约束】只 write_special_gen；禁止改 gen.cpp / validator.cpp / range.json。",
+            "【目标】修复 gen_special.cpp / check_special.cpp，使特殊样例批量生成不再失败。\n"
+            "【约束】只 write_special_gen / write_special_check；禁止改 gen.cpp / validator.cpp / range.json。",
             f"\n这是第 {attempt}/{max_attempts} 轮自动修复；若本轮仍失败，将保留成功测例并中止任务。",
             f"\n【题面摘要】\n{stmt_brief}",
             f"\n【数据范围摘要】\n{range_brief}",
@@ -295,11 +474,12 @@ def build_batch_fixer_task(
             )
         parts.append(
             "\n要求：\n"
-            "1. read_file('gen_special.cpp') 与 read_file('gen.cpp')，对齐格式。\n"
-            "2. 按 special_schemes 各方案的 construct_mode 修复："
+            "1. read_file('gen_special.cpp')、check_special.cpp 与 gen.cpp，对齐格式。\n"
+            "2. 按 special_schemes 的 construct_mode 修复："
             "mutate=底稿+局部 patch；build=从零构造；保证 must_hold；不要改 validator。\n"
-            "3. write_special_gen 写完整源码（保留其他方案分支）。\n"
-            "4. run_self_check() 通过后 finish。"
+            "3. property_check FAILED 时优先加强构造；断言写错才改 check_special。\n"
+            "4. write_special_gen / write_special_check 写完整源码（保留其他方案分支）。\n"
+            "5. run_self_check() 通过后 finish。"
         )
         return "\n".join(parts)
 
@@ -365,6 +545,7 @@ def build_std_block(std_code: str, lang: str) -> str:
         )
     return (
         f"\n\n【标程源码（lang={lang}）】\n```\n{std_for_prompt}\n```\n"
-        "请先读标程，确认输入格式（是否首行 T、每行字段、分隔符、范围），"
+        "请先读标程，确认【读入格式】（是否首行 T、每行字段、分隔符、范围），"
         "gen 的输出必须能被该标程正确读入。"
+        "标程用于确认读入格式与复杂度瓶颈；不要把标程的 cout/答案构造逻辑写进 gen。"
     )

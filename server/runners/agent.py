@@ -21,6 +21,12 @@ from server.runners.snapshot import (
 from server.struct_hints import scan_structural_hints, scan_structural_titles
 from server.text_agent import simplify_text
 from utils.markup import to_plain_for_llm
+from pipeline.gen_data import (
+    DEFAULT_REGULAR_COUNT,
+    MIN_REGULAR_COUNT,
+    _clamp_regular_count,
+    infer_regular_count,
+)
 
 RANGE_TOOL_SCHEMAS = [
     s for s in tools.TOOL_SCHEMAS
@@ -93,6 +99,18 @@ def _load_range_json(job_dir: Path) -> dict | None:
     return data
 
 
+def _range_core_signature(data: dict) -> str:
+    """用于判断审核前后 range 核心字段是否变化（复用 vs 重写）。"""
+    core = {
+        "problem_type": data.get("problem_type") or "",
+        "constraints": data.get("constraints") or {},
+        "edge_cases": data.get("edge_cases") or [],
+        "special_constraints": data.get("special_constraints") or [],
+        "count": data.get("count"),
+    }
+    return json.dumps(core, ensure_ascii=False, sort_keys=True, default=str)
+
+
 def _run_range_only_agent(
     job: job_store.Job,
     job_dir: Path,
@@ -104,16 +122,53 @@ def _run_range_only_agent(
     special_samples_desc: str = "",
     special_samples_count: int = 1,
     auto_discover_special: bool = False,
-) -> tuple[dict, str]:
-    """真正跑一轮 range-only Agent，写出并校验 range.json。
+    existing_range: dict | None = None,
+) -> tuple[dict, str, bool]:
+    """跑一轮 range-only Agent：无已有则新建；有则审核（合理复用 / 不合理重写）。
 
-    返回 (range_dict, problem_type)。题型由本次 write_range 写入 problem_type
-    （不单独调大模型判型；不沿用用户下拉/历史题型）。
-    若有特殊提示或 auto_discover_special，随后挖掘 special_schemes。
+    返回 (range_dict, problem_type, reused)。
+    reused=True 表示核心字段相对已有方案未改（可继续沿用旧 gen_plan）。
     """
     from pipeline.gen_data import normalize_range_json, validate_range_json
     from server.few_shots import PROBLEM_TYPE_RANGE_HINT, resolve_problem_type_from_range
     from server.range_agent import _build_all_type_hints_block
+
+    path = job_dir / "range.json"
+    existing: dict | None = None
+    existing_note = ""
+    before_sig = ""
+    if isinstance(existing_range, dict) and existing_range.get("constraints"):
+        cand = normalize_range_json(dict(existing_range))
+        cand.pop("std_cmd", None)
+        verrs = validate_range_json(cand)
+        if verrs:
+            existing_note = (
+                "\n\n【已有 range.json（校验失败，必须重写）】\n"
+                f"问题：{'; '.join(verrs[:6])}\n"
+                f"```json\n{json.dumps(cand, ensure_ascii=False, indent=2)}\n```\n"
+                "请 write_range 写出修正后的完整 JSON，再 finish（summary 以「重写:」开头）。\n"
+            )
+            job_store.add_progress(
+                job, f"【Range】已有 range 校验失败，强制重写: {verrs[0]}"
+            )
+        else:
+            existing = cand
+            before_sig = _range_core_signature(existing)
+            path.write_text(
+                json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            existing_note = (
+                "\n\n【已有 range.json（待审核）】\n"
+                f"```json\n{json.dumps(existing, ensure_ascii=False, indent=2)}\n```\n"
+                "请判断是否合理：合理则不要 write_range，直接 finish（summary 以「复用:」开头）；"
+                "不合理则 write_range 完整重写后再 finish（summary 以「重写:」开头）。\n"
+            )
+            job_store.add_progress(
+                job,
+                f"【Range】审核已有方案: count={existing.get('count')} "
+                f"type={existing.get('problem_type') or '-'} "
+                f"edge_cases={existing.get('edge_cases')}",
+            )
 
     struct_hint_block = scan_structural_hints(stmt_plain) or ""
     pre_titles = scan_structural_titles(stmt_plain) or []
@@ -138,26 +193,41 @@ def _run_range_only_agent(
         auto_discover_special=auto_discover_special,
     )
 
+    if existing is not None:
+        action_line = (
+            "若判定已有 range 合理：禁止 write_range，直接 finish；"
+            "若不合理：write_range 重写完整 JSON 后 finish。"
+        )
+        progress_label = "【Range】启动 range-only Agent 审核已有 range.json"
+    elif existing_note:
+        action_line = "已有 range 校验失败，必须 write_range 重写后 finish。"
+        progress_label = "【Range】启动 range-only Agent 重写非法 range.json"
+    else:
+        action_line = "无已有方案：write_range 写出完整 JSON 后 finish。"
+        progress_label = "【Range】启动 range-only Agent 写 range.json"
+
     range_task = (
-        f"请只产出 range.json（含 problem_type）。\n\n"
+        f"请规划/审核 range.json（含 problem_type）。\n\n"
         f"【题面】\n{stmt_plain}\n\n"
         f"【数据范围描述】\n{range_plain}\n"
         f"{std_hint}"
+        f"{existing_note}"
         f"\n{PROBLEM_TYPE_RANGE_HINT}"
         f"{_build_all_type_hints_block()}"
         f"{pre_titles_block}"
         f"{struct_hint_block}"
         f"{special_block}"
-        f"\ncount 必须写 15（常规样例数默认；用户未另行指定时禁止写其它数字）；"
-        f"若上方有【特殊样例描述】，count 仍只写常规 15（特殊组由后续方案叠加）。"
+        f"\ncount 由你根据覆盖需求自定（常规样例数），不得小于 {MIN_REGULAR_COUNT}；"
+        f"若需组数×规模×数值小中大全组合，建议 ≥27；"
+        f"若上方有【特殊样例描述】，count 仍只写常规数（特殊组由后续方案叠加）。"
         f"constraints 覆盖题面中的规模变量（如 n、T、m）。"
         f"edge_cases 用简短英文标识符，总数 4～6 个即可（含最小/最大规模与关键结构边界）。"
-        f"写完 write_range 后 finish。"
+        f"{action_line}"
         f"务必填写 special_constraints 字段（即使为空数组也要写）。\n"
         f"务必填写 problem_type（与题面一致的英文标识符）。\n"
     )
 
-    job_store.add_progress(job, "【Range】启动 range-only Agent 写 range.json")
+    job_store.add_progress(job, progress_label)
     summary = agent_run(
         range_task,
         max_steps=4,
@@ -169,9 +239,14 @@ def _run_range_only_agent(
     )
     job_store.add_progress(job, f"【Range】结束: {summary}")
 
-    path = job_dir / "range.json"
     if not path.is_file():
-        raise RuntimeError(f"Range Agent 未产出 range.json（summary={summary!r}）")
+        if existing is not None:
+            path.write_text(
+                json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            job_store.add_progress(job, "【Range】Agent 未写文件，回退复用审核前方案")
+        else:
+            raise RuntimeError(f"Range Agent 未产出 range.json（summary={summary!r}）")
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
@@ -184,85 +259,120 @@ def _run_range_only_agent(
     data["auto_discover_special"] = bool(auto_discover_special)
     job_store.add_progress(job, f"【Range】题型(range.json): {typ}")
 
+    after_sig = _range_core_signature(data)
+    summary_l = (summary or "").strip()
+    reused = bool(
+        existing is not None
+        and before_sig
+        and after_sig == before_sig
+    )
+    if existing is not None and summary_l.startswith("复用") and after_sig == before_sig:
+        reused = True
+    if existing is not None and summary_l.startswith("重写"):
+        reused = after_sig == before_sig  # 自称重写但内容相同仍视为复用
+
     want_special = bool((special_samples_desc or "").strip()) or bool(auto_discover_special)
     if want_special:
         from server.special_discover import (
             apply_schemes_to_range,
             discover_special_schemes,
         )
-        job_store.add_progress(
-            job,
-            "【Range】单独调用大模型：理解特殊样例 → 产出 1 条方案（mutate/build 由模型选）"
-            + ("（自动挖掘）" if auto_discover_special and not (special_samples_desc or "").strip() else ""),
-        )
-        # 用户未提供数据方案：常规样例数固定默认 15，不信任 LLM 写的 count
-        regular = 15
-        schemes = discover_special_schemes(
-            stmt_plain,
-            range_plain,
-            std_code=std_code,
-            user_hint=special_samples_desc,
-            problem_type=typ,
-            samples_per_scheme=max(1, int(special_samples_count or 1)),
-            auto_discover=bool(auto_discover_special),
-        )
-        data = apply_schemes_to_range(
-            data,
-            schemes,
-            user_hint=special_samples_desc,
-            regular_count=regular,
-        )
-        job_store.add_progress(
-            job, f"【Range】特殊方案 {len(schemes)} 条，special_count={data.get('special_samples_count')}",
-        )
+        existing_schemes = list(data.get("special_schemes") or [])
+        if reused and existing_schemes:
+            # count 已是「常规+特殊」总数，须先剥特殊再叠加，避免重复加
+            regular = infer_regular_count(data)
+            data = apply_schemes_to_range(
+                data,
+                existing_schemes,
+                user_hint=special_samples_desc or data.get("special_samples_desc") or "",
+                regular_count=regular,
+            )
+            job_store.add_progress(
+                job,
+                f"【Range】复用已有特殊方案 {len(existing_schemes)} 条，"
+                f"special_count={data.get('special_samples_count')}",
+            )
+        else:
+            job_store.add_progress(
+                job,
+                "【Range】单独调用大模型：理解特殊样例 → 产出 1 条方案（mutate/build 由模型选）"
+                + ("（自动挖掘）" if auto_discover_special and not (special_samples_desc or "").strip() else ""),
+            )
+            # 新建/重写后 LLM 写的是常规数；若文件里仍残留旧特殊计数也先剥掉
+            regular = infer_regular_count(data)
+            schemes = discover_special_schemes(
+                stmt_plain,
+                range_plain,
+                std_code=std_code,
+                user_hint=special_samples_desc,
+                problem_type=typ,
+                samples_per_scheme=max(1, int(special_samples_count or 1)),
+                auto_discover=bool(auto_discover_special),
+            )
+            data = apply_schemes_to_range(
+                data,
+                schemes,
+                user_hint=special_samples_desc,
+                regular_count=regular,
+            )
+            job_store.add_progress(
+                job, f"【Range】特殊方案 {len(schemes)} 条，special_count={data.get('special_samples_count')}",
+            )
     else:
-        # 无特殊样例：总数即常规数，固定默认 15；清掉 LLM 误写的空特殊字段
-        data["count"] = 15
+        # 无特殊样例：信任 LLM 的 count，夹到下限
+        data["count"] = _clamp_regular_count(data.get("count"))
         data.pop("special_samples_desc", None)
         if not data.get("special_schemes"):
             data.pop("special_samples_count", None)
             data.pop("special_schemes", None)
 
+    # special 叠加后可能改 count；复用判定仍以 Agent 审核后的核心字段为准
     errs = validate_range_json(data)
     if errs:
         raise RuntimeError(
             "Range Agent 产出的 range.json 不合法:\n" + "\n".join(f"  - {e}" for e in errs)
         )
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    action = "复用" if reused else ("重写" if existing is not None or existing_note else "新建")
     job_store.add_progress(
         job,
-        f"【Range】已写入 range.json: count={data.get('count')} "
+        f"【Range】{action} range.json: count={data.get('count')} "
         f"type={typ} edge_cases={data.get('edge_cases')}",
     )
-    return data, typ
+    return data, typ, reused
 
 
-def _build_few_shot_block(
+def _build_planner_few_shot_block(
     job: job_store.Job,
     problem_type: str,
     stmt_plain: str,
     range_plain: str,
     std_code: str,
 ) -> str:
-    """按题型取 few-shot，写进度日志，返回可拼进 task 的文本块（可能为空）。"""
+    """取压缩版 few-shot（结构要点），写进度日志，返回可拼进 Planner prompt 的文本块。"""
     few_shot_block, few_shot_summary = get_few_shot_rag(
-        problem_type, stmt_plain, range_plain, std_code, top_k=2
+        problem_type, stmt_plain, range_plain, std_code, top_k=2, compact=True,
     )
     if few_shot_summary.startswith("RAG 召回"):
         short = few_shot_summary.replace("RAG 召回 2 个模板: ", "")
-        job_store.add_progress(job, f"few-shot RAG: {short}")
+        job_store.add_progress(job, f"few-shot(Planner压缩) RAG: {short}")
     else:
-        job_store.add_progress(job, f"few-shot: {few_shot_summary}")
+        job_store.add_progress(job, f"few-shot(Planner压缩): {few_shot_summary}")
     if not few_shot_block:
         return ""
     return (
-        f"\n\n{few_shot_block}\n\n"
-        "【few-shot 仅供参考】上面范例只示范 testlib/generator.h 写法与分支组织，"
-        "不是本题的输入格式或约束。"
-        "必须以本题题面、标程读入顺序、range.json、gen_plan.md 为准；"
-        "多测先输出 T、有向/自环/边权等不得照抄范例。"
-        "树/图 API：必须 t.gen(); cout << t 或 for (auto &e : t.edges())；"
-        "get_edges() / t.shuffle() 不存在，写错会编译失败。"
+        f"\n\n【参考结构要点 · 压缩 few-shot · 仅供 Planner】\n{few_shot_block}\n\n"
+        "【用法 · 只借通用骨架】允许借鉴：registerGen、"
+        "string type = opt<string>(\"type\",\"random\") + 字符串比较分支、"
+        "opt(seed/index/count)、index 解组数/规模/数值轴的小中大全组合（轴名以本题 constraints 为准）、"
+        "generator.h 的 gen()/edges()、validator 的 read*/readEoln/readEof/ensuref 模式。\n"
+        "【禁止】opt<int>(\"type\") / if (type == 0)；禁止借范例的输入字段形状"
+        "（几行几个数、n+数组、边列表形态、printf 字段顺序）"
+        "与范例约束常数；禁止把要点扩写成完整源码或伪代码。\n"
+        "第 1 节输入格式、是否多测、自环/有向/边权一律只写本题标程读入；"
+        "第 4/8 节必须写清各轴小中大全组合（变量名用本题的，不必叫 t/n/ai）；"
+        "禁止 random 恒组数=1、禁止数值轴全程打满；"
+        "第 5/8 节只描述如何打印【本题输入】，不得套用范例输出形态。"
     )
 
 
@@ -282,7 +392,7 @@ def _build_special_samples_block(
             f"每方案样例数：{special_samples_count}\n"
             "要求：\n"
             "1. range.json 可含 special_samples_desc / special_schemes；\n"
-            "2. count 必须写 15（常规样例数）；特殊组由选中方案叠加，不要自行加减；\n"
+            "2. count 由你自定（常规样例数，不得小于 15）；特殊组由选中方案叠加，不要自行加减；\n"
             "3. edge_cases 不要写 special_samples；\n"
             "4. gen_special.cpp 由后续独立 SpecialCoder 阶段编写，本阶段不要实现 special_samples。"
         )
@@ -291,6 +401,7 @@ def _build_special_samples_block(
             f"\n\n【自动挖掘特殊方案】已开启\n"
             f"每方案样例数：{special_samples_count}\n"
             "系统将在写出 range 后根据标程/题面自动挖方案；"
+            "count 由你自定（常规样例数，不得小于 15）；"
             "edge_cases 不要写 special_samples；本阶段不要写 gen_special。\n"
         )
     return ""
@@ -312,7 +423,12 @@ def prepare_prompts(
     special_samples_count: int = 1,
     auto_discover_special: bool = False,
 ) -> tuple[str, str, dict | None, str, str]:
-    """准备文本并返回 (stmt_plain, task, preset, output_plain, std_for_prompt)。"""
+    """准备文本并返回 (stmt_plain, task, preset, output_plain, std_for_prompt)。
+
+    task 供 Coder 使用，不含完整 few-shot；压缩要点在 Plan 阶段单独注入。
+    problem_type / eff_type 保留入参以兼容调用方（题型在 run_gen_agent 内再解析）。
+    """
+    _ = (eff_type, problem_type)  # 兼容签名；few-shot 改由 Planner 消费
     try:
         stmt_plain = simplify_text(problem_statement or "", kind="statement")
         job_store.add_progress(
@@ -368,15 +484,8 @@ def prepare_prompts(
     if struct_hint_block:
         job_store.add_progress(job, "检测到题面特殊结构约束，已注入针对性提醒")
 
-    # 题型未定时先不注入 few-shot（等 Range 阶段 LLM 判型后再补）
-    few_shot_block = ""
-    if problem_type:
-        few_shot_block = _build_few_shot_block(
-            job, problem_type, stmt_plain, range_plain, std_code,
-        )
-
+    # few-shot 压缩要点只喂 Planner；range 每轮由 Range Agent 审核/重写，不再把 GUI 方案锁死为 preset
     preset = None
-    range_block = ""
     special_block = _build_special_samples_block(
         special_samples_desc, special_samples_count,
         already_in_range=bool(range_json is not None and isinstance(range_json, dict) and range_json.get("constraints")),
@@ -384,50 +493,36 @@ def prepare_prompts(
     )
     if range_json is not None and isinstance(range_json, dict) and range_json.get("constraints"):
         from pipeline.gen_data import normalize_range_json, validate_range_json
-        preset = normalize_range_json(dict(range_json))
-        preset.pop("std_cmd", None)
-        # 合并用户通过 API 传入的特殊样例描述（若 range.json 中未写）
+        candidate = normalize_range_json(dict(range_json))
+        candidate.pop("std_cmd", None)
         if special_samples_desc:
-            preset.setdefault("special_samples_desc", special_samples_desc)
-            preset.setdefault("special_samples_count", special_samples_count)
+            candidate.setdefault("special_samples_desc", special_samples_desc)
+            candidate.setdefault("special_samples_count", special_samples_count)
         if auto_discover_special:
-            preset["auto_discover_special"] = True
-        errs0 = validate_range_json(preset)
-        if errs0:
-            raise RuntimeError("GUI 提供的 range.json 不合法:\n" + "\n".join(f"  - {e}" for e in errs0))
+            candidate["auto_discover_special"] = True
+        verrs = validate_range_json(candidate)
         (job_dir / "range.json").write_text(
-            __import__("json").dumps(preset, ensure_ascii=False, indent=2), encoding="utf-8")
-        job_store.add_progress(
-            job,
-            f"【跳过写 range】使用 GUI 已给方案: count={preset.get('count')} "
-            f"type={preset.get('problem_type') or '-'} "
-            f"edge_cases={preset.get('edge_cases')}",
+            json.dumps(candidate, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        sp_note = ""
-        sp = preset.get("special_constraints") or []
-        if sp:
-            sp_note = (
-                "\n\n【range.json 已标注的特殊结构约束 — gen/validator 必须显式保证】\n"
-                + "\n".join(f"- {c}" for c in sp)
-                +                 "\n每条约束都要在 gen.cpp 的某个 --type 分支里真正实现，"
-                "并在 validator.cpp 建议用 ensuref 校验。以编译/运行通过为准。\n"
+        if verrs:
+            job_store.add_progress(
+                job,
+                "【Range 候选】GUI/历史方案校验未通过，将交 Range Agent 重写: "
+                + verrs[0],
             )
-        range_block = (
-            f"\n\n【已给定 range.json — 禁止再调用 write_range，不要修改它】\n"
-            f"```json\n{__import__('json').dumps(preset, ensure_ascii=False, indent=2)}```\n"
-            "请直接写 gen.cpp / validator.cpp，--type 必须覆盖 edge_cases 中每一个名字；"
-            "对每种 edge_type 做 run_gen→run_validate→run_std 三连自检，全过后 finish。"
-            f"{sp_note}{special_block}"
-        )
-    else:
-        range_block = (
-            "\n\n要求：range.json 的 count 必须写 15（常规样例数默认；用户未另行指定时禁止写其它数字）；"
-            "对 [L,R] 规模变量必须用 --index/--count 分层，15 组里既有小数据也有大数据（禁止只抽到 100 以内）。"
-            "若有多测 T 且 sum n 有上限：必须同时覆盖「大T+小n」和「小T+大n」，禁止先抽大 n 再令 T=S/n（会把 T 压成 1~2）。"
-            "按契约：先 write_range，再写 gen.cpp/validator.cpp，"
-            "对每种 edge_type 做 run_gen→run_validate→run_std 三连自检，全过后调 finish。"
-            f"{special_block}"
-        )
+        else:
+            job_store.add_progress(
+                job,
+                f"【Range 候选】已有方案待审核: count={candidate.get('count')} "
+                f"type={candidate.get('problem_type') or '-'} "
+                f"edge_cases={candidate.get('edge_cases')}",
+            )
+    range_block = (
+        "\n\n【range 流程】每次开始生成都会跑 Range Agent："
+        "有已有 range.json 则先审核（合理复用 / 不合理重写），无则新建。"
+        "最终以审核后的 range.json 为准编写 gen/validator。"
+        f"{special_block}"
+    )
 
     task = (
         f"请为下面的算法题生成测试数据。\n\n"
@@ -438,30 +533,46 @@ def prepare_prompts(
         f"{std_block}"
         f"{range_block}"
         f"{struct_hint_block}"
-        f"{few_shot_block}"
         f"{resume_failure_block}"
     )
     return stmt_plain, task, preset, output_plain, std_for_prompt
 
 
-# Planner 篇幅：提示目标 ~1600；超过软上限则压缩补写一次（含复杂度预算节）
-PLAN_TARGET_CHARS = 1600
-PLAN_SOFT_MAX_CHARS = 2400
+# Planner 篇幅：目标 ~1900；超过软上限则压缩补写一次（含复杂度预算节）
+PLAN_TARGET_CHARS = 1900
+PLAN_SOFT_MAX_CHARS = 3200
+
+
+def _truncate_for_ref(text: str, head: int, tail: int, label: str) -> str:
+    """截断长文本作冲突对照摘要。"""
+    t = (text or "").strip()
+    if not t:
+        return ""
+    limit = head + tail
+    if len(t) <= limit + 80:
+        return t
+    return (
+        t[:head]
+        + f"\n\n...（{label}已截断，完整策略见 gen_plan.md）...\n\n"
+        + t[-tail:]
+    )
 
 
 def _build_planner_task(
     stmt_plain: str,
     range_plain: str,
     output_plain: str,
-    std_for_prompt: str,
+    std_block: str,
     range_json: dict,
     eff_type: str,
     special_samples_desc: str = "",
     special_samples_count: int = 1,
+    few_shot_block: str = "",
 ) -> tuple[str, str]:
     """构造 Planner 阶段的 (system_prompt, user_prompt)。使用纯文本 chat，不调用工具。
 
-    特殊样例由后续 SpecialCoder 单独规划，此处只提示 count 含特殊组、edge_cases 勿写 special_samples。
+    必须含标程（std_block），以便写死输入格式与复杂度预算。
+    few_shot_block 应为压缩结构要点（非完整源码）。
     """
     special_note = ""
     if (special_samples_desc or "").strip():
@@ -470,24 +581,40 @@ def _build_planner_task(
             "count 已包含这些组；edge_cases 不要写 special_samples；"
             "本 plan 只规划 gen.cpp / validator.cpp，不要规划 gen_special.cpp。"
         )
+    output_block = ""
+    if (output_plain or "").strip():
+        output_block = (
+            "\n【输出描述 · 仅供理解题意 / 估标程瓶颈】\n"
+            "注意：以下是【标程】的输出格式，不是 gen 的输出格式。"
+            "gen 只生成测例输入；禁止把下列答案格式/文案写进 gen 的 cout 步骤。\n"
+            f"{output_plain.strip()}\n"
+        )
     user_prompt = (
-        "请为下面的算法题写一份简短的 gen.cpp / validator.cpp 生成计划"
-        f"（目标约 {PLAN_TARGET_CHARS} 字，勿超过 {PLAN_SOFT_MAX_CHARS} 字）。\n\n"
+        "请为下面的算法题写一份可执行的 gen.cpp / validator.cpp 生成计划"
+        f"（目标约 {PLAN_TARGET_CHARS} 字，勿超过 {PLAN_SOFT_MAX_CHARS} 字）。\n"
+        "Coder 将严格按 plan 实现，请把策略写死（第 5/6/8 节必须可照做）。\n"
+        "【提醒】gen stdout = 输入；标程 cout = 答案；二者不要写混。\n\n"
         f"【题面】\n{stmt_plain}\n\n"
         f"【数据范围】\n{range_plain}\n"
-        f"{output_plain}\n"
-        f"{std_for_prompt}\n"
+        f"{output_block}"
+        f"{std_block}"
         f"\n【range.json】\n```json\n{json.dumps(range_json, ensure_ascii=False, indent=2)}```\n"
         f"{special_note}"
+        f"{few_shot_block}"
         f"\n题型: {eff_type}\n"
-        "\nedge_cases 每个一行；必须含第 7 节「复杂度与规模预算」，其中强制写清「有效状态预算」"
-        "（最大档唯一顶点/字符串/权值种类等上界；满输出规模≠满状态）；不要复述题面或粘贴大段伪代码。\n"
+        "\n要求：edge_cases 每个一行（只描述如何打印【本题输入】）；"
+        "第 6 节列出 ensuref 清单或写明 read*+readEoln+readEof；"
+        "第 7 节强制写清「有效状态预算」；"
+        "第 8 节 4～6 条短步骤（random 解轴 + 引用第 5/6 节；禁止复述 edge 表；"
+        "opt/type 样板由 Coder 固定模板提供，plan 只写一句约束即可）；"
+        "第 1 节输入格式只以标程为准；few-shot 只借 registerGen/opt/readEoln 等通用骨架，"
+        "禁止借范例输入字段形状；禁止贴完整代码。\n"
     )
     return prompts.build_planner_prompt(), user_prompt
 
 
 def _plan_looks_complete(plan_text: str) -> bool:
-    """粗略检查 plan 是否包含关键小节，避免模型只写一两句。"""
+    """粗略检查 plan 是否包含关键小节与可执行决策信号。"""
     if not plan_text or len(plan_text) < 80:
         return False
     text = plan_text.lower()
@@ -504,7 +631,23 @@ def _plan_looks_complete(plan_text: str) -> bool:
         or ("状态上界" in plan_text)
         or (("预算" in plan_text) and ("状态" in plan_text or "池" in plan_text))
     )
-    return has_complexity and has_state_budget
+    # 第 8 / API：include 决策
+    has_include = (
+        "testlib" in text
+        or "generator.h" in text
+        or "#include" in text
+        or "include" in text
+    )
+    # 第 6：validator 可执行信号
+    has_val = ("readeof" in text) or ("ensuref" in text) or ("validator" in text) or ("校验" in plan_text)
+    # 第 8：实现思路（步骤级，非空话）
+    has_impl = (
+        ("实现思路" in plan_text)
+        or ("实现顺序" in plan_text)
+        or ("registergen" in text)
+        or ("write_gen" in text)
+    )
+    return has_complexity and has_state_budget and has_include and has_val and has_impl
 
 
 def _plan_too_long(plan_text: str) -> bool:
@@ -522,35 +665,88 @@ def _build_coder_task(
     special_samples_desc: str = "",
     special_samples_count: int = 1,
 ) -> str:
-    """构造 Coder Agent 的 task，要求根据 gen_plan.md 写代码。"""
+    """构造 Coder Agent 的精简 task：以 gen_plan.md + range.json 为主，题面/标程仅作冲突对照。"""
     special_note = ""
     if (special_samples_desc or "").strip():
         special_note = (
             f"\n注意：特殊样例（{special_samples_count} 组）由后续 SpecialCoder 编写 gen_special.cpp；"
             "本阶段不要写 gen_special，也不要在 gen.cpp 实现 special_samples。\n"
         )
+    stmt_ref = _truncate_for_ref(stmt_plain, 450, 250, "题面")
+    range_ref = _truncate_for_ref(range_plain, 300, 150, "范围描述")
+    std_ref = _truncate_for_ref(std_for_prompt, 500, 400, "标程")
+    output_ref = (output_plain or "").strip()
+    if len(output_ref) > 400:
+        output_ref = output_ref[:400] + "\n...（输出描述已截断）..."
+
+    conflict_parts = [f"【冲突对照摘要 · 题型 {eff_type}】仅当与 gen_plan 冲突或格式不明时参考；禁止据此改策略。"]
+    if stmt_ref:
+        conflict_parts.append(f"\n【题面摘要】\n{stmt_ref}")
+    if range_ref:
+        conflict_parts.append(f"\n【数据范围摘要】\n{range_ref}")
+    if output_ref:
+        conflict_parts.append(
+            "\n【输出描述摘要 · 标程输出格式，非 gen 输出】\n"
+            f"{output_ref}"
+        )
+    if std_ref:
+        conflict_parts.append(
+            f"\n【标程摘要（读入格式对照）】\n```\n{std_ref}\n```"
+        )
+    conflict_block = "\n".join(conflict_parts)
+
+    skeleton = ""
+    if (eff_type or "") in ("tree", "weighted_tree", "graph", "weighted_graph"):
+        skeleton = (
+            "\n【最短可编骨架 · 树/图 · 必遵守】\n"
+            '#include "generator.h"\n'
+            "using namespace std;\n"
+            "using namespace generator::all;\n"
+            "int main(int argc, char* argv[]) {\n"
+            "  registerGen(argc, argv, 1);\n"
+            '  int seed = opt<int>("seed", 0);\n'
+            '  string type = opt<string>("type", "random");  // 禁止 opt<int>("type")\n'
+            '  int index = opt<int>("index", 0), count = opt<int>("count", 30);\n'
+            "  // 再 opt 全部 constraints\n"
+            "  // 无边权或多字段边（如 u v a b）：\n"
+            "  //   unweight::Tree t(n); t.gen();\n"
+            "  //   for (auto &e : t.edges()) { /* u v + 本题边字段；"
+            "权用 rnd.next(1, 1000000000) */ }\n"
+            "  // 单边权：edge_weight::Tree<int> + set_edges_weight_function；"
+            "禁止 weight:: / set_weight_limit / 1e9\n"
+            '  if (type == "random") { /* ... */ }\n'
+            '  else if (type == "edge_xxx") { /* 与 range 同名 */ }\n'
+            "  return 0;\n"
+            "}\n"
+        )
+
     return (
-        "请根据当前工作目录的 gen_plan.md 写完整的 gen.cpp 和 validator.cpp。\n\n"
+        "请把 gen_plan.md 逐条翻译成完整的 gen.cpp 和 validator.cpp。\n"
+        "【分工】你只负责实现；禁止重新设计 edge_cases / API / 预算；按第 8 节「实现思路」落地。\n"
+        "【冲突原则】若 plan 第 5/8 节与第 1 节输入格式或标程读入矛盾"
+        "（例如要求 gen 打印答案/失败文案/排列），以第 1 节 + 标程读入为准，只打印输入。\n\n"
         "【content 书写 · 必读】write_gen / write_validate 的 arguments 必须含完整 content"
         "（从 #include 到 main 结尾 }）；禁止空调用、半截、摘要；宜短而全，防止 JSON 截断"
-        "（出现 recovered / missing_content 须立刻整份重写）。"
-        "实现必须带上题面+标程+range 全部上下文（edge_cases 分支、多测 T、约束变量 opt）。\n\n"
-        f"【题面】\n{stmt_plain}\n\n"
-        f"【数据范围】\n{range_plain}\n"
-        f"{output_plain}\n"
-        f"{std_for_prompt}\n"
-        f"\n【range.json】\n```json\n{__import__('json').dumps(range_json, ensure_ascii=False, indent=2)}```\n"
+        "（出现 recovered / missing_content 须立刻整份重写）。\n"
+        f"{skeleton}\n"
+        f"【range.json】\n```json\n{json.dumps(range_json, ensure_ascii=False, indent=2)}```\n\n"
+        f"{conflict_block}\n\n"
         "要求：\n"
         "1. 只 read_file('gen_plan.md') 一次；range.json 已在上方，禁止再读。\n"
         "2. 首轮勿读 gen.cpp / validator.cpp；读完 plan 后直接 write_gen + write_validate"
         "（各自带完整 content，可并行）。\n"
-        "3. 严格按 plan + 本题标程实现；task 里的 few-shot/参考范例仅作 API/风格参考，"
-        "禁止照抄其「第一行 n m」或无自环约定（标程有 T 则先输出 T；n=1 按题面决定自环或 m=0）。\n"
-        "4. 不要遗漏多测 / sum 约束 / edge_case 分支；写 gen 时对照上方全部上下文。\n"
-        "5. gen.cpp 必须注册 seed / index / count / type 以及 range.json 中所有变量。\n"
-        "6. 严格按 gen_plan 第 7 节「有效状态预算」实现：满规模≠满状态。\n"
+        "3. 【规格优先级】gen_plan.md 第 5/6/7/8 节 > range.json > 上方冲突对照摘要；"
+        "但「gen 只打印输入」高于错误的答案输出步骤；API 另遵守系统【generator.h API】硬约束。\n"
+        "4. 覆盖 plan/range 中全部 edge_cases 分支与 constraints 变量 opt"
+        "（seed/index/count/type + 全部约束名）。\n"
+        "   【type 硬约束】必须 `string type = opt<string>(\"type\", \"random\")`，"
+        "并用 `if (type == \"random\")` / `else if (type == \"edge_xxx\")` 分支；"
+        "若 plan 误写 `opt<int>(\"type\")` 或 `type == 0`，以本条为准改成 string"
+        "（否则编译 no match for operator==）。\n"
+        "5. 严格按 gen_plan 第 7 节「有效状态预算」：满规模≠满状态。\n"
+        "6. validator 按 plan 第 6 节清单实现（校验输入，不校验答案）。\n"
         "7. 对每种 edge_type 做 run_gen → run_validate → run_std 三连自检。\n"
-        "8. 最后调用 run_self_check() 做强化自检，通过后 finish。\n"
+        "8. 最后调用 run_self_check()，通过后 finish。\n"
         f"{special_note}{resume_failure_block}"
     )
 
@@ -626,17 +822,29 @@ def run_gen_agent(
     special_samples_desc: str = "",
     special_samples_count: int = 1,
     auto_discover_special: bool = False,
+    output_plain: str = "",
+    std_for_prompt: str = "",
+    lang: str = "cpp",
 ) -> tuple[str, str]:
     """启动 Range/Gen Agent。Plan-and-Execute：先写 gen_plan.md，再按 plan 写代码。
 
+    Planner 使用完整标程/输出描述写死策略（输出描述降权为标程格式，非 gen 输出）；
+    Coder 默认只拿 plan + range + 冲突对照摘要，冲突时以输入格式为准。
+
     返回 (Agent summary, 生效题型)。
     """
-    from server.few_shots import (
-        normalize_problem_type,
-        resolve_problem_type_from_range,
-    )
+    from server.few_shots import normalize_problem_type
 
     range_plain = _extract_range_plain(task)
+    if not (std_for_prompt or "").strip():
+        std_for_prompt = std_code or ""
+        if len(std_for_prompt) > 12000:
+            std_for_prompt = (
+                std_code[:6000]
+                + f"\n\n/* ... std 共 {len(std_code)} 字符，中间已省略 ... */\n\n"
+                + std_code[-4000:]
+            )
+    planner_std_block = build_std_block(std_for_prompt, lang) if (std_for_prompt or "").strip() else ""
     range_path = job_dir / "range.json"
 
     # 续跑 / 磁盘已有方案时，把 range.json 读进内存，供后续 Plan/Coder 使用
@@ -651,66 +859,37 @@ def run_gen_agent(
         ) or "array"
         return "checker 阶段续跑：跳过 gen/validator Agent", typ
 
-    need_range_stage = range_json is None
-    if resume_info and range_path.is_file() and not need_range_stage:
-        stage_keys = ["gen"]
+    # 每次开始生成都跑 Range：无方案则新建；有方案则审核（合理复用 / 不合理重写）
+    stage_keys = ["range", "gen"]
+    if resume_info and range_path.is_file():
         if has_gen_val_at_resume(job_dir):
             job_store.add_progress(
-                job, "【续跑】已有 range + gen/validator，进入修复/完善阶段",
+                job, "【续跑】已有 range + gen/validator；仍先审核 range，再进入修复/完善",
             )
         else:
             job_store.add_progress(
                 job,
-                "【续跑】仅有 range.json（无 gen/validator），将重新编写 gen/validator",
+                "【续跑】仅有 range.json（无 gen/validator）；先审核 range，再编写 gen/validator",
             )
-    elif not need_range_stage:
-        stage_keys = ["gen"]
-    else:
-        stage_keys = ["range", "gen"]
 
-    typ = normalize_problem_type(eff_type)
-    if not typ and isinstance(range_json, dict):
-        typ = normalize_problem_type(str(range_json.get("problem_type") or ""))
-
-    # ---- Range 阶段：未提供方案时由 Range Agent 一并写出 problem_type ----
-    if need_range_stage:
-        job_store.add_progress(
-            job,
-            f"Agent prompt stages: {stage_keys} | type=(写入 range.json.problem_type)"
-        )
-        range_json, typ = _run_range_only_agent(
-            job, job_dir, stmt_plain, range_plain, std_code, "", on_event,
-            special_samples_desc=special_samples_desc,
-            special_samples_count=special_samples_count,
-            auto_discover_special=auto_discover_special,
-        )
-        # prepare_prompts 时若无题型会跳过 few-shot，此处补上
-        if "【参考范例" not in task and "few-shot" not in task.lower():
-            task = task + _build_few_shot_block(
-                job, typ, stmt_plain, range_plain, std_code,
-            )
-    else:
-        # 已有 range 但题型仍空：关键词兜底写回（不再单独调大模型）
-        if not typ:
-            typ = resolve_problem_type_from_range(
-                range_json if isinstance(range_json, dict) else None,
-                stmt_plain, range_plain, std_code,
-            )
-            if isinstance(range_json, dict):
-                range_json = dict(range_json)
-                range_json["problem_type"] = typ
-                range_path.write_text(
-                    json.dumps(range_json, ensure_ascii=False, indent=2), encoding="utf-8"
-                )
-            job_store.add_progress(job, f"【题型】从 range/关键词: {typ}")
-            if "【参考范例" not in task:
-                task = task + _build_few_shot_block(
-                    job, typ, stmt_plain, range_plain, std_code,
-                )
-        job_store.add_progress(
-            job,
-            f"Agent prompt stages: {stage_keys} | type={typ}"
-        )
+    existing_for_review = range_json if isinstance(range_json, dict) else None
+    job_store.add_progress(
+        job,
+        f"Agent prompt stages: {stage_keys} | range="
+        + ("审核已有" if existing_for_review and existing_for_review.get("constraints") else "新建"),
+    )
+    range_json, typ, range_reused = _run_range_only_agent(
+        job, job_dir, stmt_plain, range_plain, std_code, "", on_event,
+        special_samples_desc=special_samples_desc,
+        special_samples_count=special_samples_count,
+        auto_discover_special=auto_discover_special,
+        existing_range=existing_for_review,
+    )
+    job_store.add_progress(
+        job,
+        f"Agent prompt stages: {stage_keys} | type={typ} | range_"
+        + ("reused" if range_reused else "rewritten"),
+    )
 
     typ = typ or "array"
 
@@ -720,18 +899,35 @@ def run_gen_agent(
 
     # ---- Plan 阶段：单次纯文本生成 gen_plan.md（复用时若已有 plan 则跳过）----
     plan_path = job_dir / PLAN_FILE
+    # range 被重写后旧 plan 可能过期，强制重做 Plan
+    if plan_path.is_file() and not range_reused:
+        try:
+            plan_path.unlink()
+            job_store.add_progress(job, "【Plan】range 已重写，清除旧 gen_plan.md")
+        except OSError as e:
+            job_store.add_progress(job, f"【Plan】清除旧 gen_plan.md 失败: {e}")
     if plan_path.is_file():
         job_store.add_progress(job, "检测到已有 gen_plan.md，跳过 Plan 阶段")
         plan_summary = "复用已有 gen_plan.md"
     else:
+        planner_few_shot = _build_planner_few_shot_block(
+            job, typ, stmt_plain, range_plain, std_code,
+        )
         system_prompt, user_prompt = _build_planner_task(
             stmt_plain,
             range_plain,
-            "", "", range_json or {}, typ,
+            output_plain,
+            planner_std_block,
+            range_json or {},
+            typ,
             special_samples_desc=special_samples_desc,
             special_samples_count=special_samples_count,
+            few_shot_block=planner_few_shot,
         )
-        job_store.add_progress(job, "【Plan】启动 Planner 单次生成 gen_plan.md")
+        job_store.add_progress(
+            job,
+            "【Plan】启动 Planner（含标程/输出描述 + 压缩 few-shot）生成 gen_plan.md",
+        )
         try:
             plan_text = chat_text(system_prompt, user_prompt, temperature=0.3)
         except Exception as e:
@@ -740,22 +936,42 @@ def run_gen_agent(
 
         # 太短/缺关键小节：补一次完整但仍然简短的版本
         if not _plan_looks_complete(plan_text):
-            job_store.add_progress(job, "【Plan】首次计划不完整，补一次简洁完整版")
+            job_store.add_progress(job, "【Plan】首次计划不完整，补一次可执行完整版")
+            multi_retry = ""
+            if (typ or "") == "multi_test" or (
+                isinstance(range_json, dict)
+                and (
+                    (range_json.get("problem_type") == "multi_test")
+                    or (
+                        "t" in {str(k).lower() for k in (range_json.get("constraints") or {})}
+                        and any(
+                            "sum" in str(k).lower()
+                            for k in (range_json.get("constraints") or {})
+                        )
+                    )
+                )
+            ):
+                multi_retry = (
+                    "\n【分布硬约束】第 4/8 节必须写清本题组数/规模/数值轴（名从 constraints 来，"
+                    "不一定叫 t/n/ai）的小中大【全组合】（如 bA=i%3,bB=(i/3)%3,bC=(i/9)%3）；"
+                    "禁止 random 恒组数=1；禁止数值全程打满；有 sum 时禁止双顶格。"
+                )
             retry_prompt = (
                 f"{user_prompt}\n\n"
                 "【上一次计划被判定为不完整】请严格按 8 个小节重写，保持简短"
                 f"（目标约 {PLAN_TARGET_CHARS} 字）：\n"
-                "1. 输入格式 2. 范围参数 3. 多测与 sum 4. 规模分层 "
-                "5. edge_cases（每名一行）6. validator "
-                "7. 复杂度与规模预算（必须含有效状态上界数字/表达式） "
-                "8. 实现顺序（最多 3 条）"
+                "1. 输入格式（对照标程写死）2. 范围参数 3. 多测与 sum 4. 规模分层 "
+                "5. edge_cases（每名一行可执行构造）6. validator（ensuref 清单或 read*+readEoln+readEof） "
+                "7. 复杂度与规模预算（必须含有效状态上界） "
+                "8. 实现思路（4～6 条短步骤：引用第 5/6 节，勿复述 edge 表；opt/type 一句即可）"
+                f"{multi_retry}"
             )
             try:
                 plan_text = chat_text(system_prompt, retry_prompt, temperature=0.3)
             except Exception as e:
                 job_store.add_progress(job, f"【Plan】Planner 补写失败: {type(e).__name__}: {e}")
 
-        # 过长：压缩一次（仍须保留 8 节，含复杂度预算）
+        # 过长：压缩一次（仍须保留 8 节，含复杂度预算与可执行决策）
         if _plan_too_long(plan_text):
             job_store.add_progress(
                 job,
@@ -763,8 +979,10 @@ def run_gen_agent(
             )
             compress_prompt = (
                 "请把下面的 gen_plan 压缩为更短 Markdown，保留全部 8 个小节与每个 edge_case 一行映射，"
-                "尤其保留第 7 节的 O(...) 与「有效状态预算」数字，"
-                f"全文控制在约 {PLAN_TARGET_CHARS} 字以内（硬上限 {PLAN_SOFT_MAX_CHARS}）。"
+                "尤其保留第 6 节 ensuref/readEoln/readEof、第 7 节 O(...) 与「有效状态预算」。"
+                "第 8 节只保留短步骤并【删除】对第 5 节 edge 表的逐条复述、删除大段 opt/type 示例代码"
+                "（改为一句：分支前全 opt + string type，细则见 Coder 模板）。"
+                f"全文控制在约 {PLAN_TARGET_CHARS} 字以内（软上限 {PLAN_SOFT_MAX_CHARS}）。"
                 "删除复述、伪代码和空话；只输出压缩后的计划。\n\n"
                 f"【原计划】\n{plan_text}"
             )
@@ -780,18 +998,23 @@ def run_gen_agent(
             plan_summary = f"已生成 gen_plan.md ({len(plan_text)} 字符)"
             job_store.add_progress(job, plan_summary)
         else:
-            plan_summary = "Planner 未生成 gen_plan.md，Coder 将直接按原 task 生成"
+            plan_summary = "Planner 未生成 gen_plan.md，Coder 将回退使用完整 task"
             job_store.add_progress(job, plan_summary)
 
     # ---- Execute 阶段：Coder 一次编码 + Gen Fixer 最多 4 轮 + 可选 Coder 重写 1 次 ----
-    job_store.add_progress(job, "【Execute】Coder 第 1/1 轮：写 gen/validator")
+    job_store.add_progress(job, "【Execute】Coder 第 1/1 轮：按 gen_plan 实现 gen/validator")
     coder_task = _build_coder_task(
-        stmt_plain, range_plain, "", "", range_json or {}, typ,
+        stmt_plain, range_plain, output_plain, std_for_prompt, range_json or {}, typ,
         resume_failure_block,
         special_samples_desc=special_samples_desc,
         special_samples_count=special_samples_count,
     )
-    coder_task = f"{task}\n\n【额外要求：Plan-and-Execute】\n{coder_task}"
+    if not plan_path.is_file():
+        # 无 plan 时回退：给完整上下文，避免 Coder 无规格可依
+        coder_task = f"{task}\n\n【额外要求：无 gen_plan 回退】\n{coder_task}"
+        job_store.add_progress(job, "【Execute】无 gen_plan.md，Coder 使用完整 task 回退")
+    else:
+        job_store.add_progress(job, "【Execute】Coder 精简上下文：plan + range + 冲突对照摘要")
 
     coder_summary = agent_run(
         coder_task,
@@ -957,7 +1180,7 @@ def run_gen_agent(
         # 避免半截 out/ 被阶段 4 误判为「测例已齐全」
         try:
             rj = range_json or {}
-            tools._clear_out_pairs(job_dir / "out", int(rj.get("count") or 15))
+            tools._clear_out_pairs(job_dir / "out", int(rj.get("count") or DEFAULT_REGULAR_COUNT))
         except Exception:
             pass
         msg = (

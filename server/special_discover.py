@@ -1,9 +1,9 @@
-"""Range 阶段：单独调用大模型，理解特殊样例并产出【一条】构造方案。
+"""Range 阶段：单独调用大模型，产出【一条】特殊样例构造方案。
 
 流程（与写 range 的 Agent 分离）：
-1. understand：题面 + 输入描述 + 标程 + 用户提示 → 深度理解，并建议 preferred_mode
-2. discover：基于理解结果，恰好产出 1 条方案；construct_mode 由大模型在 mutate/build 中二选一
-3. GUI 可手动点「模式」切换 mutate ↔ build
+1. 一次 LLM：理解 + 产出 1 条 scheme（含 preferred_mode / property_checks）
+2. 代码规则盖章 construct_mode（mutate 窄门，默认偏 build）
+3. GUI 可手动点「模式」切换（force_mutate / force_build）
 """
 from __future__ import annotations
 
@@ -12,12 +12,14 @@ import re
 from typing import Any
 
 from agent.llm import chat_text
+from pipeline.gen_data import DEFAULT_REGULAR_COUNT, _clamp_regular_count
 
 SAMPLES_PER_SCHEME_DEFAULT = 1
 # 产品策略：特殊样例每方案 1 组即可；旧方案/题库里的 5 一律压到上限
 SAMPLES_PER_SCHEME_CAP = 1
 # 特殊 gen 通常 1 条方案；当用户同时要求独立结构性质与标程分支陷阱时允许拆成 2 条
 MAX_CANDIDATE_SCHEMES = 2
+MUST_HOLD_CAP = 2
 
 # construct_mode: mutate = 普通底稿 + 局部替换；build = 从零特殊构造
 CONSTRUCT_MODE_MUTATE = "mutate"
@@ -36,31 +38,36 @@ _MUTATE_HINT_RE = re.compile(
     r"只有一个|单一|局部|改权|权值|精度|浮点边界|全\s*0|全\s*1)",
     re.I,
 )
+# 存在性 / 强结构 → 禁止 mutate
+_BLOCK_MUTATE_RE = re.compile(
+    r"(不存在|存在|区间内|之间|范围内|之内|开区间|闭区间|"
+    r"DAG|有向无环|连通|二分图|哈密顿|欧拉|生成树|强连通|双连通|"
+    r"必须存在|保证存在|图必须|树必须|无环|匹配|流网络|拓扑)",
+    re.I,
+)
+# construct_hint 里「改字段」迹象
+_MUTATE_FIELD_HINT_RE = re.compile(
+    r"(改|替换|设为|置为|改为|改成|patch|字段|全相同|全相等|极值|全\s*0|全\s*1)",
+    re.I,
+)
 
-_UNDERSTAND_JSON_SHAPE = """
+_DISCOVER_JSON_SHAPE = """
 {
   "summary": "用 2～4 句概括这道题在测什么、特殊样例要卡什么",
-  "input_format": "输入格式要点（结合标程读入）",
-  "std_branches": ["标程里值得针对的特殊分支/边界"],
-  "user_intent": "用户特殊提示的意图（无提示则写根据题面/标程自动挖掘）",
-  "constraints_note": "与 validator/题面约束相关的注意点",
-  "mutate_angle": "若用 mutate：改哪些字段、如何仍合法",
+  "preferred_mode": "mutate 或 build",
+  "mode_reason": "为何选该 mode（一句话）",
+  "mutate_angle": "若用 mutate：改哪些字段（1～2 个）、如何仍合法",
   "build_angle": "若用 build：从零保证什么结构/性质",
-  "preferred_mode": "mutate 或 build（二选一，给出更合适的一种）",
-  "mode_reason": "为何选该 mode（一句话）"
-}
-"""
-
-_SCHEME_JSON_SHAPE = """
-{
   "schemes": [
     {
       "id": "snake_case英文标识",
       "title": "中文短标题",
       "why": "为什么值得造",
-      "must_hold": ["可检验的性质1", "性质2"],
-      "construct_hint": "如何构造（文字，不是代码；与所选 mode 一致）",
-      "construct_mode": "mutate 或 build（二选一）",
+      "must_hold": ["可检验的性质1", "最多2条"],
+      "property_checks": ["可代码化断言，与 must_hold 对应"],
+      "construct_hint": "可执行构造步骤/参数骨架（与 mode 一致）",
+      "mutate_fields": ["仅 mutate 时：拟改字段名，1～2 个"],
+      "construct_mode": "mutate 或 build",
       "source": "std_branch|statement|user_hint|generic_trap",
       "priority": 1
     }
@@ -68,48 +75,23 @@ _SCHEME_JSON_SHAPE = """
 }
 """
 
-UNDERSTAND_SYSTEM = """你是算法竞赛「特殊测例」分析助手。这是一次独立的大模型调用（不是写 range / gen）。
+DISCOVER_SYSTEM = """你是算法竞赛「特殊测例」助手。一次调用完成：理解题面/标程/用户提示，并恰好产出 1 条构造方案。
 
-任务：深度理解题面、标程与用户特殊样例提示，输出结构化分析，并推荐唯一的 construct_mode。
-
-要求：
-1. 只输出一个 JSON 对象，不要 Markdown 围栏，不要解释。
-2. JSON 格式：
-""" + _UNDERSTAND_JSON_SHAPE + """
-3. 必须结合标程读入/分支来谈特殊样例，不要只复述用户原文。
-4. 语义要严谨：用户说「A 与 B 之间 / 区间内」时，默认指开区间（不含端点），除非题面另有定义；
-   禁止用空集合/退化边界（如区间长度为 0、端点重合）让性质平凡成立。
-5. 用户提示、题面约束、标程分支是不同来源：只提取用户明确要求的性质；
-   不要把「贴近某标程分支」与「用户要的结构性质」擅自 AND 成多重 must_hold。
-6. preferred_mode 只能是 mutate 或 build：
-   - mutate：弱/局部约束，可在普通合法样例上局部替换（全相同、极值、改起终点、卡数值等）
-   - build：强结构或需从零保证的性质（图结构/存在性/需搜索验证等）
-   - 不确定时偏 build；需搜索验证的性质优先 build + Finder
-7. mutate_angle 与 build_angle 都要写，但 preferred_mode 只选一个。
-"""
-
-DISCOVER_SYSTEM = """你是算法竞赛「特殊测例构造方案」助手。这是一次独立的大模型调用。
-
-任务：根据「特殊样例理解」结果，恰好产出 1 条构造方案；construct_mode 由你在 mutate / build 中选择（可参考 preferred_mode，也可推翻并说明 why）。
-
-构造模式只有这两种：
-- mutate：先按普通合法逻辑造底稿，再局部替换最少字段，使 must_hold 成立。
-- build：在特殊生成器里从零构造，直接保证结构/特殊性质。
+构造模式：
+- mutate：普通合法底稿上局部替换最少字段（仅适合全相同/极值/改 1～2 字段等）
+- build：从零构造保证结构/特殊性质（默认；不确定时选 build）
 
 要求：
-1. 只输出一个 JSON 对象，不要 Markdown 围栏，不要解释。
-2. JSON 格式（schemes 通常 1 条；若用户同时要求独立结构性质与标程分支陷阱，可输出 2 条）：
-""" + _SCHEME_JSON_SHAPE + """
-3. must_hold 必须可检验；不要提出与常见 validator 冲突的非法结构。
-4. id 唯一，小写字母数字下划线；construct_hint 必须与所选 construct_mode 一致。
-5. 不要输出第 2 条及更多方案。
-6. 用户/理解结果里已有可验证的具体数值，必须写进 construct_hint；禁止用退化边界凑性质。
-7. must_hold 只写用户真正要的性质，表述与题面/标程变量一致；不要臆造未验证的常数或金样例。
-8. 若性质需搜索验证（存在/不存在/区间内无某类对象等）：construct_hint 应要求 Finder
-   在合法参数空间内搜索（允许 O(n^2)，默认约 5s/1GB 预算），禁止先瞎编参数再在狭小窗口碰运气。
-9. 不要把多条独立性质擅自 AND（除非用户明确都要）；贴近标程分支可以写进 construct_hint，
-   但不要因此额外添加用户未要求的 must_hold。
-10. 若用户同时要求多条彼此独立的性质，应拆成多条 scheme，而不是在单条 must_hold 里硬 AND。
+1. 只输出一个 JSON 对象，不要 Markdown 围栏，不要解释。格式：
+""" + _DISCOVER_JSON_SHAPE + """
+2. schemes 恰好 1 条（若用户同时要求独立结构性质与标程分支陷阱，最多 2 条）。
+3. must_hold ≤ 2 条，必须可检验；禁止用空集合/端点重合让性质平凡成立。
+4. property_checks 与 must_hold 对应，写成可代码判定的断言（供 check_special 使用）。
+5. construct_hint 必须可执行（步骤或参数骨架）；禁止写「先搜索」「碰运气」。
+6. 仅当能写清「改 ≤2 个字段且仍合法」时才选 mutate，并填写 mutate_fields；否则 build。
+7. 存在/不存在/区间内无某类对象/强图结构 → 必须 build，并给出确定性或半随机构造步骤。
+8. 不要把多条独立性质擅自 AND；用户明确都要时可拆成多条 scheme。
+9. 结合标程分支，但不要把「贴近分支」擅自加成用户未要求的 must_hold。
 """
 
 AUTO_DISCOVER_DESC_MARKER = "（自动挖掘特殊方案）"
@@ -145,6 +127,63 @@ def infer_construct_mode(
     if has_mutate and not has_build:
         return CONSTRUCT_MODE_MUTATE
     return CONSTRUCT_MODE_BUILD
+
+
+def _extract_mutate_fields(scheme: dict) -> list[str]:
+    raw = scheme.get("mutate_fields")
+    if isinstance(raw, str) and raw.strip():
+        return [raw.strip()]
+    if isinstance(raw, list):
+        return [str(x).strip() for x in raw if str(x).strip()][:2]
+    return []
+
+
+def seal_construct_mode(
+    scheme: dict,
+    *,
+    honor_force: bool = True,
+) -> tuple[str, str]:
+    """规则盖章 mode：mutate 窄门，否则 build。
+
+    返回 (mode, reason)。GUI 可设 force_mutate / force_build / force_construct_mode。
+    """
+    if honor_force:
+        forced = scheme.get("force_construct_mode") or scheme.get("force_mode")
+        if scheme.get("force_build"):
+            forced = CONSTRUCT_MODE_BUILD
+        if scheme.get("force_mutate"):
+            forced = CONSTRUCT_MODE_MUTATE
+        if forced is not None and str(forced).strip():
+            mode = normalize_construct_mode(forced, CONSTRUCT_MODE_BUILD)
+            return mode, f"user_force:{mode}"
+
+    must = [str(x).strip() for x in (scheme.get("must_hold") or []) if str(x).strip()]
+    hint = str(scheme.get("construct_hint") or "")
+    title = str(scheme.get("title") or "")
+    why = str(scheme.get("why") or "")
+    blob = " ".join([title, why, hint] + must)
+    fields = _extract_mutate_fields(scheme)
+    requested = normalize_construct_mode(
+        scheme.get("construct_mode"),
+        infer_construct_mode(title=title, why=why, hint=hint, must_hold=must),
+    )
+
+    if len(must) > MUST_HOLD_CAP:
+        return CONSTRUCT_MODE_BUILD, f"must_hold>{MUST_HOLD_CAP}"
+    if _BLOCK_MUTATE_RE.search(blob):
+        return CONSTRUCT_MODE_BUILD, "blocked_by_existence_or_structure"
+    if requested != CONSTRUCT_MODE_MUTATE:
+        return CONSTRUCT_MODE_BUILD, "default_build"
+
+    # 申请 mutate：明确字段列表（1～2）即可；否则需 mutate 词 + 改字段迹象
+    has_field_signal = bool(fields) or bool(_MUTATE_FIELD_HINT_RE.search(hint))
+    has_mutate_kw = bool(_MUTATE_HINT_RE.search(blob))
+    if fields and 1 <= len(fields) <= 2:
+        scheme["mutate_fields"] = fields
+        return CONSTRUCT_MODE_MUTATE, "narrow_mutate_ok"
+    if has_mutate_kw and has_field_signal:
+        return CONSTRUCT_MODE_MUTATE, "narrow_mutate_ok"
+    return CONSTRUCT_MODE_BUILD, "mutate_gate_failed"
 
 
 def _extract_json_obj(text: str) -> dict:
@@ -199,35 +238,46 @@ def _normalize_scheme(raw: Any, idx: int, forced_mode: str | None = None) -> dic
     must = raw.get("must_hold") or []
     if isinstance(must, str):
         must = [must]
-    must_hold = [str(x).strip() for x in must if str(x).strip()]
+    must_hold = [str(x).strip() for x in must if str(x).strip()][:MUST_HOLD_CAP]
     if not must_hold:
         must_hold = [title or why or "满足特殊构造"]
+    props = raw.get("property_checks") or []
+    if isinstance(props, str):
+        props = [props]
+    property_checks = [str(x).strip() for x in props if str(x).strip()][:MUST_HOLD_CAP]
+    if not property_checks:
+        property_checks = list(must_hold)
     source = str(raw.get("source") or "user_hint").strip()
     try:
         priority = int(raw.get("priority") or (idx + 1))
     except (TypeError, ValueError):
         priority = idx + 1
-    if forced_mode:
-        mode = normalize_construct_mode(forced_mode)
-    else:
-        mode = normalize_construct_mode(
-            raw.get("construct_mode"),
-            infer_construct_mode(
-                title=title, why=why, hint=hint, must_hold=must_hold,
-            ),
-        )
-    return {
+    scheme = {
         "id": sid,
         "title": title,
         "why": why,
         "must_hold": must_hold,
+        "property_checks": property_checks,
         "construct_hint": hint,
-        "construct_mode": mode,
+        "mutate_fields": _extract_mutate_fields(raw),
+        "construct_mode": normalize_construct_mode(
+            forced_mode if forced_mode else raw.get("construct_mode"),
+            infer_construct_mode(
+                title=title, why=why, hint=hint, must_hold=must_hold,
+            ),
+        ),
         "source": source,
         "priority": priority,
         "selected": True,
         "samples_per_scheme": SAMPLES_PER_SCHEME_DEFAULT,
     }
+    for k in ("force_mutate", "force_build", "force_construct_mode", "force_mode"):
+        if k in raw:
+            scheme[k] = raw[k]
+    mode, reason = seal_construct_mode(scheme, honor_force=True)
+    scheme["construct_mode"] = mode
+    scheme["mode_sealed_reason"] = reason
+    return scheme
 
 
 def _pick_one_scheme(
@@ -264,40 +314,39 @@ def fallback_user_scheme(
     samples_per_scheme: int,
     understanding: dict | None = None,
 ) -> list[dict]:
-    """挖掘失败时的兜底：单条方案，mode 取理解推荐或启发式。"""
+    """挖掘失败时的兜底：单条方案，mode 经规则盖章。"""
     hint = (user_hint or "").strip() or "用户指定的特殊情况"
     u = understanding or {}
-    mode = normalize_construct_mode(
-        u.get("preferred_mode"),
-        infer_construct_mode(hint=hint, must_hold=[hint[:200]]),
-    )
-    angle = (
-        str(u.get("mutate_angle") or "").strip()
-        if mode == CONSTRUCT_MODE_MUTATE
-        else str(u.get("build_angle") or "").strip()
-    )
-    if not angle:
-        angle = (
-            f"先造合法底稿再局部修改：{hint[:160]}"
-            if mode == CONSTRUCT_MODE_MUTATE
-            else f"从零构造满足特殊意图：{hint[:160]}"
-        )
     must = [hint[:200]]
     if u.get("user_intent"):
         must.append(str(u["user_intent"])[:200])
+    must = must[:MUST_HOLD_CAP]
+    angle = str(u.get("build_angle") or u.get("mutate_angle") or "").strip()
+    if not angle:
+        angle = f"从零构造满足特殊意图：{hint[:160]}"
     reason = str(u.get("mode_reason") or "").strip()
-    return [{
+    scheme = {
         "id": "user_special",
         "title": "用户描述的特殊情况",
         "why": reason or "用户直接给出的特殊样例描述",
         "must_hold": must,
+        "property_checks": list(must),
         "construct_hint": angle,
-        "construct_mode": mode,
+        "construct_mode": normalize_construct_mode(
+            u.get("preferred_mode"),
+            infer_construct_mode(hint=hint, must_hold=must),
+        ),
         "source": "user_hint",
         "priority": 1,
         "selected": True,
         "samples_per_scheme": samples_per_scheme,
-    }]
+    }
+    mode, seal_reason = seal_construct_mode(scheme)
+    scheme["construct_mode"] = mode
+    scheme["mode_sealed_reason"] = seal_reason
+    if mode == CONSTRUCT_MODE_MUTATE and u.get("mutate_angle"):
+        scheme["construct_hint"] = str(u.get("mutate_angle"))
+    return [scheme]
 
 
 # 兼容旧内部名
@@ -310,27 +359,27 @@ def _fallback_auto_scheme(
 ) -> list[dict]:
     """自动挖掘失败时的兜底：单条，默认偏 build。"""
     u = understanding or {}
-    mode = normalize_construct_mode(u.get("preferred_mode"), CONSTRUCT_MODE_BUILD)
-    if mode == CONSTRUCT_MODE_MUTATE:
-        hint = str(u.get("mutate_angle") or "合法底稿上改极值/全相同等字段")
-        must = str(u.get("mutate_angle") or "触发标程非平凡局部边界")[:200]
-        title = "标程/题面局部边界"
-    else:
-        hint = str(u.get("build_angle") or "根据标程分支与题面边界从零构造合法输入")
-        must = str(u.get("build_angle") or "触发标程特殊分支或题面结构约束")[:200]
-        title = "标程特殊分支或题面退化"
-    return [{
+    hint = str(u.get("build_angle") or "根据标程分支与题面边界从零构造合法输入")
+    must = str(u.get("build_angle") or "触发标程特殊分支或题面结构约束")[:200]
+    scheme = {
         "id": "auto_special",
-        "title": title,
+        "title": "标程特殊分支或题面退化",
         "why": str(u.get("mode_reason") or "自动挖掘未返回有效方案时的兜底"),
         "must_hold": [must],
+        "property_checks": [must],
         "construct_hint": hint,
-        "construct_mode": mode,
+        "construct_mode": normalize_construct_mode(
+            u.get("preferred_mode"), CONSTRUCT_MODE_BUILD,
+        ),
         "source": "std_branch",
         "priority": 1,
         "selected": True,
         "samples_per_scheme": samples_per_scheme,
-    }]
+    }
+    mode, seal_reason = seal_construct_mode(scheme)
+    scheme["construct_mode"] = mode
+    scheme["mode_sealed_reason"] = seal_reason
+    return [scheme]
 
 
 def _context_block(
@@ -365,38 +414,32 @@ def understand_special_samples(
     problem_type: str = "",
     auto_discover: bool = False,
 ) -> dict:
-    """单独调用大模型：理解特殊样例意图，并推荐 preferred_mode。"""
-    hint = (user_hint or "").strip()
-    if hint == AUTO_DISCOVER_DESC_MARKER:
-        hint = ""
-    auto_mode = (not hint) and bool(auto_discover)
-    user = (
-        _context_block(
-            problem_statement, data_range_desc, std_code, problem_type, hint,
-            auto_mode=auto_mode,
-        )
-        + "\n请输出特殊样例理解 JSON（含 preferred_mode=mutate|build）。"
+    """兼容旧接口：内部走单次 discover，返回摘要字段。"""
+    schemes = discover_special_schemes(
+        problem_statement,
+        data_range_desc,
+        std_code=std_code,
+        user_hint=user_hint,
+        problem_type=problem_type,
+        auto_discover=auto_discover,
     )
-    try:
-        text = chat_text(UNDERSTAND_SYSTEM, user, temperature=0.2)
-        obj = _extract_json_obj(text)
-        if isinstance(obj, dict) and obj:
-            obj["preferred_mode"] = normalize_construct_mode(
-                obj.get("preferred_mode"),
-                infer_construct_mode(hint=hint, must_hold=[hint[:200]] if hint else None),
-            )
-            return obj
-    except Exception as e:
-        print(f"[special_discover] understand failed: {type(e).__name__}: {e}", flush=True)
-    mode = infer_construct_mode(hint=hint, must_hold=[hint[:200]] if hint else None)
+    if not schemes:
+        hint = (user_hint or "").strip()
+        mode = infer_construct_mode(hint=hint, must_hold=[hint[:200]] if hint else None)
+        return {
+            "summary": hint or "根据题面与标程挖掘特殊边界",
+            "preferred_mode": mode,
+            "mode_reason": "empty",
+            "schemes": [],
+        }
+    s0 = schemes[0]
     return {
-        "summary": hint or "根据题面与标程挖掘特殊边界",
-        "user_intent": hint or "自动挖掘",
-        "mutate_angle": "合法底稿上做局部替换以逼近特殊意图",
-        "build_angle": "从零构造以满足特殊结构/分支",
-        "preferred_mode": mode,
-        "mode_reason": "启发式兜底",
-        "std_branches": [],
+        "summary": str(s0.get("understanding_summary") or s0.get("why") or ""),
+        "preferred_mode": s0.get("construct_mode"),
+        "mode_reason": s0.get("mode_sealed_reason") or s0.get("mode_reason") or "",
+        "mutate_angle": s0.get("construct_hint") if s0.get("construct_mode") == CONSTRUCT_MODE_MUTATE else "",
+        "build_angle": s0.get("construct_hint") if s0.get("construct_mode") == CONSTRUCT_MODE_BUILD else "",
+        "schemes": schemes,
     }
 
 
@@ -410,13 +453,8 @@ def discover_special_schemes(
     max_schemes: int = MAX_CANDIDATE_SCHEMES,
     auto_discover: bool = False,
 ) -> list[dict]:
-    """单独调用大模型挖掘特殊样例方案：恰好返回 1 条，mode 由大模型选择。
-
-    步骤：
-    1) understand_special_samples（独立 LLM，含 preferred_mode）
-    2) 再独立 LLM 产出恰好 1 条 scheme（可覆盖 preferred_mode）
-    """
-    del max_schemes  # 固定为 1；保留参数兼容旧调用
+    """一次 LLM 挖掘特殊样例方案；mode 经 seal_construct_mode 盖章。"""
+    del max_schemes  # 保留参数兼容旧调用
     samples_per_scheme = clamp_samples_per_scheme(samples_per_scheme)
     hint = (user_hint or "").strip()
     if hint == AUTO_DISCOVER_DESC_MARKER:
@@ -425,62 +463,57 @@ def discover_special_schemes(
     if not hint and not auto_mode:
         return []
 
-    print(
-        f"[special_discover] separate LLM: understand "
-        f"(hint_len={len(hint)}, auto={auto_mode}, type={problem_type or '-'})",
-        flush=True,
-    )
-    understanding = understand_special_samples(
-        problem_statement,
-        data_range_desc,
-        std_code=std_code,
-        user_hint=hint,
-        problem_type=problem_type,
-        auto_discover=auto_discover,
-    )
-
-    def _fail_fallback() -> list[dict]:
+    def _fail_fallback(understanding: dict | None = None) -> list[dict]:
         if auto_mode:
             return _fallback_auto_scheme(samples_per_scheme, understanding)
         return fallback_user_scheme(hint, samples_per_scheme, understanding)
 
-    preferred = normalize_construct_mode(
-        understanding.get("preferred_mode"), CONSTRUCT_MODE_BUILD,
-    )
     ctx = _context_block(
         problem_statement, data_range_desc, std_code, problem_type, hint,
         auto_mode=auto_mode,
     )
     user = (
         f"{ctx}\n"
-        f"【特殊样例理解结果】\n"
-        f"```json\n{json.dumps(understanding, ensure_ascii=False, indent=2)}\n```\n\n"
-        f"请严格输出恰好 1 条 scheme。\n"
-        f"理解阶段建议 preferred_mode={preferred}（理由：{understanding.get('mode_reason') or '—'}）；\n"
-        f"你可以采纳或改选 mutate/build，但必须只选一种，并让 construct_hint 与之匹配。"
+        "请输出理解摘要 + 恰好 1 条 scheme 的 JSON（含 preferred_mode、property_checks）。\n"
+        "不确定 mode 时选 build；mutate 仅当能写清改 ≤2 个字段。"
     )
 
     print(
-        f"[special_discover] separate LLM: discover 1 scheme "
-        f"(preferred_mode={preferred})",
+        f"[special_discover] single LLM: discover "
+        f"(hint_len={len(hint)}, auto={auto_mode}, type={problem_type or '-'})",
         flush=True,
     )
+    understanding: dict = {}
     try:
         text = chat_text(DISCOVER_SYSTEM, user, temperature=0.3)
         obj = _extract_json_obj(text)
-        raw_list = obj.get("schemes") if isinstance(obj, dict) else None
-        # 兼容模型直接返回单对象
-        if not isinstance(raw_list, list) and isinstance(obj, dict) and obj.get("id"):
-            raw_list = [obj]
-        if not isinstance(raw_list, list) or not raw_list:
+        if not isinstance(obj, dict) or not obj:
             print("[special_discover] discover empty → fallback one", flush=True)
             return _fail_fallback()
+        understanding = {
+            "summary": str(obj.get("summary") or "").strip(),
+            "preferred_mode": normalize_construct_mode(
+                obj.get("preferred_mode"), CONSTRUCT_MODE_BUILD,
+            ),
+            "mode_reason": str(obj.get("mode_reason") or "").strip(),
+            "mutate_angle": str(obj.get("mutate_angle") or "").strip(),
+            "build_angle": str(obj.get("build_angle") or "").strip(),
+        }
+        raw_list = obj.get("schemes")
+        if not isinstance(raw_list, list) and obj.get("id"):
+            raw_list = [obj]
+        if not isinstance(raw_list, list) or not raw_list:
+            print("[special_discover] schemes empty → fallback one", flush=True)
+            return _fail_fallback(understanding)
     except Exception as e:
         print(f"[special_discover] discover failed: {type(e).__name__}: {e}", flush=True)
         return _fail_fallback()
 
     normalized: list[dict] = []
     for i, raw in enumerate(raw_list[:MAX_CANDIDATE_SCHEMES]):
+        if isinstance(raw, dict) and not raw.get("construct_mode"):
+            raw = dict(raw)
+            raw["construct_mode"] = understanding.get("preferred_mode")
         s = _normalize_scheme(raw, i)
         if not s:
             continue
@@ -492,9 +525,8 @@ def discover_special_schemes(
             break
 
     if not normalized:
-        return _fail_fallback()
+        return _fail_fallback(understanding)
 
-    # LLM 可能已输出多条；取选中方案即可（不再做题特化硬 AND 拆分）
     split = _pick_one_scheme(
         normalized,
         samples_per_scheme=samples_per_scheme,
@@ -508,45 +540,38 @@ def discover_special_schemes(
         s["priority"] = i + 1
         s["selected"] = True
         s["samples_per_scheme"] = samples_per_scheme
-        s["construct_mode"] = normalize_construct_mode(
-            s.get("construct_mode"),
-            infer_construct_mode(
-                title=str(s.get("title") or ""),
-                why=str(s.get("why") or ""),
-                hint=str(s.get("construct_hint") or ""),
-                must_hold=list(s.get("must_hold") or []),
-            ),
-        )
+        mode, seal_reason = seal_construct_mode(s, honor_force=True)
+        s["construct_mode"] = mode
+        s["mode_sealed_reason"] = seal_reason
         if summary:
             s.setdefault("understanding_summary", summary)
         if mode_reason:
             s.setdefault("mode_reason", mode_reason)
 
-    ids = ", ".join(f"{s.get('id')}={s.get('construct_mode')}" for s in split)
-    print(
-        f"[special_discover] scheme(s) ready: {ids}",
-        flush=True,
+    ids = ", ".join(
+        f"{s.get('id')}={s.get('construct_mode')}({s.get('mode_sealed_reason')})"
+        for s in split
     )
+    print(f"[special_discover] scheme(s) ready: {ids}", flush=True)
     return split
 
 
 def selected_schemes(schemes: list[dict] | None) -> list[dict]:
-    """返回 selected 的方案（保持顺序）。"""
+    """返回 selected 的方案（保持顺序）；mode 经规则盖章。"""
     out = []
     for s in schemes or []:
         if not isinstance(s, dict):
             continue
         if s.get("selected", True) is False:
             continue
-        if "construct_mode" not in s:
-            s["construct_mode"] = infer_construct_mode(
-                title=str(s.get("title") or ""),
-                why=str(s.get("why") or ""),
-                hint=str(s.get("construct_hint") or ""),
-                must_hold=list(s.get("must_hold") or []),
-            )
-        else:
-            s["construct_mode"] = normalize_construct_mode(s.get("construct_mode"))
+        mh = list(s.get("must_hold") or [])
+        if len(mh) > MUST_HOLD_CAP:
+            s["must_hold"] = mh[:MUST_HOLD_CAP]
+        if not s.get("property_checks"):
+            s["property_checks"] = list(s.get("must_hold") or [])
+        mode, reason = seal_construct_mode(s, honor_force=True)
+        s["construct_mode"] = mode
+        s["mode_sealed_reason"] = reason
         out.append(s)
     return out
 
@@ -576,12 +601,14 @@ def apply_schemes_to_range(
 ) -> dict:
     """把方案写入 range.json，并修正 count / special_samples_count。"""
     data = dict(range_json or {})
-    old_total = int(data.get("count") or 15)
+    old_total = int(data.get("count") or DEFAULT_REGULAR_COUNT)
     old_special = int(data.get("special_samples_count") or 0)
     if regular_count is None:
-        regular_count = max(1, old_total - old_special) if old_special else old_total
-        if regular_count <= 0:
-            regular_count = 15
+        if old_special > 0 and old_total > old_special:
+            regular_count = old_total - old_special
+        else:
+            regular_count = old_total
+    regular_count = _clamp_regular_count(regular_count)
 
     for s in schemes:
         if "selected" not in s:
@@ -589,15 +616,14 @@ def apply_schemes_to_range(
         s["samples_per_scheme"] = clamp_samples_per_scheme(
             s.get("samples_per_scheme"), SAMPLES_PER_SCHEME_DEFAULT,
         )
-        s["construct_mode"] = normalize_construct_mode(
-            s.get("construct_mode"),
-            infer_construct_mode(
-                title=str(s.get("title") or ""),
-                why=str(s.get("why") or ""),
-                hint=str(s.get("construct_hint") or ""),
-                must_hold=list(s.get("must_hold") or []),
-            ),
-        )
+        mh = list(s.get("must_hold") or [])
+        if len(mh) > MUST_HOLD_CAP:
+            s["must_hold"] = mh[:MUST_HOLD_CAP]
+        if not s.get("property_checks"):
+            s["property_checks"] = list(s.get("must_hold") or [])
+        mode, reason = seal_construct_mode(s, honor_force=True)
+        s["construct_mode"] = mode
+        s["mode_sealed_reason"] = reason
 
     special_count = compute_special_count(schemes)
     data["special_schemes"] = schemes

@@ -588,13 +588,14 @@ def _clean_special_artifacts_for_partial_resume(
                     f.unlink()
                 except OSError:
                     pass
-    # 清理 finder 留痕，让 Coder 重新探索
-    fdir = job_dir / "special_findings"
-    if fdir.is_dir():
-        try:
-            shutil.rmtree(fdir)
-        except OSError:
-            pass
+    # 清理 special 决策记忆，让 Coder 重新探索
+    for dname in ("special_findings", "special_meta"):
+        fdir = job_dir / dname
+        if fdir.is_dir():
+            try:
+                shutil.rmtree(fdir)
+            except OSError:
+                pass
 
 
 def find_matching_done_job(

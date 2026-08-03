@@ -67,7 +67,7 @@ def _run_job_impl(
         if name == "run_gen":
             brief = {"seed": args.get("seed"), "type": args.get("type")}
         elif name in ("write_gen", "write_validate", "write_range", "write_checker",
-                       "write_special_gen", "write_finder"):
+                       "write_special_gen", "write_special_check"):
             content = (
                 args.get("content") or args.get("code") or args.get("source") or ""
             )
@@ -163,16 +163,18 @@ def _run_job_impl(
         job_store.add_progress(job, f"校验 sandbox 头文件失败: {e}")
 
     # 2) 准备 Prompts 并启动 Agent
-    # 有 range_json 时用其 problem_type / 用户指定；无方案（将走 Range Agent）则留空，
-    # 由 Range 阶段 LLM 自动判型（不再信任 GUI 历史下拉）。
+    # 每次开始生成都会跑 Range Agent（有方案则审核复用/重写，无则新建）；
+    # 题型以 Range 审核后的 range.json.problem_type 为准。
     range_plain = to_plain_for_llm(data_range_desc or "")
     has_preset_range = isinstance(range_json, dict) and bool(range_json.get("constraints"))
     if has_preset_range:
         eff_type = normalize_problem_type(problem_type) or normalize_problem_type(
             str(range_json.get("problem_type") or "")
         )
-        type_note = "用户指定" if normalize_problem_type(problem_type) else (
-            "来自 range.json" if eff_type else "待关键词补判"
+        type_note = "候选(待 Range 审核)" + (
+            "/用户指定" if normalize_problem_type(problem_type) else (
+                "/来自 range.json" if eff_type else ""
+            )
         )
     else:
         eff_type = ""
@@ -207,6 +209,9 @@ def _run_job_impl(
         special_samples_desc=special_samples_desc,
         special_samples_count=special_samples_count,
         auto_discover_special=auto_discover_special,
+        output_plain=output_plain,
+        std_for_prompt=std_for_prompt,
+        lang=lang,
     )
     scaffold.ensure_agent_log(job, job_dir)
 
@@ -219,12 +224,11 @@ def _run_job_impl(
         produced = json.loads(range_file.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
         raise RuntimeError(f"Agent 产出的 range.json 不是合法 JSON: {e}")
+    # 以 Range Agent 审核后的磁盘文件为准，不再用 GUI preset 覆盖
     if preset is not None:
-        produced = dict(preset)
-        # 保留流水线判定的题型（GUI 方案可能未带 problem_type）
-        if eff_type and not produced.get("problem_type"):
-            produced["problem_type"] = eff_type
-        range_file.write_text(json.dumps(produced, ensure_ascii=False, indent=2), encoding="utf-8")
+        job_store.add_progress(
+            job, "提示: 曾有 GUI range 候选，最终以 Range Agent 审核后的磁盘 range.json 为准",
+        )
     if eff_type:
         produced["problem_type"] = produced.get("problem_type") or eff_type
     produced["std_cmd"] = std_cmd

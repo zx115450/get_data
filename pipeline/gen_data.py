@@ -13,7 +13,7 @@ from pathlib import Path
 import sys
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from sandbox.run import EXIT_MEMORY, parse_memory_limit_mb, safe_run
+from sandbox.run import EXIT_MEMORY, is_stack_overflow, parse_memory_limit_mb, safe_run
 
 
 def _exe(base: str) -> str:
@@ -72,6 +72,8 @@ def validate_range_json(rj) -> list:
     count = rj.get("count")
     if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
         errs.append(f"count 必须是正整数，当前为 {count!r}")
+    elif count < MIN_REGULAR_COUNT:
+        errs.append(f"count 不得小于 {MIN_REGULAR_COUNT}，当前为 {count}")
 
     cons = rj.get("constraints")
     if not isinstance(cons, dict) or not cons:
@@ -110,9 +112,10 @@ def validate_range_json(rj) -> list:
         if isinstance(ssc, bool) or not isinstance(ssc, int) or ssc <= 0:
             errs.append(f"special_samples_count 必须是正整数，当前为 {ssc!r}")
     if (ssd or "").strip() and isinstance(ssc, int) and ssc > 0:
-        if not isinstance(count, int) or isinstance(count, bool) or count < ssc + 1:
+        need = ssc + MIN_REGULAR_COUNT
+        if not isinstance(count, int) or isinstance(count, bool) or count < need:
             errs.append(
-                f"启用特殊样例时 count 必须 >= special_samples_count + 1，"
+                f"启用特殊样例时 count 必须 >= special_samples_count + {MIN_REGULAR_COUNT}（常规下限），"
                 f"当前 count={count} special_samples_count={ssc}"
             )
 
@@ -152,10 +155,58 @@ def _constraints_have_multi_t(constraints) -> bool:
 # 未写时限/内存时的默认（与 GUI / Range 提示一致）
 DEFAULT_TIME_LIMIT_MS = 5000
 DEFAULT_MEMORY_LIMIT_MB = 1024
+# 常规样例数：由 Range/Agent 自定，不得低于此下限；缺省/非法时回落为此值
+MIN_REGULAR_COUNT = 15
+DEFAULT_REGULAR_COUNT = MIN_REGULAR_COUNT
+
+
+def _clamp_regular_count(value) -> int:
+    """把 count 规范为正整数且 >= MIN_REGULAR_COUNT。"""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_REGULAR_COUNT
+    if isinstance(value, bool) or n <= 0:
+        return DEFAULT_REGULAR_COUNT
+    return max(MIN_REGULAR_COUNT, n)
+
+
+def infer_regular_count(rj: dict | None) -> int:
+    """从 range.json 推断【常规】样例数（总 count 减去已计入的特殊组）。
+
+    Range Agent 写出的 count 是常规数；叠加特殊方案后 count 变为总数。
+    复用/再挖特殊方案前必须先剥掉特殊组，避免把总数再当常规数叠加一次。
+    """
+    if not isinstance(rj, dict):
+        return DEFAULT_REGULAR_COUNT
+    total = _clamp_regular_count(rj.get("count"))
+    special = 0
+    schemes = rj.get("special_schemes")
+    if isinstance(schemes, list) and schemes:
+        for s in schemes:
+            if not isinstance(s, dict):
+                continue
+            if s.get("selected") is False:
+                continue
+            try:
+                n = int(s.get("samples_per_scheme") or 1)
+            except (TypeError, ValueError):
+                n = 1
+            special += max(1, n)
+    else:
+        try:
+            special = int(rj.get("special_samples_count") or 0)
+        except (TypeError, ValueError):
+            special = 0
+        if isinstance(rj.get("special_samples_count"), bool):
+            special = 0
+    if special > 0 and total > special:
+        return _clamp_regular_count(total - special)
+    return total
 
 
 def normalize_range_json(rj: dict) -> dict:
-    """清洗 range.json：去掉 edge_cases 里的 'random'（系统会自动补），去重保序；count 缺省补 15。
+    """清洗 range.json：去掉 edge_cases 里的 'random'（系统会自动补），去重保序；count 缺省补下限。
 
     若启用特殊样例（special_samples_desc 非空），确保 count 至少为 special_samples_count + 1。
     无多测 T 时剔除 edge_T1 / edge_Tmax 等仅多测边界。
@@ -164,7 +215,9 @@ def normalize_range_json(rj: dict) -> dict:
     if not isinstance(rj, dict):
         return rj
     if "count" not in rj or rj.get("count") in (None, 0):
-        rj["count"] = 15
+        rj["count"] = DEFAULT_REGULAR_COUNT
+    else:
+        rj["count"] = _clamp_regular_count(rj.get("count"))
     ec = rj.get("edge_cases")
     if isinstance(ec, list):
         seen = set()
@@ -208,21 +261,21 @@ def normalize_range_json(rj: dict) -> dict:
         sched = _selected_scheme_schedule(rj)
         ssc = sum(n for _, n in sched)
         rj["special_samples_count"] = ssc
-        # 尽量保留常规数：若原 count 偏小则抬到 常规15 + 特殊
-        regular = max(1, int(rj.get("count") or 15) - int(ssc or 0))
+        # 尽量保留常规数：从当前 count 反推常规，再抬到下限
+        regular = max(MIN_REGULAR_COUNT, int(rj.get("count") or DEFAULT_REGULAR_COUNT) - int(ssc or 0))
         if regular + ssc != rj.get("count"):
-            # 仅当 special 变化导致不一致时，以「至少常规1」校正
-            if int(rj.get("count") or 0) < ssc + 1:
-                rj["count"] = 15 + ssc
+            # 仅当 special 变化导致不一致时校正
+            if int(rj.get("count") or 0) < ssc + MIN_REGULAR_COUNT:
+                rj["count"] = regular + ssc
     else:
         ssd = rj.get("special_samples_desc")
         ssc = rj.get("special_samples_count")
         if (ssd or "").strip():
             if not isinstance(ssc, int) or isinstance(ssc, bool) or ssc <= 0:
                 rj["special_samples_count"] = 1
-                ssc = 5
-            if rj["count"] < ssc + 1:
-                rj["count"] = ssc + 15  # 常规 15 + 特殊样例
+                ssc = 1
+            if rj["count"] < ssc + MIN_REGULAR_COUNT:
+                rj["count"] = ssc + max(MIN_REGULAR_COUNT, int(rj.get("count") or MIN_REGULAR_COUNT))
     return rj
 
 
@@ -400,6 +453,11 @@ def generate(range_json: dict, work_dir: str, out_dir: str, verbose: bool = True
                 if rc != 0:
                     if rc == EXIT_MEMORY:
                         last_error = f"validate MEMORY_LIMIT ({mem_mb} MB) type={try_typ}"
+                    elif is_stack_overflow(rc):
+                        last_error = (
+                            f"validate STACK_OVERFLOW type={try_typ}: "
+                            "递归过深；请用并查集/BFS 重写 validator 或加大栈后重编"
+                        )
                     else:
                         last_error = f"validate FAILED type={try_typ}: {err.strip()}"
                     if not input_preview:
@@ -407,6 +465,35 @@ def generate(range_json: dict, work_dir: str, out_dir: str, verbose: bool = True
                     if verbose:
                         print(f"[{i+1}/{count}] attempt {attempt+1}/{max_retries+1} {last_error}")
                     continue
+
+                # 特殊样例：若有 check_special 则验 must_hold
+                check_exe = work / _exe("check_special")
+                if _is_special_type(try_typ) and check_exe.is_file():
+                    rc, _, err = safe_run(
+                        _exe("check_special"),
+                        stdin=inp,
+                        timeout=other_timeout_s,
+                        cwd=str(work),
+                        memory_limit_mb=mem_mb,
+                    )
+                    if rc != 0:
+                        if rc == EXIT_MEMORY:
+                            last_error = (
+                                f"property_check MEMORY_LIMIT ({mem_mb} MB) type={try_typ}"
+                            )
+                        else:
+                            last_error = (
+                                f"property_check FAILED type={try_typ}: "
+                                f"{(err or '').strip()[:300]}"
+                            )
+                        if not input_preview:
+                            input_preview = inp[:800]
+                        if verbose:
+                            print(
+                                f"[{i+1}/{count}] attempt {attempt+1}/{max_retries+1} "
+                                f"{last_error}"
+                            )
+                        continue
 
                 rc, ans, err = safe_run(
                     std_cmd,

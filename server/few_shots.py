@@ -1,13 +1,17 @@
 """按题型的 few-shot 样板库。
 
-每个样板是一段「题面 + range.json + gen.py + validate.py」的完整范例，
-runner 会按 problem_type 选中并拼到给 Agent 的 task 里，让模型照着模仿。
+每个样板是一段「题面 + range.json + gen + validator」的完整范例。
+默认以「压缩结构要点」形式喂给 Planner：只借通用骨架
+（registerGen / opt / type 分支 / index 分层 / readEoln·readEof / ensuref / generator.h API），
+禁止借范例输入字段形状；输入格式以本题标程为准。
+Coder 不直接吃完整 few-shot，按 gen_plan.md + API 硬约束实现。
 
 样板要求：正确、能跑、校验严格，且与目标题「同构但不同」。
 
 detect_problem_type(): 关键词兜底（range.json 未写/写错 problem_type 时使用）。
 resolve_problem_type_from_range(): 从 range.json 取题型，无效则关键词兜底。
-get_few_shot(): 统一入口，按显式指定或已解析题型返回样板字符串（可能为空）。
+get_few_shot(): 统一入口，按显式指定或已解析题型返回完整样板字符串（可能为空）。
+get_few_shot_rag(..., compact=True): Planner 用压缩要点；compact=False 返回完整源码。
 题型判定融入 Range Agent 写 range.json（字段 problem_type），不再单独调大模型判型。
 """
 
@@ -33,7 +37,12 @@ from server.few_shots_cpp import (
 )
 
 # 阶段一 RAG 召回入口（可选，失败时自动回退到关键词模板）
-from server.few_shots_rag import retrieve_few_shots, format_rag_few_shots
+from server.few_shots_rag import (
+    retrieve_few_shots,
+    format_rag_few_shots,
+    format_rag_few_shots_compact,
+    compress_few_shot_content,
+)
 
 
 # ---- 题型关键词（用于自动判型）----
@@ -247,7 +256,7 @@ ARRAY_EXAMPLE = """【参考范例：一道数组题的标准写法】
 题面：给定 n 和 n 个整数 a1..an，输出它们的和。
 输入格式：第 1 行 n；第 2 行 n 个整数空格分隔。
 输出格式：一个整数。
-数据范围：n∈[1,1e5]，ai∈[-1e9,1e9]，20 组，覆盖 n=1、n=max、全相等、降序。
+数据范围：n∈[1,1e5]，ai∈[-1e9,1e9]；本范例 count=20（实际由覆盖需求自定，≥15），覆盖 n=1、n=max、全相等、降序。
 
 range.json:
 {
@@ -318,7 +327,7 @@ TREE_EXAMPLE = """【参考范例：一道树题的标准写法】
 题面：给定一棵 n 个节点的无权无根树，求树的直径（最长简单路径的边数）。
 输入格式：第 1 行 n；接下来 n-1 行每行两个整数 u v 表示一条边（节点编号 1..n）。
 输出格式：一个整数。
-数据范围：n∈[2,1e5]，20 组，覆盖链、菊花、随机树、平衡二叉树、n=2。
+数据范围：n∈[2,1e5]；本范例 count=20（实际由覆盖需求自定，≥15），覆盖链、菊花、随机树、平衡二叉树、n=2。
 
 range.json:
 {
@@ -418,7 +427,7 @@ GRAPH_EXAMPLE = """【参考范例：一道图题的标准写法】
 题面：给定 n 个点 m 条边的无向图（无自环无重边），判断是否连通。
 输入格式：第 1 行 n m；接下来 m 行每行 u v。
 输出格式：YES 或 NO。
-数据范围：n∈[1,1000]，m∈[0,n*(n-1)/2]，15 组，覆盖连通树、不连通、完全图、链、菊花、随机稀疏。
+数据范围：n∈[1,1000]，m∈[0,n*(n-1)/2]；本范例 count=15（实际由覆盖需求自定，≥15），覆盖连通树、不连通、完全图、链、菊花、随机稀疏。
 
 range.json:
 {
@@ -507,7 +516,7 @@ STRING_EXAMPLE = """【参考范例：一道字符串题的标准写法】
 题面：给定长度为 n 的小写字母字符串 s 和模式串 p，输出 p 在 s 中作为子串出现的次数。
 输入格式：第 1 行 n；第 2 行 s；第 3 行 p。
 输出格式：一个整数。
-数据范围：n∈[1,1000]，p 长度∈[1,n]，15 组，覆盖全相同、模式在首/尾、无匹配、长连续段。
+数据范围：n∈[1,1000]，p 长度∈[1,n]；本范例 count=15（实际由覆盖需求自定，≥15），覆盖全相同、模式在首/尾、无匹配、长连续段。
 
 range.json:
 {
@@ -585,7 +594,7 @@ NUMBER_THEORY_EXAMPLE = """【参考范例：一道数论题的标准写法】
 题面：给定 n 个正整数，输出它们的最大公约数。
 输入格式：第 1 行 n；第 2 行 n 个正整数空格分隔。
 输出格式：一个整数。
-数据范围：n∈[1,1e5]，ai∈[1,1e9]，15 组，覆盖 n=1、全相等、全素数、含两两互素、全偶。
+数据范围：n∈[1,1e5]，ai∈[1,1e9]；本范例 count=15（实际由覆盖需求自定，≥15），覆盖 n=1、全相等、全素数、含两两互素、全偶。
 
 range.json:
 {
@@ -666,6 +675,38 @@ if __name__ == "__main__":
 """
 
 
+def _maybe_compact(block: str, compact: bool) -> str:
+    if not block or not compact:
+        return block
+    # 关键词回退是完整单模板；压成结构要点并加标题
+    body = compress_few_shot_content(block)
+    if not body:
+        return ""
+    return f"【结构要点：题型模板】\n{body}"
+
+
+def _ensure_multi_test_template(block: str, compact: bool) -> str:
+    """题型为 multi_test 时，保证压缩/完整块中含官方多测三桶模板。"""
+    pinned = FEW_SHOTS.get("multi_test") or ""
+    if not pinned:
+        return block
+    pin_body = _maybe_compact(pinned, compact) if compact else pinned
+    if not pin_body:
+        return block
+    # 已含三桶信号则不重复贴
+    if block and (
+        "三桶" in block
+        or ("攻T" in block and "攻n" in block)
+        or ("攻 T" in block and "攻 n" in block)
+        or ("bucket" in block and "force_small_n" in block)
+    ):
+        return block
+    header = "【结构要点：题型模板 multi_test（强制注入）】\n" if compact else ""
+    if not block:
+        return pin_body if compact else pinned
+    return f"{block}\n\n{header}{pin_body}" if compact else f"{block}\n\n{pinned}"
+
+
 def get_few_shot_rag(
     problem_type: str = "",
     problem_statement: str = "",
@@ -673,21 +714,36 @@ def get_few_shot_rag(
     std_code: str = "",
     top_k: int = 2,
     use_fallback: bool = True,
+    compact: bool = False,
 ) -> tuple[str, str]:
     """RAG 召回 few-shot 模板，并返回 (模板字符串, 召回信息摘要)。
+
+    compact=True：只返回通用骨架要点（registerGen/opt/分支/readEoln 等，给 Planner）；
+                  不含范例输入字段形状。
+    compact=False：返回完整范例源码（兼容旧用途 / 调试）。
 
     未配置 EMBEDDING_API_KEY 时：直接用关键词/题型模板，不发起 embedding 调用。
 
     若 RAG 调用失败或返回空：
       - use_fallback=True 时，回退到原有关键词模板匹配
       - use_fallback=False 时，返回空字符串
+
+    题型为 multi_test 时：始终保证官方多测三桶模板在结果中（RAG 未召回同类时强制追加）。
     """
     from agent.llm import embedding_configured
 
+    typ = detected_type(problem_type, problem_statement, data_range_desc, std_code)
+    want_multi = typ == "multi_test"
+
     if not embedding_configured():
         fallback = get_few_shot(problem_type, problem_statement, data_range_desc, std_code)
-        typ = detected_type(problem_type, problem_statement, data_range_desc, std_code)
-        return fallback, f"未配置 Embedding，使用题型模板: {typ}"
+        # 显式/检测为 multi_test 但 keyword 未命中时，仍强制用官方模板
+        if want_multi and not fallback:
+            fallback = FEW_SHOTS.get("multi_test", "")
+        block = _maybe_compact(fallback, compact)
+        if want_multi:
+            block = _ensure_multi_test_template(block, compact)
+        return block, f"未配置 Embedding，使用题型模板: {typ or 'multi_test'}"
 
     try:
         examples = retrieve_few_shots(problem_statement, data_range_desc, std_code, top_k=top_k)
@@ -695,16 +751,38 @@ def get_few_shot_rag(
         if not use_fallback:
             return "", f"RAG 召回失败: {e}"
         fallback = get_few_shot(problem_type, problem_statement, data_range_desc, std_code)
-        return fallback, f"RAG 失败，已回退 keyword 模板: {type(e).__name__}: {e}"
+        if want_multi and not fallback:
+            fallback = FEW_SHOTS.get("multi_test", "")
+        block = _maybe_compact(fallback, compact)
+        if want_multi:
+            block = _ensure_multi_test_template(block, compact)
+        return (
+            block,
+            f"RAG 失败，已回退 keyword 模板: {type(e).__name__}: {e}",
+        )
 
     if not examples:
         if not use_fallback:
             return "", "RAG 未召回任何模板"
         fallback = get_few_shot(problem_type, problem_statement, data_range_desc, std_code)
-        return fallback, "RAG 未召回模板，已回退 keyword 匹配"
+        if want_multi and not fallback:
+            fallback = FEW_SHOTS.get("multi_test", "")
+        block = _maybe_compact(fallback, compact)
+        if want_multi:
+            block = _ensure_multi_test_template(block, compact)
+        return block, "RAG 未召回模板，已回退 keyword 匹配"
 
-    rag_block = format_rag_few_shots(examples)
+    rag_block = (
+        format_rag_few_shots_compact(examples)
+        if compact
+        else format_rag_few_shots(examples)
+    )
     summary = f"RAG 召回 {len(examples)} 个模板: " + ", ".join(
         f"{ex['key']}({ex['score']})" for ex in examples
     )
+    if want_multi:
+        before = rag_block or ""
+        rag_block = _ensure_multi_test_template(rag_block, compact)
+        if (rag_block or "") != before and "强制注入" in (rag_block or ""):
+            summary += " + 强制注入 multi_test 三桶模板"
     return rag_block, summary

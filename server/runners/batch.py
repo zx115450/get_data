@@ -162,7 +162,12 @@ def run_batch_and_pack(
 
     if special_judge:
         checker_zip_path = job_dir / "checker.zip"
-        if (job_dir / "checker.cpp").is_file() or (job_dir / ("checker.exe" if os_name_nt() else "checker")).is_file():
+        verified = (job_dir / "checker_verified.ok").is_file()
+        has_checker_file = (
+            (job_dir / "checker.cpp").is_file()
+            or (job_dir / ("checker.exe" if os_name_nt() else "checker")).is_file()
+        )
+        if verified and has_checker_file:
             pack_checker(str(job_dir), str(checker_zip_path))
             job.checker_zip_path = str(checker_zip_path)
             if checker_zip_path.is_file():
@@ -171,6 +176,12 @@ def run_batch_and_pack(
                 job,
                 f"checker.zip 完成: {checker_zip_path}"
                 + (f"（{job_store.format_bytes(sizes.get('checker_zip'))}）" if sizes.get("checker_zip") else ""),
+            )
+        else:
+            job_store.add_progress(
+                job,
+                "跳过 checker.zip：checker 自检未通过或缺少 checker_verified.ok"
+                + ("（目录内仍有 checker 源码供排查）" if has_checker_file else ""),
             )
 
     with job.lock:
