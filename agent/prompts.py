@@ -142,6 +142,10 @@ SCALE = """【规模 / 数值分布 — 硬约束 · 很重要】
 
 【小/中/大】相对该轴 [L,R]（勿抄范例常数）：
   小 ≈ 靠近 L 或很小的绝对档；中 ≈ 中间；大 ≈ 靠近 R（或打满上界）。
+  **数值轴（C 轴）必须在 gen_plan 第 4 节写出每档的具体区间边界**，三档区间必须有间隔、不重叠。
+  例：a,b ∈ [1, 1e9] → 小档 [1, 100] / 中档 [3e8, 5e8] / 大档 [9e8, 1e9]
+  例：w ∈ [1, 1e5]  → 小档 [1, 100] / 中档 [5000, 50000] / 大档 [90000, 100000]
+  中档和大档的下限不能是 1（否则与小区间重叠，失去分层意义）；各档区间必须互不重叠。
   有 sum_* 时：A「大」= 组数靠近上界且每组规模很小、∑ 可压满；
   B「大」= 组数很小且单组规模靠近 min(上界, sum 剩余)；禁止组数与每组规模同时顶格（必爆 sum）。
 
@@ -149,7 +153,7 @@ SCALE = """【规模 / 数值分布 — 硬约束 · 很重要】
   int i = opt<int>("index",0), C = max(1, opt<int>("count",30));
   int bA = i % 3, bB = (i / 3) % 3, bC = (i / 9) % 3;  // 0小 1中 2大
   // 缺某轴则不要取模该维；二维则 b0=i%3, b1=(i/3)%3
-套件内每个组合至少出现一次（count 建议 ≥ 3^k，三维时 ≥27；不得小于 15）；
+套件内每个组合至少出现一次（count 建议：三维≥30、二维≥20、一维≥15；不得小于 15）；
 禁止只用一维对 n 插值、禁止数值轴全程 rnd(L,R) 打满、禁止多测 random 恒组数=1。
 
   - edge_cases 仍要有明确极值边界（如规模最小/最大、组数最大）；不要写无额外测点的 edge_T1。
@@ -178,7 +182,7 @@ gen 单次执行必须在 5 秒内输出完毕（含 n、m 取到上界 2e5/4e5 
       * 用 unordered_set<long long> 记录已选，循环随机采样 + 去重，直到选够 K 个；
       * 编码：key = (long long)a * N + b（a<b）；查询/插入均摊 O(1)；
       * 当 K 接近 N 时才退化，但题目里 K 一般远小于 N（如 m << n*(n-1)/2）。
-  - 需要「随机生成一条链/树/图」时：优先用 generator.h 的 Tree/Chain/Flower/Graph 等 API（O(n) 或 O(n+m)）。
+  - 需要「随机生成一条链/树/图」时：优先用 generator.h 的 Tree/Chain/Flower/Graph/DAG/BipartiteGraph 等 API（O(n) 或 O(n+m)）。
   - 输出大文件时用 printf / 快速 cout（已开 ios::sync_with_stdio(false)），不要用 endl 刷缓冲。
   - 内存：不要申请超过 ~几百 MB 的 vector；n=2e5 时 O(n) 或 O(n+m) 安全，O(n^2) 一定不安全。
   - 自检时如果某 edge_type 第一次 run_gen 就 TIMEOUT，立刻 read_file("gen.cpp") 找到对应分支，用随机采样或 generator API 替换枚举，重新 write_gen，再继续自检。不要靠重试碰运气。
@@ -208,31 +212,81 @@ BASE_GEN_RULES = """gen.cpp 必须满足（testlib / ACM-generator 写法）：
     必须遵守 gen_plan「有效状态预算」。边界语义用最小充分结构表达，再用池内边/自环/重复边等把规模凑满；
     禁止默认「一边一个新状态」把状态数拉到与输出规模同阶（易致 std TIMEOUT）。
 
-ACM-generator（generator.h）硬性契约（using namespace generator::all）——写错会直接编不过：
-  【正确 · 默认输出格式就是「n + 边列表」时】
-      unweight::Tree t(n);   // 或 Chain / Flower / FlowerChain
-      t.gen();               // 必须先 gen()
-      cout << t << "\\n";    // 推荐：直接输出
-  【正确 · 需要自定义输出顺序（先打印别的字段再打印边）时】
-      unweight::Tree t(n);
-      t.gen();
-      for (auto &e : t.edges()) { int u = e.u(), v = e.v(); /* 自行 printf */ }
-  【错误 · 以下写法不存在或不可用，写错会编译失败】
-      t.get_edges();   // 没有此方法（正确是 edges()）
-      t.shuffle();     // Tree/Chain/Flower 没有 shuffle
-      直接读 _edges    // 受保护成员 受保护成员
-  - 图同理：unweight::Graph g(n,m); g.gen(); cout << g; 或 for (auto &e : g.edges()) ...
-  - 几何：ConvexHull<int> / SimplePolygon<int> / RandomPoints<int>，先 set_xy_limit 再 gen()，cout << obj
-  - 单边权：edge_weight::Tree<int> / Chain / Flower；
-        t.set_edges_weight_function([](){ return rnd.next(1, 1000000000); }); t.gen(); cout << t;
-  - 多字段边（如 u v a b）：禁止 cout << t / edge_weight；
-        unweight::Tree t(n); t.gen();
-        for (auto &e : t.edges()) { /* 打印 u v 及全部边字段 */ }
-  - 【严禁】weight::（不存在）；【严禁】set_weight_limit（不存在，用 set_edges_weight_function）
-  - 【严禁】rnd.next(1, 1e9) / rnd.next(-1e9, 1e9)：1e9 是 double，会 call of overloaded ambiguous；
-        必须写 1000000000 或 1000000000LL
-  - 数组/排列/字符串：用 testlib 的 rnd.next / rnd.perm / rnd.next(\"[a-z]{n}\")；
-    【严禁】虚构的 Sequence / Permutation / String 类（generator.h 无此类，写了会编译失败）。
+ACM-generator（generator.h）方法用法（对照官方手册 chutian-scpc.github.io/generator-docs）——
+本项目只用「结构/数组生成 API」，不用 fill_inputs / hack / compare / init_gen；
+入口仍是 registerGen + --seed/--type/--index/--count；using namespace generator::all。
+
+【通用流程】
+  1) 构造：Xxx obj(args…); 或先默认构造再 set_node_count / set_edge_count
+  2) 配置：set_*(…) / use_*(…)；有权须 set_nodes_weight_function / set_edges_weight_function
+  3) 生成：obj.gen();   // 未 gen 前不要读 edges()/points()
+  4) 输出：cout << obj; 或 for (auto &e : obj.edges()) … / 读 points()
+【setter / getter 约定】成员名在文档里写作 node_count，代码里：
+  node_count() 取值；set_node_count(n) 设值；node_count_ref() 拿内部引用（勿滥用）。
+  edges() / nodes_weight() 只能获取、不能 set；edges() 已换成真实结点编号。
+【四种权重命名空间】（类名前缀，构造与 set_* 用法一致）：
+  unweight::X
+  node_weight::X<NodeT>          // 须 set_nodes_weight_function([](){ return …; })
+  edge_weight::X<EdgeT>          // 须 set_edges_weight_function([](){ return …; })
+  both_weight::X<NodeT,EdgeT>    // 两个 function 都要设
+【边 / 点权访问】
+  for (auto &e : t.edges()) { int u = e.u(), v = e.v(); /* 有边权：e.w() */ }
+  无边权边默认打印 "u v"；有边权默认 "u v w"。点权默认打印 w。
+【树 · 构造与方法】
+  Tree(n, begin=1, is_rooted=false, root=1, generator=RandomFather)
+  Chain / Flower(n, begin=1, is_rooted=false, root=1)
+  FlowerChain(n, …, flower_size=-1)；可 set_flower_size / set_flower_chain_size(fs, cs)
+  HeightTree(n, begin=1, root=1, height=-1)；强制有根；set_height(h)；禁用 set_is_rooted
+  MaxDegreeTree(…, max_degree=-1)；set_max_degree(d)
+  MaxSonTree / DegreeTree / SonTree：按题面限儿子数或指定度数序列
+  算法切换（仅 Tree）：use_random_father()（期望高 O(log n)）/ use_pruefer()（期望高 O(√n)）
+    或 set_tree_generator(RandomFather|Pruefer)
+  常用 set：set_node_count / set_begin_node / set_is_rooted / set_root（传入「第几个点」1..n）
+    set_output_node_count(false) / set_output_root(false)（有根时）/ set_swap_node
+【树 · 默认 cout 格式】（末尾无多余空行）
+  首行：n（可关）；有根且 output_root 时同行为 n r 或仅 r
+  若有点权：下一行 n 个点权
+  随后 n-1 行边（u v [w]）
+  【重要】默认格式必须对齐标程；若标程只要边、或先 m 再边、或多字段 → 禁止盲 cout << t，改遍历 edges()
+【图 · 构造与方法】
+  Graph(n, m=0, begin=1)；同形：DAG / CycleGraph / WheelGraph / Cactus / Forest / …
+  BipartiteGraph(n, m=0, begin=1, left=-1)；set_left / set_left_right(l,r) / rand_left()
+    输出首行：use_format_node() | use_format_left_right() | use_format_node_left() | use_format_node_right()
+    set_different_part(true) 时左右部各自从 begin 起编号（匹配题常见）
+  GridGraph(n, m=0, begin=1, row=-1)；set_row / set_row_column(r,c,ignore=0) / rand_row()
+  Forest：add_tree_size(sz) / set_trees_size({…})（会回写 n、边数）
+  性质：set_direction / set_multiply_edge / set_self_loop / set_connect
+    （DAG 禁 set_direction/set_self_loop；Bipartite 禁二者；Cactus/Forest 禁方向向重边自环及改连通）
+  边数辅助：min_edge_count() / max_edge_count() / rand_edge_count(lo,hi) / set_edge_count
+    满边：set_edge_count(min(m_limit, max_edge_count()))；严禁 O(n^2) 枚举边池
+  输出开关：set_output_node_count / set_output_edge_count
+【图 · 默认 cout 格式】
+  首行 n m（可分别关掉 n 或 m）；有点权则下一行 n 个权；再 m 行 u v [w]
+【几何 · 方法】
+  ConvexHull<T>(n, xl,xr,yl,yr) / SimplePolygon / Triangle；T 有符号整型或浮点（禁 unsigned）
+  set_xy_limit(xl,xr,yl,yr) 或 set_xy_limit("[-1e9,1e9]")；另有 set_x_limit / set_y_limit
+  ConvexHull 另有 set_max_try（默认 10，失败会异常）
+  单点：Point<T> p; p.rand(…); 或 rand_point<T>(…)
+  图形：…; obj.gen(); cout << obj;
+  默认输出：先 n（可 set_output_node_count(false)），再 n 行 x y；Triangle 为一行六个坐标
+  生成允许三点共线（非严格）；要严格凸自行过滤
+【数组 / 串 / 排列（函数，不是类）】
+  rand_p(n) → 0..n-1；rand_p(n, start) → 从 start 起
+  rand_string(n [, CharType|format]) / rand_string(lo,hi,…) / rand_palindrome / rand_bracket_seq
+  rand_sum(size, sum) / rand_sum(size,sum,min_part) / rand_sum(size,sum,from,to)  // 多测拆 sum_* 很有用
+  rand_vector：随机数组；更稳妥仍可用 testlib rnd.next / rnd.perm / rnd.next(\"[a-z]{n}\")
+【正确示例】
+  unweight::Tree t(n); t.gen(); cout << t << "\\n";
+  edge_weight::Tree<int> t(n);
+  t.set_edges_weight_function([](){ return rnd.next(1, 1000000000); }); t.gen(); cout << t;
+  unweight::Tree t(n); t.gen();
+  for (auto &e : t.edges()) printf("%d %d %d %d\\n", e.u(), e.v(), a, b);  // 多字段边
+【错误 · 不存在或会编译失败】
+  weight::… / set_weight_limit（用 edge_weight:: + set_edges_weight_function）
+  get_edges()（用 edges()）/ Tree::shuffle() / 访问 _edges
+  虚构类 Sequence / Permutation / String / RandomPoints
+  rnd.next(1, 1e9)（1e9 是 double → ambiguous；写 1000000000 或 LL）
+  fill_inputs / hack / compare / init_gen（官方批处理，本框架禁用）
 """
 
 BASE_VAL_RULES = """validator.cpp 写法（testlib）：
@@ -258,95 +312,122 @@ RULES = """规则：
 """
 
 TYPE_TREE = """【树图题型模块 — tree / weighted_tree】
-树/图/几何题优先用 ACM-generator（#include "generator.h"，经 -I 自动提供；它包含 testlib.h）：
-  using namespace generator::all;
-  常用：unweight::Tree / Chain / Flower / FlowerChain / MaxSonTree，
-        单边权用 edge_weight::Tree<int> / Chain / Flower。
-  【无边权 / 默认 n+边】
+树题优先用 ACM-generator（#include "generator.h"；using namespace generator::all）：
+  权重前缀：unweight:: / edge_weight::T / node_weight::T / both_weight::NodeT,EdgeT。
+  按边界选型与关键方法：
+    Tree(n)：一般随机树；use_random_father() 或 use_pruefer()；set_is_rooted / set_root(第几个点)
+    Chain(n) / Flower(n)：链 / 菊花
+    FlowerChain(n)：set_flower_size(k) 或 set_flower_chain_size(fs, cs)（会校正 node_count）
+    HeightTree(n)：强制有根；set_height(h)（n≥2 时 h∈[2,n]）；禁用 set_is_rooted
+    MaxDegreeTree(n)：set_max_degree(d)（n≥3 时 d∈[2,n-1]）
+    MaxSonTree / DegreeTree / SonTree：限最大儿子数或指定度数/儿子序列
+  【默认输出可用时】
       unweight::Tree t(n); t.gen(); cout << t << "\\n";
-  【多字段边（如 u v a b）】禁止 cout << t / edge_weight：
+      // 默认：n →（有点权一行）→ n-1 行边；有根还可能带 root
+  【对齐标程 · 多字段边】禁止盲 cout << t：
       unweight::Tree t(n); t.gen();
       for (auto &e : t.edges()) printf("%d %d %d %d\\n", e.u(), e.v(), a, b);
   【单边权】
       edge_weight::Tree<int> t(n);
       t.set_edges_weight_function([](){ return rnd.next(1, 1000000000); });
-      t.gen(); cout << t;
-  【严禁】weight:: / set_weight_limit / get_edges() / t.shuffle() / 访问 _edges / rnd.next(..., 1e9)。
-  仍须 registerGen(argc,argv,1) 与 --seed/--type/--index/--count 契约；不要用 fill_inputs/hack。
+      t.gen(); cout << t;  // 边行为 u v w；不对齐则改 edges()+e.w()
+  【点权】node_weight::Tree<int> + set_nodes_weight_function；双权用 both_weight。
+  开关：set_output_node_count(false) / set_output_root(false) / set_begin_node(0或1)。
+  【严禁】weight:: / set_weight_limit / get_edges() / t.shuffle() / _edges / rnd.next(...,1e9)。
+  仍须 registerGen + --seed/--type/--index/--count；禁止 fill_inputs/hack/init_gen。
 
-树图默认按「无自环、无重边」处理：生成器用 v>u 或 u≠v 的池子，validator 用 ensuref(u!=v) 并检查重复边。
-若题面明确允许自环/重边，则按题面调整。
-
-树题 validator 必须校验：边数=n-1、无自环、无重边、连通、无环。
-带权树图还需校验：边权范围、总边数与类型声明一致。
+树图默认按「无自环、无重边」处理；题面允许则另说。
+树 validator：边数=n-1、无自环、无重边、连通、无环；带权再验权值范围。
 """
 
 TYPE_GRAPH = """【图题型模块 — graph / weighted_graph】
-树/图/几何题可用 ACM-generator（#include "generator.h"，经 -I 自动提供；它包含 testlib.h），
-也可用纯 testlib 手写边；以本题输入格式为准，勿被 few-shot 单测无向模板带偏。
-  using namespace generator::all;
-  常用：unweight::Graph / Tree / Chain / Flower；单边权用 edge_weight::Graph / Tree。
-  【无边权】
-      unweight::Graph g(n, m); g.gen(); cout << g << "\\n";
-  【多字段边】unweight + for (auto &e : t.edges()) 自行打印；【单边权】edge_weight + set_edges_weight_function。
-  【严禁】weight:: / set_weight_limit / get_edges() / Tree::shuffle() / 访问 _edges / rnd.next(..., 1e9)。
-  仍须 registerGen(argc,argv,1) 与 --seed/--type/--index/--count 契约。
+可用 ACM-generator 或纯 testlib 手写边；输入格式以标程为准。using namespace generator::all;
+  结构选型与方法：
+    Graph(n,m)：通用图；set_direction / set_multiply_edge / set_self_loop / set_connect
+    BipartiteGraph(n,m[,left])：set_left / set_left_right / rand_left / set_different_part；
+      首行格式 use_format_node|left_right|node_left|node_right（对齐标程）；禁 set_direction/self_loop
+    DAG(n,m)：有向无环；禁 set_direction/self_loop
+    CycleGraph / WheelGraph / GridGraph(n,m)：网格用 set_row / set_row_column(r,c,ignore) / rand_row
+    PseudoTree / PseudoInTree / PseudoOutTree：基环树族
+    Cactus(n,m)：无向连通无重边无自环（相关 set_* 禁用）
+    Forest(n,m)：add_tree_size / set_trees_size({…})（会回写 n 与边数）
+    StartReachableGraph：单源可达
+  边数：min_edge_count() / max_edge_count() / rand_edge_count(lo,hi) /
+    set_edge_count(min(m_limit, max_edge_count()))；严禁 O(n^2) 建边池
+  【默认输出】
+      unweight::Graph g(n, m); g.gen(); cout << g << "\\n";  // n m →（点权）→ m 行边
+      set_output_node_count / set_output_edge_count 可关首行字段
+  【多字段边】for (auto &e : g.edges()) 自行打印；【单边权】edge_weight + set_edges_weight_function + e.w()
+  【严禁】weight:: / set_weight_limit / get_edges() / shuffle / _edges / rnd.next(...,1e9)。
+  仍须 registerGen + seed/type/index/count；禁止 fill_inputs/hack/init_gen。
 
-【多测】若标程先读 T：stdout 第一行必须是 T∈约束，再输出 T 组数据；禁止照抄「第一行 n m」。
-  仅此时 edge_cases 才写 edge_Tmax（可选 big_T_small_n）；不要写 edge_T1（T=1 已被 edge_nmax/攻n 覆盖）；
-  无多测（EOF/单组）禁止写 edge_Tmax/edge_T1。
-【n=1】禁止自环时 edge_n1 应 m=0（可空输出）；允许自环时可输出 (1,1,w)。随机采样须有尝试上限，禁止 while+continue 死循环。
-【完全图】控制 n 使边数不超过 m 上界，避免 O(n^2) TIMEOUT。
-【空输入】若约束允许 m=0 / 空边集 / EOF 空文件，gen 对应分支可打印空 stdout，框架允许。
-【content】图题 gen 分支宜精简，仍须完整 content 一次写出（见 WRITE_CONTENT_GATE）。
-【复杂度】严格按 gen_plan.md「复杂度与规模预算 / 有效状态预算」实现；满边数时勿把唯一顶点数默认拉满。
+【多测】标程先读 T：首行必须是 T；仅此时可写 edge_Tmax（可选 big_T_small_n）；禁 edge_T1。
+【n=1】禁自环 → m=0（可空）；允许自环 → (1,1,w)。采样须有尝试上限。
+【完全图】控制 n 使边数 ≤ m 上界。空边集/空文件按约束允许。
+【复杂度】遵守 gen_plan 有效状态预算；满边勿默认拉满唯一顶点。
 
-图性质（无自环/无重边/连通等）以题面为准；validator 校验与题面一致的性质。
+图性质以题面为准；validator 校验同题面。
 """
 
 TYPE_GEO = """【几何题型模块 — geometry】
-几何题优先用 ACM-generator（#include "generator.h"，已自动提供）：
-  using namespace generator::all;
-  常用：ConvexHull<int> / SimplePolygon<int> / RandomPoints<int>。
-  用法：set_xy_limit 后 gen()，cout << obj 输出。仍须 registerGen 与 --seed/--type/--index/--count 契约。
+优先 ACM-generator（二维）：using namespace generator::all;
+  图形类：ConvexHull<T> / SimplePolygon<T> / Triangle<T>
+    构造：Xxx(n, xL,xR,yL,yR)；或 Xxx(n) 后再设范围
+    范围：set_xy_limit(xL,xR,yL,yR) 或 set_xy_limit("[-1e9,1e9]")；
+          set_x_limit / set_y_limit（数值或范围字符串）
+    生成：gen()；ConvexHull 可用 set_max_try(k)（默认 10，失败抛异常）
+    输出：cout << obj → 默认先 n 再 n 行 x y；
+          set_output_node_count(false) 可去掉首行 n；
+          Triangle 特例：一行 x1 y1 x2 y2 x3 y3
+  单点：Point<T> p; p.rand(L,R) / p.rand(xL,xR,yL,yR) / p.rand(format);
+        或 rand_point<T>(…)
+  约束：T 为有符号整型或浮点（禁 unsigned）；生成允许三点共线（非严格）。
+  【严禁】RandomPoints 类；fill_inputs/hack/init_gen。
+  仍须 registerGen + --seed/--type/--index/--count。
 
-validator 校验：点数、坐标范围，以及题面声明的凸性 / 简单多边形 / 共线 / 非退化等性质。
+validator：点数、坐标范围，以及题面要求的凸性/简单多边形/共线/非退化。
 """
 
 TYPE_ARRAY = """【数组 / 序列题型模块】
-gen 用纯 testlib（#include \"testlib.h\"）：
-  - 随机序列：vector + rnd.next(L, R)；ai∈[-1e9,1e9] 时用 long long + rnd.next(-1000000000LL, 1000000000LL)。
-  - 排列：rnd.perm(n)（0..n-1，按题面决定是否 +1）。
-  - 【严禁】Sequence / Permutation / String 类（generator.h 无此类 API，写了会编译失败）。
-  - type 必须是 string：opt<string>(\"type\",\"random\")，用 if (type == \"random\") / \"edge_xxx\" 分支。
+优先 testlib：vector + rnd.next(L,R)；大范围用 long long + rnd.next(-1000000000LL, 1000000000LL)。
+排列：rnd.perm(n)（0..n-1，按题面 +1）。
+可选 generator.h 函数（不是类）：
+  rand_vector(…) 随机数组；
+  rand_sum(k, S) / rand_sum(k,S,min_part) / rand_sum(k,S,from,to) —— 多测拆分 sum_* 优先用；
+  rand_p(n) / rand_p(n, start) 排列。
+【严禁】虚构类 Sequence / Permutation / String。type 用 string 分支。
 
-validator：长度、元素范围（大范围用 readLong），以及单调性/互异性等题面要求。
-
-常见 edge_cases：edge_n1, edge_nmax, all_equal, descending, all_negative, all_max_value, two_values。
+validator：长度、元素范围（大范围 readLong）、单调/互异等题面约束。
+常见 edge：edge_n1, edge_nmax, all_equal, descending, all_negative, all_max_value, two_values。
 """
 
 TYPE_STRING = """【字符串题型模块】
-gen 用纯 testlib：rnd.next(\"[a-z]{n}\") / rnd.next(\"[01]{n}\")，或逐字符 rnd.next('a','z')。
-【严禁】不存在的 String(n,'a','z') 类写法。type 用 string + 字符串比较分支。
+优先 testlib：rnd.next(\"[a-z]{n}\") / rnd.next(\"[01]{n}\") / 逐字符 rnd.next('a','z')。
+可选 generator.h：
+  rand_string(n) / rand_string(n, LowerLetter|UpperLetter|…) /
+  rand_string(n, \"[a-e]\") / rand_string(lo, hi, format)；
+  rand_palindrome / rand_bracket_seq。
+【严禁】String(n,'a','z') 类。type 用 string 分支。
 
-validator：字符集、长度，以及子串/前缀/后缀/周期等题面要求。
-
-常见 edge_cases：edge_n1, edge_nmax, all_same, pattern_at_start, pattern_at_end, no_match, long_run, two_chars。
+validator：字符集、长度、子串/前后缀/周期等。
+常见 edge：edge_n1, edge_nmax, all_same, pattern_at_start/end, no_match, long_run, two_chars。
 """
 
 TYPE_PERMUTATION = """【排列题型模块】
-gen 用 testlib 的 rnd.perm(n) 先生成 0..n-1 排列，再整体 +1 得到 1..n 排列；
-或按题面要求生成子集排列（用 unordered_set 去重采样）。
-【严禁】不存在的 Permutation 类。type 用 string + 字符串比较分支。
+优先 testlib：rnd.perm(n) → 0..n-1，再整体 +1 得 1..n。
+或 generator.h：rand_p(n) / rand_p(n, start)；子集排列用 unordered_set 去重采样。
+【严禁】Permutation 类。type 用 string 分支。
 
-validator 必须校验：长度、元素范围、是否恰好是一个排列（无重复、无遗漏）。
+validator：长度、范围、恰好为排列（无重复无遗漏）。
 """
 
 TYPE_MATRIX = """【矩阵 / 网格题型模块】
-gen 用 testlib 的 rnd.next(l,r) 填充 vector<vector<int>>，或用 ACM-generator 的 GridGraph（n*m 节点，四邻域边）。
-type 用 string + 字符串比较分支。
+数值矩阵：testlib rnd.next 填 vector<vector<int>>。
+网格图：unweight::GridGraph g(n, m); g.set_row(r) 或 set_row_column(r,c,ignore); g.gen();
+  再 cout << g 或遍历 edges()；可 set_direction(true) 做有向网格。
+type 用 string 分支。
 
-validator 校验：行列规模、元素范围，以及题面声明的连通性/对称性/行列性质等。
+validator：行列规模、元素范围、题面连通/对称等性质。
 """
 
 _TYPE_MODULES = {
@@ -563,24 +644,30 @@ int main(int argc, char* argv[]) {
 """
 
 
-_GEN_API_GATE = """【generator.h 树/图 API 用法 — 写错会编译失败】
-无边权 / 默认输出 n+边：
-  unweight::Tree t(n); t.gen(); cout << t << "\\n";
-自定义输出（先打别的字段再打边，或多权/多字段边）：
-  unweight::Tree t(n); t.gen();
-  for (auto &e : t.edges()) { int u = e.u(), v = e.v(); /* printf 全部边字段 */ }
+_GEN_API_GATE = """【generator.h 方法速查 — 写错会编译失败】
+流程：构造 → set_*/use_* → gen() → cout << obj 或 edges()/e.u()/e.v()/e.w()。
+setter/getter：name() 读、set_name(v) 写；edges()/nodes_weight() 只读；勿用 *_ref() 乱改。
+权重前缀：unweight:: / node_weight::T / edge_weight::T / both_weight::NodeT,EdgeT（无 weight::）。
+树构造要点：
+  Tree(n) + use_pruefer()/use_random_father()；Chain/Flower(n)；
+  FlowerChain + set_flower_size / set_flower_chain_size；
+  HeightTree + set_height（强制有根）；MaxDegreeTree + set_max_degree
+  默认 cout：n[( root)] → [点权行] → n-1 行边；不对齐标程就遍历 edges()
+图构造要点：
+  Graph(n,m) + set_direction/multiply_edge/self_loop/connect；
+  BipartiteGraph + set_left_right / use_format_left_right / set_different_part；
+  DAG/Cactus/Forest/GridGraph（set_row_column）；边数用 max_edge_count/rand_edge_count
+  默认 cout：n m → [点权行] → m 行边
 单边权：
   edge_weight::Tree<int> t(n);
   t.set_edges_weight_function([](){ return rnd.next(1, 1000000000); });
   t.gen(); cout << t;
-错误（不存在/会炸，编译失败）：
-  weight::Tree / weight::Graph   // 不存在，单权用 edge_weight::
-  set_weight_limit(...)          // 不存在，用 set_edges_weight_function
-  t.get_edges();                 // 正确是 edges()
-  t.shuffle();                   // Tree/Chain/Flower 没有 shuffle
-  访问 _edges                    // 受保护成员
-  rnd.next(1, 1e9) / rnd.next(-1e9, 1e9)  // 1e9 是 double → ambiguous；改 1000000000 或 LL
-图同理：g.gen(); cout << g; 或 for (auto &e : g.edges()) ...
+几何：ConvexHull/SimplePolygon/Triangle + set_xy_limit + gen()；Point/rand_point；禁 RandomPoints
+数组函数：rand_p / rand_string / rand_sum（拆 sum_*）/ rand_vector；不是 Sequence 类
+错误：
+  weight:: / set_weight_limit / get_edges() / shuffle() / _edges /
+  Sequence|Permutation|String|RandomPoints 类 /
+  rnd.next(..., 1e9) / fill_inputs|hack|init_gen
 """
 
 _GEN_OPT_TYPE_TEMPLATE = """【固定样板 · gen opt/type · 必抄 · 与 plan 冲突时以本块为准】
