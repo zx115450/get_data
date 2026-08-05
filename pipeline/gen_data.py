@@ -7,6 +7,7 @@
 import concurrent.futures
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -18,6 +19,40 @@ from sandbox.run import EXIT_MEMORY, is_stack_overflow, parse_memory_limit_mb, s
 
 def _exe(base: str) -> str:
     return base + (".exe" if os.name == "nt" else "")
+
+
+# 约束极值边界命名：禁止裸写 k_min / nmax；须 edge_k_min / edge_nmax
+_BARE_EXTREME_UNDERSCORE = re.compile(r"^([A-Za-z][A-Za-z0-9]*)_(min|max)$")
+_BARE_EXTREME_GLUED = re.compile(r"^([A-Za-z][A-Za-z0-9]*?)(min|max)$", re.IGNORECASE)
+_DEFAULT_EXTREME_VARS = frozenset({
+    "n", "m", "k", "t", "q", "w", "h", "r", "c", "x", "y",
+    "sum_n", "sum_m", "sum_q",
+})
+
+
+def suggest_edge_prefixed_extreme(name: str, constraints=None) -> str | None:
+    """若 edge 名像约束极值却无 edge_ 前缀，返回建议名（如 k_min → edge_k_min）；否则 None。
+
+    结构名（chain / disconnected / path）不受影响。
+    """
+    if not isinstance(name, str) or not name or name.startswith("edge_"):
+        return None
+    keys = set(_DEFAULT_EXTREME_VARS)
+    if isinstance(constraints, dict):
+        keys |= {str(k).lower() for k in constraints}
+
+    m = _BARE_EXTREME_UNDERSCORE.fullmatch(name)
+    if m:
+        var, bound = m.group(1), m.group(2)
+        if var.lower() in keys:
+            return f"edge_{var}_{bound}"
+
+    m2 = _BARE_EXTREME_GLUED.fullmatch(name)
+    if m2:
+        var, bound = m2.group(1), m2.group(2).lower()
+        if var.lower() in keys:
+            return f"edge_{var}{bound}"
+    return None
 
 
 def _is_special_type(typ: str) -> bool:
@@ -90,6 +125,19 @@ def validate_range_json(rj) -> list:
         errs.append("缺少 edge_cases（边界类型列表，可为空数组 []）")
     elif not isinstance(ec, list) or not all(isinstance(e, str) and e for e in ec):
         errs.append("edge_cases 必须是字符串数组（每个非空）")
+    elif isinstance(ec, list):
+        # 约束极值名必须带 edge_ 前缀（禁止裸写 k_min / nmax），避免 gen 分支误加前缀
+        cons = rj.get("constraints") if isinstance(rj.get("constraints"), dict) else {}
+        for name in ec:
+            if not isinstance(name, str):
+                continue
+            sug = suggest_edge_prefixed_extreme(name, cons)
+            if sug:
+                errs.append(
+                    f"edge_cases 名 {name!r} 像约束极值却无 edge_ 前缀；"
+                    f"请改用 {sug!r}（结构名如 chain/disconnected 可不带前缀；"
+                    f"gen 的 type 分支须与最终名字逐字符一致）"
+                )
 
     # special_constraints 是 range_agent 提取的特殊结构约束清单，可选字段。
     # 只校验类型（字符串数组），不校验内容是否与题面一致（那是 LLM 的责任）。

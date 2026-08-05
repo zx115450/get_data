@@ -1,41 +1,36 @@
 {
-  "count": 27,
+  "count": 30,
   "constraints": {
-    "t": [
+    "T": [
       1,
-      20000
+      50000
     ],
     "n": [
       2,
-      200000
+      500000
     ],
     "m": [
-      1,
-      200000
+      0,
+      500000
     ],
     "k": [
       1,
-      199999
-    ],
-    "degree": [
-      1,
-      3
+      1000000000
     ]
   },
   "edge_cases": [
-    "edge_n2",
+    "edge_nmin",
     "edge_nmax",
+    "edge_Tmax",
     "edge_m_min",
-    "edge_m_max",
-    "edge_Tmax"
+    "k_min"
   ],
   "time_limit_ms": 5000,
   "memory_limit_mb": 1024,
   "special_constraints": [
-    "图是简单连通无向图，无自环无重边",
-    "所有顶点度数均不超过3",
-    "特殊顶点互不相同且非空",
-    "所有测试用例的n之和与m之和均不超过2e5"
+    "图可能包含自环和重边",
+    "图可能不连通（无连通性保证，顶点1可能无法到达某些点）",
+    "允许路径重复经过顶点或同一条边"
   ],
   "problem_type": "graph"
 }

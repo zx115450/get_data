@@ -30,6 +30,10 @@ range.json 必须含：
 - count: 正整数；count ≥ max(15, 3^k)，k=小中大轴数（三维即 ≥27；不要写「建议≥30」）
 - constraints: 对象，变量名 -> [min, max]（整数）
 - edge_cases: 字符串数组（边界类型名，禁止含 "random"；总额 4～6）
+  【命名】约束极值统一 edge_ 前缀：edge_nmin / edge_nmax / edge_k_min / edge_m_min / edge_Tmax；
+  禁止裸写 k_min / nmax / Tmax（易导致 gen 写成 edge_k_min 与 range 不一致）。
+  结构边界可用语义名：chain / disconnected / path / star（可不带 edge_）。
+  最终名字会原样作为 gen --type；Coder 必须逐字符一致，禁止自行加/删 edge_。
 - special_constraints: 字符串数组，列出题面里所有「特殊结构约束」（如 DAG、连通、二分图、哈密顿、欧拉、平面图、竞赛图、树等）。
   没有特殊约束时写空数组 []。每条用简短中文描述，如 "图是 DAG"、"图必须存在哈密顿路径"、"图连通"。
 可选（建议填写；未写时系统默认 time_limit_ms=5000、memory_limit_mb=1024）：
@@ -40,8 +44,8 @@ range.json 必须含：
 1. 仔细读题面，找出所有「保证」「约定」「满足...」「是 X 图」「存在...」等结构性质描述。
 2. 把每条性质提炼成一句简短中文，写进 special_constraints。
 3. 【与 edge 名额】尽量在 edge_cases（总额仍 4～6）里为关键结构约束各留一个边界名
-   （如 "DAG" -> edge_dag；"哈密顿" -> edge_hamiltonian）；约束过多时合并同类或只保留最关键 2～3 条，
-   禁止为「一条约束一个 edge」而超过 6。
+   （如 "DAG" -> edge_dag；"哈密顿" -> edge_hamiltonian；约束极值用 edge_k_min 而非 k_min）；
+   约束过多时合并同类或只保留最关键 2～3 条，禁止为「一条约束一个 edge」而超过 6。
 4. special_constraints 不只是抄题面关键词：要判断它对生成器意味着什么。
    例如「求哈密顿路径数量」隐含「图必须存在哈密顿路径」，生成器要保证这一点，
    否则标程答案无意义——这种隐含约束也要写进 special_constraints。
@@ -53,6 +57,7 @@ range.json 必须含：
    【不要写 edge_T1】T=1 已被 edge_nmax / small_T_big_n / 攻 n 覆盖，无额外测点。
    无多测（EOF 读入 / 单组）禁止写 edge_Tmax / edge_T1。
 3. edge_cases 优先占位：edge_n1/edge_nmax，其余名额给 special_constraints 的核心结构（可合并同类）。
+   约束变量的最小/最大边界名必须带 edge_ 前缀（edge_k_min，禁止 k_min）。
 4. write_range 成功后立刻 finish，不要重复 write_range。
 5. 看到 ERROR 要修正后再 write_range。
 """
@@ -282,6 +287,7 @@ def propose_range_json(
         f"用户未另行指定时不要无故写成小于 {MIN_REGULAR_COUNT}。"
         f"constraints 覆盖题面中的规模变量（如 n、T、m）。"
         f"edge_cases 总数 4～6：优先 edge_n1/edge_nmax，其余给 special_constraints 关键结构（可合并，勿超 6）。"
+        f"约束极值名须带 edge_ 前缀（edge_k_min，禁止 k_min）；结构名可无前缀。"
         f"写完 write_range 后 finish。"
         f"务必填写 special_constraints 字段（即使为空数组也要写）。\n"
         f"务必填写 problem_type（与题面一致的英文标识符）。\n"

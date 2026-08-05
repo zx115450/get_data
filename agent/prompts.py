@@ -100,6 +100,7 @@ range.json 必须是合法 JSON，含：
     启用特殊样例时由系统叠加特殊组后改写为总数
   - constraints: 对象，各变量名 -> [min, max]
   - edge_cases: 数组，边界类型名；每个名字必须是你 gen --type 能接受的取值（总数 4～6）
+  - 【命名】约束极值用 edge_ 前缀（edge_k_min，禁 k_min）；结构名可无前缀；gen 分支须与名字逐字符一致
   - 禁止在 edge_cases 里写 "random"：系统会给非边界组自动补 random（可写 random_tree / random_sparse 等具体名）
   - 建议写 time_limit_ms（毫秒）与 memory_limit_mb（MB）：作用于标程 std / validator（及批跑时的同类限时）；
     超限分别返回 TIMEOUT / MEMORY_LIMIT。题面未写时默认 5000ms / 1024MB。
@@ -115,6 +116,9 @@ RANGE_CONTRACT = """range.json 必须含：
 - edge_cases: 字符串数组（边界类型名，禁止含 "random"）。
   【总额 4～6】优先占位：edge_n1 / edge_nmax（或规模最小/最大），其余名额给 special_constraints
   中最关键的结构边界；不要堆砌十几个。
+  【命名】约束极值必须 edge_ 前缀：edge_nmin / edge_nmax / edge_k_min / edge_m_min / edge_Tmax；
+  禁止裸写 k_min / nmax / Tmax。结构名（chain / disconnected / path）可不带前缀。
+  名字原样作为 gen --type，须与 gen 分支字符串逐字符一致。
   仅当 constraints 含 T（或 t）时才写 edge_Tmax（可选 big_T_small_n）；
   【不要写 edge_T1】T=1 已被 edge_nmax / 攻 n 覆盖；无多测禁止写 edge_Tmax。
 - special_constraints: 字符串数组，列出题面里所有「特殊结构约束」（如 DAG、连通、二分图、哈密顿、欧拉、平面图、竞赛图、树等）。
@@ -412,7 +416,8 @@ TYPE_TREE = """【树图题型模块 — tree / weighted_tree】
 """
 
 TYPE_GRAPH = """【图题型模块 — graph / weighted_graph】
-可用 ACM-generator 或纯 testlib 手写边；输入格式以标程为准。using namespace generator::all;
+优先 ACM-generator（能用 Graph/Tree/Chain/… 就用）；仅库表达不了的约束（如度数上限）再手写边。
+输入格式以标程为准。using namespace generator::all;
   结构选型与方法：
     Graph(n,m)：通用图；set_direction / set_multiply_edge / set_self_loop / set_connect
     BipartiteGraph(n,m[,left])：set_left / set_left_right / rand_left / set_different_part；
@@ -430,6 +435,10 @@ TYPE_GRAPH = """【图题型模块 — graph / weighted_graph】
       set_output_node_count / set_output_edge_count 可关首行字段
   【规模头】默认「n m → 边」仅当标程如此；标程无规模头时禁止套用默认头，须关输出或手写边。
   【多字段边】for (auto &e : g.edges()) 自行打印；【单边权】edge_weight + set_edges_weight_function + e.w()
+  【点编号硬约束】题面点号通常为 1..n：禁止输出 0。
+    Graph/Tree 默认 begin=1，e.u()/e.v() 可直接打印。
+    手写边：内部全程 1-based（rnd.next(1,n)；路径边用 i↔i+1）；勿 for(i=0;i<n)。
+    随机重标号：rnd.perm(n) 得到 0..n-1，映射必须 +1（或 rand_p(n,1)）；label[u]/label[v] 输出。
   【严禁】weight:: / set_weight_limit / get_edges() / shuffle / _edges / rnd.next(...,1e9)。
   仍须 registerGen + seed/type/index/count；禁止 fill_inputs/hack/init_gen。
 
@@ -438,7 +447,7 @@ TYPE_GRAPH = """【图题型模块 — graph / weighted_graph】
 【完全图】控制 n 使边数 ≤ m 上界。空边集/空文件按约束允许。
 【复杂度】遵守 gen_plan 第 4/7 节分层：小中档可多样，大档与满边上界 ≤K；满边/满询问 ≠ 唯一顶点/唯一键拉满。
 
-图性质以题面为准；validator 校验同题面。
+图性质以题面为准；validator 校验同题面（u/v 用 readInt(1,n)）。
 """
 
 TYPE_GEO = """【几何题型模块 — geometry】
@@ -631,9 +640,9 @@ PLANNER_PROMPT = """你是算法竞赛测试数据生成器设计专家。任务
 
 要求：
 1. 只输出 Markdown 计划正文，不要调用任何工具，不要写完整代码文件，不要解释。
-2. 【篇幅】全文目标约 1500～1900 字，软上限 3200 字。用短句/子弹；禁止复述题面、禁止大段伪代码、禁止重复 range.json；
-   第 8 节禁止复述第 5 节 edge 表；禁止粘贴完整 opt/type 示例代码（细则由 Coder 固定模板提供）。
-3. 【标程优先】输入格式、是否多测 T、字段顺序、自环/有向/边权必须以标程读入为准（辅以题面）；并据此写第 7 节瓶颈。
+2. 【篇幅】全文目标约 1200～1600 字，软上限 4000 字。用短句/子弹；禁止复述题面、禁止大段伪代码、禁止重复 range.json；
+   第 8 节必须用下方固定短模板（≤4 行），禁止展开 edge / 禁止粘贴 opt/type 示例代码。
+3. 【标程优先】输入格式、是否多测 T、字段顺序、自环/有向/边权必须以标程读入为准（辅以题面）；并据此写第 7 节瓶颈一句。
 4. 【压缩 few-shot · 只借通用骨架】若 user 含「参考结构要点」：
    只允许借鉴：registerGen、opt(seed/type/index/count)、type 分支骨架、
    index 解小中大组合（组数/规模/数值轴，轴名以本题 constraints 为准）、
@@ -648,61 +657,52 @@ PLANNER_PROMPT = """你是算法竞赛测试数据生成器设计专家。任务
        (c) 结束方式：固定行数 / 读到 EOF / 其它。
        禁止套用「先规模再数据」的题型或 few-shot 模板；以标程 read/cin 为准。
        标程无先读规模、循环读至 EOF 时：必须写「gen 禁止打印任何规模计数头」。
-   - 2. 范围参数：constraints 变量 [min,max]；须注册 seed/index/count/type + 全部 constraints 名。一行列表。
+   - 2. 范围参数（仅 1 行）：`opt: seed/type/index/count + <constraints 各名[min,max]>`。
+       禁止复述 range.json 其它字段、禁止多行展开、禁止抄 edge_cases。
    - 3. 多测与 sum：有则写组数轴与 sum 相容定义；写明「random 不得恒组数=1」；
        必须写清 remain 拆分（先 T，再 n_i=min(hint, remain/(T-i), n_max)）；禁止双顶格空话。无多测则写「无多测」。
-   - 4. 规模分层（必写认轴 + 全组合 + 状态密度分层）：2～8 行。
+   - 4. 规模分层（必写认轴 + 全组合 + 状态密度分层）：2～6 行。
        * 写死本题的 A/B/C 轴各用哪个 constraints 名（没有的轴写「无」）；
        * random：index 如何拆成各轴小/中/大（如 bA=i%3, bB=(i/3)%3, bC=(i/9)%3）；
-       * 【状态密度】写清小/中/大档有效状态策略：小档可放宽；中档半开（约 1e3～min(5000,该档规模)）；
+       * 【状态密度】写清小/中/大档：小档可放宽；中档半开（约 1e3～min(5000,该档规模)）；
          大档唯一状态 ≤ 第 7 节 K（有限域复用）；禁止大档用小档宽域；
-       * 声明套件内 3^k 组合都要出现（count≥max(15,3^k)）；有 sum 时写清 remain 公式与「大 T→强制小 n」；
-       * 禁止「只对规模线性插值 + 组数恒 1」「数值全程打满上界」「只写禁止双顶格无拆分算法」。
-   - 5. edge_cases 映射（可执行 · 含构造【输入】思路）：range.json 每个名字一行
-       「- name: 如何选定输入参数 + 如何打印输入 + 所用 API/结构（如 Chain/Flower/手写）」。
-       树/图：写清 t.gen(); cout << t 或 edges()；禁止 get_edges/shuffle。
-       打满规模上界的 edge：唯一状态必须 ≤ 第 7 节 K，有限域复用凑满；禁止一边/一值一个新状态打满上界。
-       种类敏感边界：用中档规模；禁止与 nmax/mmax 合并成「满规模+满种类」。
-       禁止写「输出排列/答案/失败文案」作为 gen 步骤；不要写 edge_T1。
-       【唯一定义处】edge 构造只写在本节；第 8 节只引用，不得再逐条展开。
-   - 6. validator（可执行清单）：
-       * 读入顺序与 gen 输出对齐（校验的是输入文件）；
-       * 【ensuref】树/图或 special_constraints/题面结构性质 → 必须列出 ensuref 项（无自环/无重边/连通/边数=n-1 等；连通用并查集）；
-         仅范围/格式 → 写「只用 read* + readSpace + readEoln + readEof，不加 ensuref」；
-       * 同行多整数必须 readSpace（或 readInts）；禁止连续 readInt 不加空格（否则 Unexpected white-space）；
-       * 必须提及 readEoln 与 readEof（禁止 readInt 后直接 readEof）。
-   - 7. 复杂度与规模预算（必写；缺「有效状态预算」分层或未写清 gen 时限 → 不合格）：
-       * 【两套钟】gen 固定硬限 5s（系统 kill，与 time_limit_ms 无关）；
-         std/validator 用 time_limit_ms（默认 5000ms）。禁止写「把 gen 时限调大」。
-       * gen 目标：最大档须在 5s 内跑完；复杂度写死为 O(n)/O(n+m)/O(n log n) 或等价，
-         优先 generator.h；按【输入】规模估，勿把答案输出量算进 gen；
-       * 【有效状态预算 · 必写，缺一不合格】
-         (1) 标程瓶颈：一句（数据结构/循环阶数/明显退化点；可提数组上界作参考，但不得把 K 设成数组长度）；
-         (2) 最大档 K=具体整数，默认 ≤500；若规模上界 S≥10000 则 K≤min(500, max(50, S/50))；
-             禁止 K=数组长度/「刚好装下」/与规模同阶/≤2m/理论全集；
-         (3) 分层：小档可放宽、中档半开、大档与打满上界的 edge 用大小为 K 的有限域复用；点名用于哪些 type；
-       * 冲最大档的 edge_case 各一句：边界语义如何保留 + 如何在 K 内凑满规模；
-       * 禁止 O(n^2) 建边池、无界重试、最大档状态默认拉满输出规模。
-   - 8. 【实现思路 · 核心】4～6 条短编号步骤（禁止空话、禁止复述第 5 节 edge 表、禁止大段 opt/type 代码）：
-       * include：testlib.h 或 generator.h；
-       * 一句：分支前消费全部 opt（seed/type/index/count + constraints）；type 用 string 与 edge 名比较
-         （完整样板由 Coder 固定模板提供，此处勿粘贴多行代码）；
-       * random：按第 4 节解轴→定规模→按档选状态域（小宽/中半开/大≤K）→打印输入；
-         禁止组数写死 1；禁止数值档全程 rnd 满上界；有 sum 须点名 remain 公式；
-         若数值超出 long long：写明「字符串构造十进制大整数」，禁 long long/__int128；
-       * edge：按第 5 节表，string type 与 edge 名一一对应分支（只引用，不展开构造细节）；
-       * validator：按第 6 节清单（含同行 readSpace + readEoln+readEof + ensuref 政策）；
-         超 long long 字段用 readToken/pattern，禁 readLong；
-       * 遵守第 7 节预算；写 gen → 写 validator → 自检。
+       * 声明套件内 3^k 组合都要出现；有 sum 时写清 remain 与「大 T→强制小 n」；
+       * 禁止「组数恒 1」「数值全程打满上界」。
+   - 5. edge_cases 映射（唯一定义处 · 每个名字一行）：
+       格式：`- name: 参数/构造 + 打印输入 + API；若打满规模上界则追加「≤K复用: …」`。
+       【分支名】name 原样 → type == "name"；禁止自行加/删 edge_ 前缀。
+       树/图：t.gen(); cout << t 或 edges()；禁止 get_edges/shuffle。
+       种类敏感边界用中档规模；禁止写答案/失败文案；不要写 edge_T1。
+       【禁止】第 7/8 节再展开任何 edge 构造细节。
+   - 6. validator（可执行清单，尽量短）：
+       * 读入顺序与 gen 对齐；
+       * 有结构性质 → 列出 ensuref 项；仅范围/格式 → 写「read* + readSpace + readEoln + readEof，无 ensuref」；
+       * 同行多整数必须 readSpace；必须提及 readEoln 与 readEof。
+   - 7. 复杂度与规模预算（短 · 禁止逐 edge 展开）：
+       仅写以下要点（建议 ≤5 行）：
+       * 两套钟：gen≤5s 硬限；std/validator=time_limit_ms（默认 5000）；禁调大 gen 时限；
+       * 复杂度：写死 O(n)/O(n+m)/O(n log n) 等（按【输入】规模；优先 generator.h）；
+       * 瓶颈：一句；
+       * K=具体整数（默认 ≤500；S≥10000 则 K≤min(500,max(50,S/50))）；
+         禁止 K=数组长度/与规模同阶/理论全集；大档与打满上界 edge 的「如何在 K 内凑满」写在第 5 节该行，此处勿重复。
+   - 8. 【实现思路】必须整节套用下面固定短模板（恰好 4 行编号，禁止增删展开）：
+       ```
+       1. include: testlib.h 或 generator.h
+       2. 分支前全 opt(seed/type/index/count+constraints)；type 用 string；细则见 Coder 模板
+       3. random：按第4节解轴→定规模→按档选状态域→打印输入；edge：按第5节逐名分支（此处禁止展开）
+       4. validator：按第6节；遵守第7节 K；write_gen → write_validate → 自检
+       ```
+       超 long long 数值时仅在第 3 行末追加半句「字符串十进制大整数」。
 6. 不要编造题面/标程没有的约束；不确定处一句话标注。
-7. 【拒收话术】第 4/8 节未写清各轴小中大全组合、或 random 恒组数=1、或数值全程打满、
+7. 【拒收话术】第 4 节未写清各轴小中大全组合、或 random 恒组数=1、或数值全程打满、
    或有 sum 却无 remain 拆分、或把 type 写成 int / `type == 0` → 不合格；
    第 1 节未写明有/无规模头，或标程无规模头却允许 gen 先输出规模整数 → 不合格；
+   第 2 节超过 1 行或复述 range.json → 不合格；
    第 4 节未写小/中/大状态密度分层（小宽、中半开、大≤K）→ 不合格；
-   第 8 节逐条复述第 5 节 edge → 不合格（应压缩引用）；
-   第 7 节未区分 gen 5s 硬限与 time_limit_ms、或选用必超时的 O(n^2) 建边池 → 不合格；
-   第 7 节未给出具体整数 K、或 K>5000、或把 K 写成数组长度/刚好装下/与规模同阶/理论全集/≤2×规模 → 不合格；
-   第 5 节打满上界的 edge 写「共规模个不同状态 / 一边一新状态」→ 不合格。
+   第 8 节超过 4 行、或展开 edge 构造、或粘贴 opt/type 代码 → 不合格；
+   第 7 节逐 edge 展开、或未区分 gen 5s 与 time_limit_ms、或 O(n^2) 建边池 → 不合格；
+   第 7 节未给出具体整数 K、或 K>5000、或把 K 写成数组长度/刚好装下/与规模同阶/理论全集 → 不合格；
+   第 5 节打满上界的 edge 写「共规模个不同状态 / 一边一新状态」且无 ≤K 复用 → 不合格。
 
 只输出 Markdown 计划，然后结束。"""
 
@@ -781,17 +781,18 @@ if (type == "random") {
     // 按 plan 第 4 节解 bA/bB/bC；有 sum_* 必须 remain 拆分：
     //   remain=S; for gi: cap=min(n_max,remain/(T-gi)); n_i=min(hint,cap);
     //   硬禁 bA=大 && bB=大（大 T 强制小 n）
-} else if (type == "edge_xxx") {  // 名与 plan 第 5 节 / range.json 完全一致
+} else if (type == "edge_xxx") {  // 名与 plan 第 5 节 / range.json 完全一致（逐字符；禁自加 edge_）
     // 按第 5 节该行构造并打印【输入】
 }
-// … 其余 edge 同理
+// … 其余 edge 同理；range 有几个 edge_cases 就必须有几个 else if，字符串逐字拷贝
 ```
-框架传入的是 `--type random` / `--type edge_n1` 等字符串。
+框架传入的是 `--type random` / `--type edge_n1` / `--type edge_k_min` 等字符串（以本题 range 为准）。
+write_gen 会静态检查：每个 edge_cases 名必须作为字符串字面量出现在 gen.cpp 中。
 """
 
 CODER_PROMPT = """你是 ACM 数据生成器 / 校验器编码专家。任务：把 gen_plan.md 逐条翻译成完整可编译的 gen.cpp 与 validator.cpp。
 【分工】你只负责实现；禁止重新设计分支语义、API 选型、validator 清单、复杂度预算。
-plan 第 5/6/8 节是编码提纲：按步骤写代码即可。第 8 节若只引用第 5 节 edge 表，按第 5 节逐名实现分支。
+plan 第 5/6 节是编码主规格；第 8 节仅为固定短模板（顺序提示）。edge 构造以第 5 节逐名为准，勿因第 8 节未展开而省略分支。
 
 注意：特殊样例（gen_special.cpp）由后续独立阶段编写，本阶段不要写 gen_special，也不要在 gen.cpp 里实现 special_samples 分支。
 【务必先读文首 WRITE_CONTENT_GATE】功能不可省略、源码必须完整；鼓励短实现，禁止半截/摘要。
@@ -812,16 +813,18 @@ plan 第 5/6/8 节是编码提纲：按步骤写代码即可。第 8 节若只�
 """ + _VALIDATOR_GATE + """
 工作规则：
 1. 第一步只 read_file("gen_plan.md") 一次；range.json 已在用户 task 里，禁止再 read_file("range.json")。
-2. 【规格优先级】gen_plan.md（尤其第 5/6/7/8 节「实现思路」）> range.json > 任务「冲突对照摘要」。
+2. 【规格优先级】gen_plan.md（尤其第 5/6/7 节；第 8 节为短模板）> range.json > 任务「冲突对照摘要」。
    题面/标程摘要仅冲突对照；禁止据此改 edge_cases 或推翻预算。
-3. 【冲突原则 · 输入格式优先】若 plan 第 5/8 节要求 gen 打印答案/失败文案/完整构造解，
+3. 【冲突原则 · 输入格式优先】若 plan 第 5 节要求 gen 打印答案/失败文案/完整构造解，
    而第 1 节输入格式或标程读入与此矛盾：以第 1 节 + 标程读入为准实现 gen（只打印输入字段），
-   忽略第 5/8 节中的「输出答案」步骤；不必先判定「plan 是否混淆」。validator 仍按第 6 节校验【输入】。
+   忽略第 5 节中的「输出答案」步骤；不必先判定「plan 是否混淆」。validator 仍按第 6 节校验【输入】。
    规模头严格按第 1 节：无规模头则禁止先打印 n/m/T 等计数；有规模头则必须按约定顺序打印。
-4. 读完 plan 后按第 8 节思路直接 write_gen + write_validate（可并行，各自完整 content）。禁止重复读 gen_plan.md。
+4. 读完 plan 后按第 5/6/8 节直接 write_gen + write_validate（可并行，各自完整 content）。禁止重复读 gen_plan.md。
    【首轮禁止空读】首轮没有 gen.cpp / validator.cpp：禁止写入前读它们。
 5. include / registerGen / API 按 plan；opt/type 必须用上方【固定样板】（plan 若写 int type / 缺省样板，以样板为准）。
-6. 【type 必须是 string】严格按固定样板；并用 if (type == \"random\") / else if (type == \"edge_xxx\")。
+6. 【type 必须是 string】严格按固定样板；并用 if (type == \"random\") / else if (type == \"…\")。
+   else if 中的字符串必须与 range.json edge_cases / plan 第 5 节名字逐字符相同；
+   禁止自行加/删 edge_ 前缀（range 为 edge_k_min 时禁止写成 k_min，反之亦然）。
    同时解析 seed、index、count 与 range.json 全部 constraints 名；禁止只在 random 分支里读 index/count。
 7. 树/图：先 gen()，再用 cout << t 或 t.edges()；输出头字段必须对齐 plan 第 1 节；禁止 get_edges/shuffle。
 8. validator 按 plan 第 6 节清单实现（ensuref 或 read* + 每行 readEoln + readEof）。
@@ -829,7 +832,7 @@ plan 第 5/6/8 节是编码提纲：按步骤写代码即可。第 8 节若只�
    写入编译成功后，系统会自动跑 run_self_check(fast)；不要在未自检前连续多次 write。
 10. 【content】严格遵守 WRITE_CONTENT_GATE：功能不可省略、源码必须完整；鼓励短代码；
     截断/空 content 必须立刻整份重写。全部 edge_cases 与 constraints 不得遗漏。
-11. 【复杂度 / gen≤5s / 分层状态】严格按 gen_plan 第 4/7 节：小中档多样、大档与打满上界的 edge ≤K；
+11. 【复杂度 / gen≤5s / 分层状态】严格按 gen_plan 第 4/5/7 节：小中档多样、大档与打满上界的 edge ≤K；
     禁止 O(n^2) 建边池；禁止最大档默认每条输入一个新状态；plan 的 K 过大时大档仍按 ≤500 实现。
 12. 自检 OK → finish；FAIL → 只允许再修正一轮完整源码（仍须完整 content），修正不得偏离 plan 策略
     （若 FAIL 像 gen 打成了答案，按第 3 条以输入格式为准修正；若 gen TIMEOUT，按第 7 节换更快等价实现；
@@ -856,10 +859,10 @@ CODER_REWRITE_PROMPT = """你是 ACM 数据生成器 / 校验器编码专家。�
 """ + _GEN_API_GATE + """
 """ + _VALIDATOR_GATE + """
 工作规则：
-1. 先 read_file("gen_plan.md") 一次（range.json 已在 task 中，不必再读）；按 plan 第 5/6/7/8 节重写，不另起策略。
-   第 8 节若只引用第 5 节，按第 5 节逐名实现 edge 分支；opt/type 用上方固定样板。
+1. 先 read_file("gen_plan.md") 一次（range.json 已在 task 中，不必再读）；按 plan 第 5/6/7 节重写，第 8 节仅为短模板顺序。
+   edge 以第 5 节逐名实现；opt/type 用上方固定样板。
 2. 再 read_file 当前 gen.cpp / validator.cpp，了解失败点，但**不要局部修补丁**：整份按 plan 重写。
-3. 【冲突原则 · 输入格式优先】若 plan 第 5/8 节要求 gen 打印答案，而第 1 节/标程读入矛盾：
+3. 【冲突原则 · 输入格式优先】若 plan 第 5 节要求 gen 打印答案，而第 1 节/标程读入矛盾：
    以第 1 节 + 标程读入为准，只打印输入；validator 按第 6 节校验输入。
 4. 常见需重写信号：
    - 大量 edge_cases 缺分支或大规模 FAIL；
@@ -881,7 +884,7 @@ CODER_REWRITE_PROMPT = """你是 ACM 数据生成器 / 校验器编码专家。�
 7. 【content】严格遵守 WRITE_CONTENT_GATE：功能不可省略、源码必须完整；鼓励短代码；禁止半截/摘要。
 8. 自检 OK → finish；自检 FAIL → 只允许再修正一轮，写完再次自动自检。
 9. 禁止把 __OMITTED_SOURCE__ 等历史摘要写回文件；如需查看旧版，先 read_file。
-10. 自检通过后 finish，说明本次重写针对的根因与改动；复杂度须符合 gen_plan 第 4/7 节（分层状态 + gen≤5s + K）。"""
+10. 自检通过后 finish，说明本次重写针对的根因与改动；复杂度须符合 gen_plan 第 4/5/7 节（分层状态 + gen≤5s + K）。"""
 
 
 def _with_type_modules(base_parts: list[str], problem_type: str = "") -> str:
@@ -1226,7 +1229,9 @@ GEN_FIXER_WORKFLOW = """修复流程：
      TIMEOUT/MEMORY 时仅压该 type（及同类最大档）到 K≤200（有限域复用凑满规模），保留小中档多样；
      禁止略微收窄取值区间；对齐格式时修 gen；勿把单组空 stdout 当失败；勿只靠加内存/时限。
    - 全部测例 stdout 为空：套件级失败——补 random/混合测例的查询操作，或检查标程是否写了输出；不要破坏 *_update 边界语义。
-   - 缺分支 / 覆盖不全：补 edge_case 分支或完善 random 分层。
+   - Unexpected end of file / token expected 且 gen 输出为空：【疑似缺分支】
+     type 字符串须与 range.edge_cases 逐字符一致；常见误写是把 k_min 写成 edge_k_min（或反之）。
+   - 缺分支 / 覆盖不全：补 edge_case 分支或完善 random 分层；write_gen 也会静态检查字面量覆盖。
 3. 【硬门禁】每轮只允许写一次（可同轮 write_gen + write_validate）。写入编译成功后，系统会自动跑 run_self_check(fast)；禁止未自检连续改写。
 4. 自检 OK → finish；自检 FAIL → 本轮结束，由外层决定是否进入下一轮 Fixer（不要在同一会话里连写多版）。
 5. 自检通过后调 finish，说明改动点与根因。

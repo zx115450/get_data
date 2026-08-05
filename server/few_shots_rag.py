@@ -533,6 +533,18 @@ def compress_few_shot_content(content: str) -> str:
     if api_parts:
         bullets.append("API：" + "；".join(api_parts))
 
+    # 图/树点编号：压缩后仍保留，避免 Planner 丢掉「禁止点号 0」
+    if (
+        "点编号硬约束" in text
+        or "relabelEdges" in text
+        or ("rnd.perm" in text and ("+1" in text or "1-based" in text or "1..n" in text))
+        or ("generator.h" in text and ("Tree" in text or "Graph" in text or "Chain" in text))
+    ):
+        bullets.append(
+            "点编号：优先 generator.h（begin=1）；手写边全程 1-based（rnd.next(1,n)）；"
+            "rnd.perm(n) 映射必须 +1（或 rand_p(n,1)）；禁止输出点号 0"
+        )
+
     # validator：只保留读入骨架模式，不描述范例字段顺序
     val_parts: list[str] = []
     if "registerValidation" in text:

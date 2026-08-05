@@ -223,6 +223,7 @@ def _run_range_only_agent(
         f"若上方有【特殊样例描述】，count 仍只写常规数（特殊组由后续方案叠加）。"
         f"constraints 覆盖题面中的规模变量（如 n、T、m）。"
         f"edge_cases 总数 4～6：优先 edge_n1/edge_nmax，其余给 special_constraints 关键结构（可合并，勿超 6）。"
+        f"约束极值名须带 edge_ 前缀（edge_k_min，禁止 k_min）；结构名可无前缀。"
         f"{action_line}"
         f"务必填写 special_constraints 字段（即使为空数组也要写）。\n"
         f"务必填写 problem_type（与题面一致的英文标识符）。\n"
@@ -539,9 +540,9 @@ def prepare_prompts(
     return stmt_plain, task, preset, output_plain, std_for_prompt
 
 
-# Planner 篇幅：目标 ~1900；超过软上限则压缩补写一次（含复杂度预算节）
-PLAN_TARGET_CHARS = 1900
-PLAN_SOFT_MAX_CHARS = 3200
+# Planner 篇幅：目标 ~1400；超过软上限则压缩补写一次（含复杂度预算节）
+PLAN_TARGET_CHARS = 1400
+PLAN_SOFT_MAX_CHARS = 4000
 
 
 def _truncate_for_ref(text: str, head: int, tail: int, label: str) -> str:
@@ -593,7 +594,7 @@ def _build_planner_task(
     user_prompt = (
         "请为下面的算法题写一份可执行的 gen.cpp / validator.cpp 生成计划"
         f"（目标约 {PLAN_TARGET_CHARS} 字，勿超过 {PLAN_SOFT_MAX_CHARS} 字）。\n"
-        "Coder 将严格按 plan 实现，请把策略写死（第 5/6/8 节必须可照做）。\n"
+        "Coder 将严格按 plan 实现，请把策略写死（第 5/6 节必须可照做；第 8 节只用固定 4 行模板）。\n"
         "【提醒】gen stdout = 输入；标程 cout = 答案；二者不要写混。\n\n"
         f"【题面】\n{stmt_plain}\n\n"
         f"【数据范围】\n{range_plain}\n"
@@ -603,13 +604,11 @@ def _build_planner_task(
         f"{special_note}"
         f"{few_shot_block}"
         f"\n题型: {eff_type}\n"
-        "\n要求：edge_cases 每个一行（只描述如何打印【本题输入】）；"
-        "第 6 节列出 ensuref 清单或写明 read*+readEoln+readEof；"
-        "第 7 节必须写出 K≤500（禁止 K>5000/数组长度假预算）+ 小中档多样/大档控 K 分层；"
-        "第 8 节 4～6 条短步骤（random 解轴 + 引用第 5/6 节；禁止复述 edge 表；"
-        "opt/type 样板由 Coder 固定模板提供，plan 只写一句约束即可）；"
-        "第 1 节输入格式只以标程为准；few-shot 只借 registerGen/opt/readEoln 等通用骨架，"
-        "禁止借范例输入字段形状；禁止贴完整代码。\n"
+        "\n要求：第 2 节仅 1 行 constraints/opt；edge_cases 每个一行（打满上界则同行写 ≤K复用）；"
+        "第 6 节 ensuref 清单或 read*+readEoln+readEof；"
+        "第 7 节只写 O(...)+瓶颈一句+K=整数（禁止逐 edge 展开）；"
+        "第 8 节固定 4 行模板（禁止展开 edge / 禁止贴 opt 代码）；"
+        "第 1 节输入格式只以标程为准；few-shot 只借通用骨架，禁止借范例输入字段形状。\n"
     )
     return prompts.build_planner_prompt(), user_prompt
 
@@ -624,13 +623,14 @@ def _plan_looks_complete(plan_text: str) -> bool:
     ]
     if not all(h in text for h in required):
         return False
-    # 第 7 节：复杂度 + 有效状态预算（上界/池/状态 等）
+    # 第 7 节：复杂度 + K（状态密度可在第 4/5 节）
     has_complexity = ("复杂" in plan_text) or ("o(" in text) or ("复杂度" in plan_text)
     has_state_budget = (
         ("有效状态" in plan_text)
         or ("状态预算" in plan_text)
         or ("状态上界" in plan_text)
-        or (("预算" in plan_text) and ("状态" in plan_text or "池" in plan_text))
+        or (("预算" in plan_text) and ("状态" in plan_text or "池" in plan_text or "k" in text))
+        or (("有限域" in plan_text or "复用" in plan_text) and bool(re.search(r"K\s*[=≤＜<]\s*\d+", plan_text, re.I)))
     )
     # 抽出明确写出的 K=数字；过大视为假预算（数组上限伪装）
     k_vals = [int(x) for x in re.findall(r"K\s*[=≤＜<]\s*(\d+)", plan_text, flags=re.I)]
@@ -761,8 +761,9 @@ def _build_coder_task(
 
     return (
         "请把 gen_plan.md 逐条翻译成完整的 gen.cpp 和 validator.cpp。\n"
-        "【分工】你只负责实现；禁止重新设计 edge_cases / API / 预算；按第 8 节「实现思路」落地。\n"
-        "【冲突原则】若 plan 第 5/8 节与第 1 节输入格式或标程读入矛盾"
+        "【分工】你只负责实现；禁止重新设计 edge_cases / API / 预算；"
+        "按第 5/6 节落地，第 8 节仅为短模板顺序提示。\n"
+        "【冲突原则】若 plan 第 5 节与第 1 节输入格式或标程读入矛盾"
         "（例如要求 gen 打印答案/失败文案/排列），以第 1 节 + 标程读入为准，只打印输入。\n\n"
         "【content 书写 · 必读】write_gen / write_validate 的 arguments 必须含完整 content"
         "（从 #include 到 main 结尾 }）；禁止空调用、半截、摘要；宜短而全，防止 JSON 截断"
@@ -774,7 +775,7 @@ def _build_coder_task(
         "1. 只 read_file('gen_plan.md') 一次；range.json 已在上方，禁止再读。\n"
         "2. 首轮勿读 gen.cpp / validator.cpp；读完 plan 后直接 write_gen + write_validate"
         "（各自带完整 content，可并行）。\n"
-        "3. 【规格优先级】gen_plan.md 第 5/6/7/8 节 > range.json > 上方冲突对照摘要；"
+        "3. 【规格优先级】gen_plan.md 第 5/6/7 节（第 8 节为短模板）> range.json > 上方冲突对照摘要；"
         "但「gen 只打印输入」高于错误的答案输出步骤；API 另遵守系统【generator.h API】硬约束。\n"
         "4. 覆盖 plan/range 中全部 edge_cases 分支与 constraints 变量 opt"
         "（seed/index/count/type + 全部约束名）。\n"
@@ -782,7 +783,7 @@ def _build_coder_task(
         "并用 `if (type == \"random\")` / `else if (type == \"edge_xxx\")` 分支；"
         "若 plan 误写 `opt<int>(\"type\")` 或 `type == 0`，以本条为准改成 string"
         "（否则编译 no match for operator==）。\n"
-        "5. 严格按 gen_plan 第 4/7 节：小中档多样、大档与打满上界的 edge ≤K；满规模≠满状态。"
+        "5. 严格按 gen_plan 第 4/5/7 节：小中档多样、大档与打满上界的 edge ≤K；满规模≠满状态。"
         "若 plan 的 K 过大，大档仍按 ≤500 实现。\n"
         "6. validator 按 plan 第 6 节清单实现（校验输入，不校验答案）。\n"
         "7. 对每种 edge_type 做 run_gen → run_validate → run_std 三连自检。\n"
@@ -1000,12 +1001,14 @@ def run_gen_agent(
                 f"{user_prompt}\n\n"
                 "【上一次计划被判定为不完整】请严格按 8 个小节重写，保持简短"
                 f"（目标约 {PLAN_TARGET_CHARS} 字）：\n"
-                "1. 输入格式（对照标程写死）2. 范围参数 3. 多测与 sum "
+                "1. 输入格式（对照标程写死） "
+                "2. 范围参数（仅 1 行 opt+constraints） "
+                "3. 多测与 sum "
                 "4. 规模分层（含小/中/大状态密度：小宽、中半开、大≤K） "
-                "5. edge_cases（打满上界的 edge 必须 ≤K 复用；禁止一边一新状态） "
+                "5. edge_cases（每行一个；打满上界同行写 ≤K复用；禁止一边一新状态） "
                 "6. validator（ensuref 清单或 read*+readEoln+readEof） "
-                "7. 复杂度与规模预算（K≤500 默认、禁止 K>5000/数组长度假预算；小中档多样+大档控 K） "
-                "8. 实现思路（4～6 条短步骤：引用第 5/6 节，勿复述 edge 表；opt/type 一句即可）"
+                "7. 复杂度预算（仅 O(...)+瓶颈一句+K=整数≤500；禁止逐 edge） "
+                "8. 实现思路（固定 4 行模板：include / 全 opt / random+引用第5节 / validator+自检；禁止展开 edge）"
                 f"{multi_retry}"
             )
             try:
@@ -1019,9 +1022,10 @@ def run_gen_agent(
             retry2 = (
                 f"{user_prompt}\n\n"
                 "【仍不合格】必须同时满足：\n"
-                "- 第 4 节写清小档放宽 / 中档半开 / 大档≤K；\n"
-                "- 第 7 节 K=具体整数且 K≤500（禁止 K=500000、禁止由数组长度决定 K）；\n"
-                "- 打满规模上界的 edge 用有限域复用，唯一状态≤K；\n"
+                "- 第 2 节仅 1 行；第 4 节写清小档放宽 / 中档半开 / 大档≤K；\n"
+                "- 第 5 节打满上界的 edge 同行写 ≤K复用；\n"
+                "- 第 7 节只写 O(...)+瓶颈+K=具体整数且 K≤500（禁止逐 edge、禁止数组长度假预算）；\n"
+                "- 第 8 节固定 4 行模板，禁止展开 edge；\n"
                 "- 保留 8 节与 readEoln/readEof / include。\n"
                 f"目标约 {PLAN_TARGET_CHARS} 字；只输出合格 Markdown 计划。"
             )
@@ -1038,9 +1042,9 @@ def run_gen_agent(
             )
             compress_prompt = (
                 "请把下面的 gen_plan 压缩为更短 Markdown，保留全部 8 个小节与每个 edge_case 一行映射，"
-                "尤其保留第 4 节状态密度分层、第 6 节 ensuref/readEoln/readEof、"
-                "第 7 节 O(...) 与 K≤500（小中档多样+大档控 K；禁止改成数组长度/与规模同阶假预算）。"
-                "第 8 节只保留短步骤并【删除】对第 5 节 edge 表的逐条复述、删除大段 opt/type 示例代码"
+                "尤其保留第 4 节状态密度分层、第 5 节打满上界的 ≤K复用、第 6 节 ensuref/readEoln/readEof、"
+                "第 7 节仅 O(...) 与 K≤500（禁止逐 edge；禁止改成数组长度/与规模同阶假预算）。"
+                "第 2 节压成 1 行；第 8 节压成固定 4 行模板并【删除】一切 edge 展开与 opt/type 示例代码"
                 "（改为一句：分支前全 opt + string type，细则见 Coder 模板）。"
                 f"全文控制在约 {PLAN_TARGET_CHARS} 字以内（软上限 {PLAN_SOFT_MAX_CHARS}）。"
                 "删除复述、伪代码和空话；只输出压缩后的计划。\n\n"

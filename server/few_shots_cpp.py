@@ -84,6 +84,7 @@ CPP_TREE_EXAMPLE = r"""
 数据范围：n in [2,1e5]，本范例 15 组（实际 count 由覆盖需求自定，不得小于 15），覆盖链、菊花、随机树、平衡二叉树、n=2；其余组 n 按 index 在 [2,1e5] 分层。
 说明：树结构优先用 generator.h（Chain/Flower/Tree）：必须先 .gen()，再 cout << tree；
 自定义输出用 tree.edges()（不是 get_edges）；严禁 .shuffle()。
+【点编号】默认 begin=1；手写边全程 1-based；rnd.perm(n) 重标号必须 +1；禁止输出点号 0。
 仍须 registerGen 与 --seed/--type/--index/--count。
 
 range.json:
@@ -174,9 +175,14 @@ CPP_GRAPH_EXAMPLE = r"""
 - edge_cases 名字与构造策略跟本题走，不要机械照搬 connected_tree/complete/path/star。
 - generator.h 的 API 用法（.gen() / .edges()）可参考；输入格式与图语义不可照搬。
 
+【点编号硬约束 — 写图/树边必守】
+- 能用 generator.h（Graph/Tree/Chain/Flower/…）就用；默认 begin=1，e.u()/e.v() 可直接输出。
+- 必须手写时：内部全程 1-based（采样 rnd.next(1,n)；路径边 i↔i+1）；禁止输出点号 0。
+- 随机重标号：rnd.perm(n) 是 0..n-1，映射必须 +1（或用 rand_p(n,1)），再输出 label[u]/label[v]。
+
 题面（范例题）：给定 n 个点 m 条边的无向图（无自环无重边），判断是否连通。
 说明：树/链/菊花优先用 generator.h：先 .gen()，再 .edges()。稀疏随机边用 unordered_set 采样并设尝试上限。严禁枚举 O(n^2) 边池。
-输入格式（本范例为单测）：第 1 行 n m；接下来 m 行每行 u v。
+输入格式（本范例为单测）：第 1 行 n m；接下来 m 行每行 u v（点编号 1..n）。
 （若真实题目多测：先输出 T，再重复 T 组「n m + 边」——以标程为准。）
 输出格式：YES 或 NO。
 数据范围：n in [1,1000]，m in [0,min(3000,n*(n-1)/2)]；本范例 count=15（实际由覆盖需求自定，≥15）。
@@ -206,7 +212,7 @@ int pickSized(int lo, int hi) {
     if (b > hi) b = hi;
     return rnd.next((int)a, (int)b);
 }
-// 无自环无向边；n=1 或无法再采时停止，禁止死循环
+// 无自环无向边；点号全程 1..n；n=1 或无法再采时停止，禁止死循环
 void sampleUndirected(int n, int m, vector<pair<int,int>>& edges) {
     if (n <= 1 || m <= 0) return;
     long long maxe = 1LL * n * (n - 1) / 2;
@@ -215,13 +221,20 @@ void sampleUndirected(int n, int m, vector<pair<int,int>>& edges) {
     used.reserve(m * 2);
     int tries = 0, lim = max(100, m * 40);
     while ((int)edges.size() < m && tries++ < lim) {
-        int u = rnd.next(1, n), v = rnd.next(1, n);
+        int u = rnd.next(1, n), v = rnd.next(1, n);  // 禁止 rnd.next(0, n-1)
         if (u == v) continue;
         if (u > v) swap(u, v);
         long long key = (long long)u * (n + 1) + v;
         if (!used.insert(key).second) continue;
         edges.push_back({u, v});
     }
+}
+// 可选：随机重标号。rnd.perm 为 0..n-1，必须 +1 映射到 1..n
+void relabelEdges(int n, vector<pair<int,int>>& edges) {
+    vector<int> p = rnd.perm(n);  // 0..n-1
+    vector<int> label(n + 1);
+    for (int i = 0; i < n; i++) label[i + 1] = p[i] + 1;
+    for (auto &e : edges) e = {label[e.first], label[e.second]};
 }
 int main(int argc, char* argv[]) {
     registerGen(argc, argv, 1);
@@ -234,7 +247,7 @@ int main(int argc, char* argv[]) {
         // 本范例禁止自环：n=1 时 m 必须为 0
         n = 1;
     } else if (typ == "connected_tree" && n >= 2) {
-        unweight::Tree t(n); t.gen();
+        unweight::Tree t(n); t.gen();  // begin=1，e.u()/e.v() 已是 1..n
         for (auto &e : t.edges()) edges.push_back({e.u(), e.v()});
     } else if (typ == "path" && n >= 2) {
         unweight::Chain t(n); t.gen();
@@ -260,8 +273,10 @@ int main(int argc, char* argv[]) {
             for (int v = u + 1; v <= n; v++)
                 edges.push_back({u, v});
     } else {
+        // 能用 Graph 时优先：unweight::Graph g(n,m); g.set_connect(true); g.gen(); …
         int m = (n <= 1) ? 0 : rnd.next(0, min(n, 3000));
         sampleUndirected(n, m, edges);
+        if (n >= 2 && !edges.empty() && rnd.next(0, 1)) relabelEdges(n, edges);
     }
     // 本范例单测：第一行 n m。多测题请先 printf T，再循环输出各组。
     printf("%d %d\n", n, (int)edges.size());
@@ -898,8 +913,12 @@ CPP_WEIGHTED_GRAPH_EXAMPLE = r"""
 - 多测则先输出 T；有向/自环/负权则改采样与 validator，勿照抄本范例。
 - edge_n1：本范例无自环 → n=1 时 m=0；若本题允许自环可改为 (1,1,w)。
 
+【点编号硬约束 — 写图/树边必守】
+- 能用 generator.h 就用（默认 begin=1）；手写边全程 1-based（rnd.next(1,n)）；禁止输出点号 0。
+- rnd.perm(n) 映射必须 +1（或 rand_p(n,1)）后再作重标号。
+
 题面（范例题）：给定 n 点 m 边带权无向图，输出边权之和。
-输入格式（单测）：第 1 行 n m；接下来 m 行 u v w。
+输入格式（单测）：第 1 行 n m；接下来 m 行 u v w（点编号 1..n）。
 输出格式：一个整数。
 数据范围：n in [1,1000]，m in [0,3000]，w in [1,1e9]；本范例 count=15（实际由覆盖需求自定，≥15）。
 
