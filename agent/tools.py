@@ -1467,8 +1467,9 @@ def run_self_check(
         elif timeoutish:
             fix_hint = (
                 "请根据 FAIL 修复 gen/validator 后重新 write_* 再 run_self_check。"
-                "【TIMEOUT/MEMORY】优先对照 gen_plan「有效状态预算」降低该 type 在最大档的状态密度"
-                "（唯一顶点/字符串/权值种类等）；满 constraints 上界 ≠ 状态数拉满；勿只靠加时限/内存。"
+                "【TIMEOUT/MEMORY】仅把该 type（及同类最大档）有效状态压到 K≤200，"
+                "用有限域复用凑满规模；保留小中档多样；禁止略微收窄取值区间；"
+                "满 constraints 上界 ≠ 状态数拉满；勿只靠加时限/内存。"
             )
         else:
             fix_hint = (

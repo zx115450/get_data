@@ -335,7 +335,8 @@ def build_gen_fixer_task(
         "3. 用 write_gen / write_validate 写完整修复后源码，编译失败时继续修正；"
         "不得推翻 plan 的 edge_cases/API 选型"
         "（但若 plan 第 5/8 节误把答案当 gen 输出，以第 1 节输入格式为准修正 gen）。"
-        "TIMEOUT 时按 gen_plan 有效状态预算降密度（满规模≠满状态）。\n"
+        "TIMEOUT 时仅压 FAIL type/同类最大档到 K≤200（有限域复用；保留小中档多样；"
+        "禁止略微收窄取值区间；满规模≠满状态）。\n"
         "4. 调用 run_self_check() 验证；通过后调 finish(summary) 说明改动点与根因。\n"
         f"这是第 {attempt}/{max_attempts} 轮自动修复；若本轮仍失败，将回退基线并中止本阶段。",
     ]
@@ -383,7 +384,7 @@ def build_coder_rewrite_task(
         "1. 先 read_file(\"gen_plan.md\") 一次（range.json 已在 task 中，不必再读）。\n"
         "2. 再 read_file 当前 gen.cpp / validator.cpp 了解失败实现。\n"
         "3. 按 plan 重写完整 gen.cpp / validator.cpp，可一次 write_gen + write_validate 同时写；"
-        "遵守有效状态预算（满规模≠满状态）。\n"
+        "遵守第 4/7 节分层（小中档多样、大档≤K）；若因 TIMEOUT 重写，仅压相关最大档到 K≤200。\n"
         "4. 立即调用 run_self_check()；通过则 finish。外层会对 TIMEOUT 再强制完整自检，tiny/fast 通过不算交付。\n"
         "这是骨架重写；请按 FAIL 行（尤其 TIMEOUT 的 type/index）写对。",
     ]
@@ -505,7 +506,7 @@ def build_batch_fixer_task(
         "2. 根据失败类型判断根因：\n"
         "   - validate FAILED：优先修 gen，必要时再调整 validator。\n"
         "   - gen FAILED / TIMEOUT / MEMORY：修 gen。\n"
-        "   - std FAILED / TIMEOUT / MEMORY：修 gen 降低规模 / 对齐格式。\n"
+        "   - std FAILED / TIMEOUT / MEMORY：修 gen——TIMEOUT 时仅压最大档到 K≤200，保留小中档多样。\n"
         "3. 用 write_gen 和 / 或 write_validate 写完整源码。\n"
         "4. 禁止修改 range.json；不要改 count、edge_cases、constraints。\n"
         "5. 改完后必须调用 run_self_check() 做强化自检，确保返回 OK。\n"

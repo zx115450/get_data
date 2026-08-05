@@ -1,51 +1,41 @@
 {
   "count": 27,
   "constraints": {
-    "T": [
+    "t": [
       1,
-      10000
+      20000
     ],
     "n": [
       2,
       200000
     ],
+    "m": [
+      1,
+      200000
+    ],
     "k": [
       1,
-      200000
+      199999
     ],
-    "s": [
+    "degree": [
       1,
-      200000
-    ],
-    "t": [
-      1,
-      200000
-    ],
-    "a": [
-      1,
-      1000000000
-    ],
-    "b": [
-      1,
-      1000000000
-    ],
-    "sum_n": [
-      1,
-      500000
+      3
     ]
   },
   "edge_cases": [
     "edge_n2",
     "edge_nmax",
-    "chain",
-    "star",
+    "edge_m_min",
+    "edge_m_max",
     "edge_Tmax"
   ],
   "time_limit_ms": 5000,
   "memory_limit_mb": 1024,
   "special_constraints": [
-    "图连通",
-    "图是树（n-1 条边、无环）"
+    "图是简单连通无向图，无自环无重边",
+    "所有顶点度数均不超过3",
+    "特殊顶点互不相同且非空",
+    "所有测试用例的n之和与m之和均不超过2e5"
   ],
-  "problem_type": "tree"
+  "problem_type": "graph"
 }

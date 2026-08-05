@@ -93,6 +93,8 @@ copy .env.example .env
 LLM_API_KEY=你的DeepSeek密钥
 LLM_BASE_URL=https://api.deepseek.com/v1
 LLM_MODEL=deepseek-chat
+# 可选：单次输出上限（默认 16384），减轻 write_gen 工具参数被截断
+# LLM_MAX_TOKENS=16384
 
 # Embedding（和聊天分开时再填）
 EMBEDDING_API_KEY=你的通义密钥

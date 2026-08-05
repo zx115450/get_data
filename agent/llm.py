@@ -165,6 +165,26 @@ _MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
 _EMBEDDING_MODEL = os.getenv("LLM_EMBEDDING_MODEL", "text-embedding-3-small")
 
 
+def _max_tokens() -> int | None:
+    """聊天补全 max_tokens（含 tool arguments）。
+
+    环境变量 LLM_MAX_TOKENS：正整数启用；0 或不设有效值则用默认 16384；
+    设为负数表示不传该参数（沿用服务商默认，易截断超长 write_gen）。
+    """
+    raw = (os.getenv("LLM_MAX_TOKENS") or "").strip()
+    if raw == "":
+        return 16384
+    try:
+        n = int(raw)
+    except ValueError:
+        return 16384
+    if n < 0:
+        return None
+    if n == 0:
+        return 16384
+    return n
+
+
 def embedding_configured() -> bool:
     """是否单独配置了 Embedding 服务。
 
@@ -355,13 +375,18 @@ def chat(messages: list[dict], tool_schemas: list[dict]) -> list[Action]:
     """
     compact_messages(messages)
 
+    create_kwargs: dict[str, Any] = {
+        "model": _MODEL,
+        "messages": messages,
+        "tools": tool_schemas,
+        "tool_choice": "auto",
+    }
+    mt = _max_tokens()
+    if mt is not None:
+        create_kwargs["max_tokens"] = mt
+
     try:
-        resp = _chat_client.chat.completions.create(
-            model=_MODEL,
-            messages=messages,
-            tools=tool_schemas,
-            tool_choice="auto",
-        )
+        resp = _chat_client.chat.completions.create(**create_kwargs)
     except Exception as e:
         # 把 413 等网关错误说清楚，方便排查
         err = str(e)
@@ -502,14 +527,18 @@ def parse_tool_arguments(raw: str) -> dict:
 
 def chat_text(system: str, user: str, temperature: float = 0.3) -> str:
     """无工具的纯文本补全，用于题面简化 / 美化等。"""
-    resp = _chat_client.chat.completions.create(
-        model=_MODEL,
-        messages=[
+    create_kwargs: dict[str, Any] = {
+        "model": _MODEL,
+        "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        temperature=temperature,
-    )
+        "temperature": temperature,
+    }
+    mt = _max_tokens()
+    if mt is not None:
+        create_kwargs["max_tokens"] = mt
+    resp = _chat_client.chat.completions.create(**create_kwargs)
     _current_usage().add_chat(getattr(resp, "usage", None))
     _notify_usage()
     return (resp.choices[0].message.content or "").strip()

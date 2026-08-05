@@ -1,58 +1,66 @@
-#include<bits/stdc++.h>
+#include <bits/stdc++.h>
 using namespace std;
-using ll=long long;
-const ll inf=1e18;
-int T;
-void dijkstra(int s,int t,vector<ll>& dis,vector<vector<pair<ll,int>>>& g)
-{
-    priority_queue<pair<ll,int>,vector<pair<ll,int>>,greater<>> pq;
-    pq.push({dis[s]=0,s});
-    while(!pq.empty())
-    {
-        auto [cd,cx]=pq.top();pq.pop();
-        if(cd>dis[cx]) continue;
-        for(auto [w,nx]:g[cx])
-        {
-            if(dis[cx]+w<dis[nx])
-            {
-                dis[nx]=dis[cx]+w;
-                pq.push({dis[nx],nx});
-            }
-        }
-    }
-}
-int main()
-{
-    ios::sync_with_stdio(false),cin.tie(nullptr),cout.tie(nullptr);
-    cin>>T;
-    while(T--)
-    {
-        int n,k,s,t;cin>>n>>k>>s>>t;
-        vector<vector<pair<ll,int>>> g(2*n+2);
-        vector<ll> dis(2*n+2,inf);
-        while(k--)
-        {
-            int p;cin>>p;
-            g[p].push_back({0,p+n});
-            g[p+n].push_back({0,p});
-        }
-        for(int i=1;i<n;i++)
-        {
-            int u,v;ll a,b;cin>>u>>v>>a>>b;
-            g[u].push_back({a,v});
-            g[v].push_back({a,u});
-            g[u+n].push_back({b,v+n});
-            g[v+n].push_back({b,u+n});
-        }
-        dijkstra(s, t,dis,g);
-        cout<<min(dis[t],dis[t+n])<<"\n";
-    }
-    return 0;
+#define int long long
+#define endl '\n'
+void man() {
+	int n,m,k; cin>>n>>m>>k;
+	vector<vector<int>> g(n+1);
+	for (int i=1;i<=m;i++) {
+		int u,v; cin>>u>>v;
+		g[u].push_back(v);
+		g[v].push_back(u);
+	}
+	set<int> st;
+	vector<int> p(n+1);
+	deque<int> dq;
+	set<int> ans;
+	vector<int> sti(n+1);
+	for (int i=1;i<=k;i++) {
+		int x; cin>>x;
+		st.insert(x);
+		dq.push_back(x);
+	}
+	
+	while(!dq.empty()){
+		int x = dq.front();
+		dq.pop_front();
+		if (sti[x] == 1) {
+			continue;
+		}
+		sti[x] = 1;
+		for (int y : g[x]) {
+			if (sti[y]== 1) {
+				continue;
+			}
+			if (!st.count(y)) ans.insert(y);
+			p[y]++;
+			if (!st.count(y) && p[y] >= 2) {
+				dq.push_back(y);
+			}
+		}
+	}
+	
+	cout<<ans.size()<<endl;
+	for (int x : ans) {
+		cout<<x<<' ';
+	} cout<<endl;
+	
+	
+	
+	
 }
 
-/**
-* @runId: 622172
-* @language: C++ 20 With O2
-* @author: 微风啊
-* @submitTime: 2026-07-19 20:13:59
-*/
+
+signed main() {
+	cout << fixed << setprecision(2);
+	ios::sync_with_stdio(false);
+	cin.tie(0);
+	cout.tie(0);
+	int T=1;
+//	init();
+	cin >> T;
+	while (T--) {
+		man();
+	}
+	return 0;
+}	

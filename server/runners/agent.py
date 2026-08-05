@@ -1,5 +1,6 @@
 """Range / Gen Agent 阶段。"""
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -218,10 +219,10 @@ def _run_range_only_agent(
         f"{struct_hint_block}"
         f"{special_block}"
         f"\ncount 由你根据覆盖需求自定（常规样例数），不得小于 {MIN_REGULAR_COUNT}；"
-        f"若需组数×规模×数值小中大全组合，建议 ≥27；"
+        f"统一规则 count ≥ max(15, 3^k)（k=小中大轴数；三维即 ≥27，不要写建议≥30）；"
         f"若上方有【特殊样例描述】，count 仍只写常规数（特殊组由后续方案叠加）。"
         f"constraints 覆盖题面中的规模变量（如 n、T、m）。"
-        f"edge_cases 用简短英文标识符，总数 4～6 个即可（含最小/最大规模与关键结构边界）。"
+        f"edge_cases 总数 4～6：优先 edge_n1/edge_nmax，其余给 special_constraints 关键结构（可合并，勿超 6）。"
         f"{action_line}"
         f"务必填写 special_constraints 字段（即使为空数组也要写）。\n"
         f"务必填写 problem_type（与题面一致的英文标识符）。\n"
@@ -604,7 +605,7 @@ def _build_planner_task(
         f"\n题型: {eff_type}\n"
         "\n要求：edge_cases 每个一行（只描述如何打印【本题输入】）；"
         "第 6 节列出 ensuref 清单或写明 read*+readEoln+readEof；"
-        "第 7 节强制写清「有效状态预算」；"
+        "第 7 节必须写出 K≤500（禁止 K>5000/数组长度假预算）+ 小中档多样/大档控 K 分层；"
         "第 8 节 4～6 条短步骤（random 解轴 + 引用第 5/6 节；禁止复述 edge 表；"
         "opt/type 样板由 Coder 固定模板提供，plan 只写一句约束即可）；"
         "第 1 节输入格式只以标程为准；few-shot 只借 registerGen/opt/readEoln 等通用骨架，"
@@ -631,6 +632,34 @@ def _plan_looks_complete(plan_text: str) -> bool:
         or ("状态上界" in plan_text)
         or (("预算" in plan_text) and ("状态" in plan_text or "池" in plan_text))
     )
+    # 抽出明确写出的 K=数字；过大视为假预算（数组上限伪装）
+    k_vals = [int(x) for x in re.findall(r"K\s*[=≤＜<]\s*(\d+)", plan_text, flags=re.I)]
+    has_numeric_k = bool(k_vals) or bool(
+        re.search(
+            r"(?:唯一[^。\n]{0,20}\d{2,})"
+            r"|(?:上界[^。\n]{0,12}\d{2,})"
+            r"|(?:有限域[^。\n]{0,12}\d{2,})"
+            r"|(?:池[^。\n]{0,8}\d{2,})",
+            plan_text,
+            re.I,
+        )
+    )
+    k_too_large = any(k > 5000 for k in k_vals)
+    fake_budget = bool(
+        re.search(
+            r"(理论全集|与(?:输出)?规模同阶|与\s*m\s*同阶"
+            r"|≤\s*2\s*[×x*]?\s*m|<=\s*2\s*[×x*]?\s*m|≤\s*2m|<=\s*2m"
+            r"|刚好(?:装进|在\s*K)|数组(?:长度|上界|大小).{0,12}(?:决定|取作|作为)\s*K"
+            r"|K\s*[=≤＜<]\s*(?:数组|上界))",
+            plan_text,
+            re.I,
+        )
+    )
+    # 小中档多样 + 最大档控 K：需有分层信号
+    has_tier = bool(
+        re.search(r"(小档|中档|大档)", plan_text)
+        and re.search(r"(有限域|复用|状态域|状态密度|半开|放宽)", plan_text)
+    )
     # 第 8 / API：include 决策
     has_include = (
         "testlib" in text
@@ -647,7 +676,17 @@ def _plan_looks_complete(plan_text: str) -> bool:
         or ("registergen" in text)
         or ("write_gen" in text)
     )
-    return has_complexity and has_state_budget and has_include and has_val and has_impl
+    return (
+        has_complexity
+        and has_state_budget
+        and has_numeric_k
+        and (not k_too_large)
+        and (not fake_budget)
+        and has_tier
+        and has_include
+        and has_val
+        and has_impl
+    )
 
 
 def _plan_too_long(plan_text: str) -> bool:
@@ -743,7 +782,8 @@ def _build_coder_task(
         "并用 `if (type == \"random\")` / `else if (type == \"edge_xxx\")` 分支；"
         "若 plan 误写 `opt<int>(\"type\")` 或 `type == 0`，以本条为准改成 string"
         "（否则编译 no match for operator==）。\n"
-        "5. 严格按 gen_plan 第 7 节「有效状态预算」：满规模≠满状态。\n"
+        "5. 严格按 gen_plan 第 4/7 节：小中档多样、大档与打满上界的 edge ≤K；满规模≠满状态。"
+        "若 plan 的 K 过大，大档仍按 ≤500 实现。\n"
         "6. validator 按 plan 第 6 节清单实现（校验输入，不校验答案）。\n"
         "7. 对每种 edge_type 做 run_gen → run_validate → run_std 三连自检。\n"
         "8. 最后调用 run_self_check()，通过后 finish。\n"
@@ -960,9 +1000,11 @@ def run_gen_agent(
                 f"{user_prompt}\n\n"
                 "【上一次计划被判定为不完整】请严格按 8 个小节重写，保持简短"
                 f"（目标约 {PLAN_TARGET_CHARS} 字）：\n"
-                "1. 输入格式（对照标程写死）2. 范围参数 3. 多测与 sum 4. 规模分层 "
-                "5. edge_cases（每名一行可执行构造）6. validator（ensuref 清单或 read*+readEoln+readEof） "
-                "7. 复杂度与规模预算（必须含有效状态上界） "
+                "1. 输入格式（对照标程写死）2. 范围参数 3. 多测与 sum "
+                "4. 规模分层（含小/中/大状态密度：小宽、中半开、大≤K） "
+                "5. edge_cases（打满上界的 edge 必须 ≤K 复用；禁止一边一新状态） "
+                "6. validator（ensuref 清单或 read*+readEoln+readEof） "
+                "7. 复杂度与规模预算（K≤500 默认、禁止 K>5000/数组长度假预算；小中档多样+大档控 K） "
                 "8. 实现思路（4～6 条短步骤：引用第 5/6 节，勿复述 edge 表；opt/type 一句即可）"
                 f"{multi_retry}"
             )
@@ -970,6 +1012,23 @@ def run_gen_agent(
                 plan_text = chat_text(system_prompt, retry_prompt, temperature=0.3)
             except Exception as e:
                 job_store.add_progress(job, f"【Plan】Planner 补写失败: {type(e).__name__}: {e}")
+
+        # 补写后仍不完整：再补一次（避免把 K=数组上限等假预算交给 Coder）
+        if plan_text.strip() and not _plan_looks_complete(plan_text):
+            job_store.add_progress(job, "【Plan】补写后仍不完整，再补一次（强制 K≤500 分层）")
+            retry2 = (
+                f"{user_prompt}\n\n"
+                "【仍不合格】必须同时满足：\n"
+                "- 第 4 节写清小档放宽 / 中档半开 / 大档≤K；\n"
+                "- 第 7 节 K=具体整数且 K≤500（禁止 K=500000、禁止由数组长度决定 K）；\n"
+                "- 打满规模上界的 edge 用有限域复用，唯一状态≤K；\n"
+                "- 保留 8 节与 readEoln/readEof / include。\n"
+                f"目标约 {PLAN_TARGET_CHARS} 字；只输出合格 Markdown 计划。"
+            )
+            try:
+                plan_text = chat_text(system_prompt, retry2, temperature=0.2)
+            except Exception as e:
+                job_store.add_progress(job, f"【Plan】第二次补写失败: {type(e).__name__}: {e}")
 
         # 过长：压缩一次（仍须保留 8 节，含复杂度预算与可执行决策）
         if _plan_too_long(plan_text):
@@ -979,7 +1038,8 @@ def run_gen_agent(
             )
             compress_prompt = (
                 "请把下面的 gen_plan 压缩为更短 Markdown，保留全部 8 个小节与每个 edge_case 一行映射，"
-                "尤其保留第 6 节 ensuref/readEoln/readEof、第 7 节 O(...) 与「有效状态预算」。"
+                "尤其保留第 4 节状态密度分层、第 6 节 ensuref/readEoln/readEof、"
+                "第 7 节 O(...) 与 K≤500（小中档多样+大档控 K；禁止改成数组长度/与规模同阶假预算）。"
                 "第 8 节只保留短步骤并【删除】对第 5 节 edge 表的逐条复述、删除大段 opt/type 示例代码"
                 "（改为一句：分支前全 opt + string type，细则见 Coder 模板）。"
                 f"全文控制在约 {PLAN_TARGET_CHARS} 字以内（软上限 {PLAN_SOFT_MAX_CHARS}）。"
@@ -995,7 +1055,13 @@ def run_gen_agent(
 
         if plan_text.strip():
             plan_path.write_text(plan_text, encoding="utf-8")
-            plan_summary = f"已生成 gen_plan.md ({len(plan_text)} 字符)"
+            if _plan_looks_complete(plan_text):
+                plan_summary = f"已生成 gen_plan.md ({len(plan_text)} 字符)"
+            else:
+                plan_summary = (
+                    f"已生成 gen_plan.md ({len(plan_text)} 字符，仍缺分层/K 约束，"
+                    "Coder 须按系统 PERF：大档 K≤500、小中档多样)"
+                )
             job_store.add_progress(job, plan_summary)
         else:
             plan_summary = "Planner 未生成 gen_plan.md，Coder 将回退使用完整 task"
