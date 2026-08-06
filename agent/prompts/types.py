@@ -1,0 +1,153 @@
+"""Problem-type prompt modules."""
+from __future__ import annotations
+
+TYPE_TREE = """【树图题型模块 — tree / weighted_tree】
+树题优先用 ACM-generator（#include "generator.h"；using namespace generator::all）：
+  【硬门禁】类名必须带权重前缀。all 不会引入全局 Chain/Flower/Tree。
+  正确：unweight::Tree / unweight::Chain / unweight::Flower / unweight::FlowerChain …
+  错误：Chain ch(n); Flower fl(n);  → was not declared in this scope
+  权重前缀：unweight:: / edge_weight::T / node_weight::T / both_weight::NodeT,EdgeT。
+  按边界选型与关键方法：
+    unweight::Tree t(n)：一般随机树；use_random_father() 或 use_pruefer()；set_is_rooted / set_root
+    unweight::Chain ch(n) / unweight::Flower fl(n)：链 / 菊花（星）
+    unweight::FlowerChain fc(n)：set_flower_size(k) 或 set_flower_chain_size(fs, cs)
+    unweight::HeightTree ht(n)：强制有根；set_height(h)；禁用 set_is_rooted
+    unweight::MaxDegreeTree md(n)：set_max_degree(d)
+    MaxSonTree / DegreeTree / SonTree：同样必须 unweight:: 或对应权重前缀
+  流程：构造 →（可选 set_begin_node(1)）→ gen() → cout 或遍历 edges()
+  【默认输出可用时】
+      unweight::Tree t(n); t.gen(); cout << t << "\\n";
+  【对齐标程 · 多字段边】禁止盲 cout << t：
+      unweight::Tree t(n); t.set_begin_node(1); t.gen();
+      for (auto &e : t.edges()) printf("%d %d %d %d\\n", e.u(), e.v(), a, b);
+  【类型】Chain/Flower 与 Tree 并列，不可互相当 Tree&；
+  共享边输出用 [&](auto &t){ t.gen(); for (auto &e : t.edges()) …; }，或分支内联。
+  【单边权】
+      edge_weight::Tree<int> t(n);
+      t.set_edges_weight_function([](){ return rnd.next(1, 1000000000); });
+      t.gen(); cout << t;
+  【多权字段 a,b】用 unweight:: + 自己采样打印，不要虚构 weight::。
+  开关：set_output_node_count(false) / set_output_root(false) / set_begin_node(0或1)。
+  【规模头】默认「n → 边」仅当标程如此；标程无规模头时必须关输出或手写边。
+  【严禁】裸 Chain/Flower/Tree；weight:: / set_weight_limit / get_edges() / t.shuffle() / _edges / rnd.next(...,1e9)。
+  仍须 registerGen + --seed/--type/--index/--count；禁止 fill_inputs/hack/init_gen。
+
+树图默认按「无自环、无重边」处理；题面允许则另说。
+树 validator：边数=n-1、无自环、无重边、连通、无环；带权再验权值范围。
+"""
+
+TYPE_GRAPH = """【图题型模块 — graph / weighted_graph】
+优先 ACM-generator（能用 Graph/Tree/Chain/… 就用）；仅库表达不了的约束（如度数上限）再手写边。
+输入格式以标程为准。using namespace generator::all;
+  【硬门禁】类名必须带前缀：unweight::Graph / unweight::DAG / …；禁止裸 Graph。
+  结构选型与方法：
+    unweight::Graph g(n,m)：通用图；set_direction / set_multiply_edge / set_self_loop / set_connect
+    unweight::BipartiteGraph(n,m[,left])：set_left / set_left_right / rand_left / set_different_part；
+      首行格式 use_format_node|left_right|node_left|node_right（对齐标程）；禁 set_direction/self_loop
+    unweight::DAG(n,m)：有向无环；禁 set_direction/self_loop
+    unweight::CycleGraph / WheelGraph / GridGraph(n,m)：网格用 set_row / set_row_column / rand_row
+    unweight::PseudoTree / PseudoInTree / PseudoOutTree：基环树族
+    unweight::Cactus(n,m)：无向连通无重边无自环
+    unweight::Forest(n,m)：add_tree_size / set_trees_size({…})
+    unweight::StartReachableGraph：单源可达
+  边数：min_edge_count() / max_edge_count() / rand_edge_count(lo,hi) /
+    set_edge_count(min(m_limit, max_edge_count()))；严禁 O(n^2) 建边池
+  【默认输出】
+      unweight::Graph g(n, m); g.gen(); cout << g << "\\n";  // n m →（点权）→ m 行边
+      set_output_node_count / set_output_edge_count 可关首行字段
+  【规模头】默认「n m → 边」仅当标程如此；标程无规模头时禁止套用默认头，须关输出或手写边。
+  【多字段边】for (auto &e : g.edges()) 自行打印；【单边权】edge_weight::Graph<int> + set_edges_weight_function + e.w()
+  【点编号硬约束】题面点号通常为 1..n：禁止输出 0。
+    Graph/Tree 默认 begin=1，e.u()/e.v() 可直接打印。
+    手写边：内部全程 1-based（rnd.next(1,n)；路径边用 i↔i+1）；勿 for(i=0;i<n)。
+    随机重标号：rnd.perm(n) 得到 0..n-1，映射必须 +1（或 rand_p(n,1)）；label[u]/label[v] 输出。
+  【严禁】裸 Graph/DAG/Chain；weight:: / set_weight_limit / get_edges() / shuffle / _edges / rnd.next(...,1e9)。
+  仍须 registerGen + seed/type/index/count；禁止 fill_inputs/hack/init_gen。
+
+【多测】标程先读 T：首行必须是 T；仅此时可写 edge_Tmax（可选 big_T_small_n）；禁 edge_T1。
+【n=1】禁自环 → m=0（可空）；允许自环 → (1,1,w)。采样须有尝试上限。
+【完全图】控制 n 使边数 ≤ m 上界。空边集/空文件按约束允许。
+【复杂度】遵守 gen_plan 第 4/7 节分层：小中档可多样，大档与满边上界 ≤K；满边/满询问 ≠ 唯一顶点/唯一键拉满。
+
+图性质以题面为准；validator 校验同题面（u/v 用 readInt(1,n)）。
+"""
+
+TYPE_GEO = """【几何题型模块 — geometry】
+优先 ACM-generator（二维）：using namespace generator::all;
+  图形类：ConvexHull<T> / SimplePolygon<T> / Triangle<T>
+    构造：Xxx(n, xL,xR,yL,yR)；或 Xxx(n) 后再设范围
+    范围：set_xy_limit(xL,xR,yL,yR) 或 set_xy_limit("[-1e9,1e9]")；
+          set_x_limit / set_y_limit（数值或范围字符串）
+    生成：gen()；ConvexHull 可用 set_max_try(k)（默认 10，失败抛异常）
+    输出：cout << obj → 默认先 n 再 n 行 x y；
+          set_output_node_count(false) 可去掉首行 n；
+          Triangle 特例：一行 x1 y1 x2 y2 x3 y3
+  单点：Point<T> p; p.rand(L,R) / p.rand(xL,xR,yL,yR) / p.rand(format);
+        或 rand_point<T>(…)
+  约束：T 为有符号整型或浮点（禁 unsigned）；生成允许三点共线（非严格）。
+  【严禁】RandomPoints 类；fill_inputs/hack/init_gen。
+  仍须 registerGen + --seed/--type/--index/--count。
+
+validator：点数、坐标范围，以及题面要求的凸性/简单多边形/共线/非退化。
+"""
+
+TYPE_ARRAY = """【数组 / 序列题型模块】
+优先 testlib：vector + rnd.next(L,R)；落在 long long 内的大范围用 long long + rnd.next(-1000000000LL, 1000000000LL)。
+【超 long long】元素/权值上界超出 64 位有符号整数时：禁止 long long/__int128 采样；
+  用十进制字符串构造（rnd.next(\"[1-9][0-9]{L-1}\") 等），cout/printf 直接打串；validator 用 readToken。
+排列：rnd.perm(n)（0..n-1，按题面 +1）。
+可选 generator.h 函数（不是类）：
+  rand_vector(…) 随机数组；
+  rand_sum(k, S) / rand_sum(k,S,min_part) / rand_sum(k,S,from,to) —— 多测拆分 sum_* 优先用；
+  rand_p(n) / rand_p(n, start) 排列。
+【严禁】虚构类 Sequence / Permutation / String。type 用 string 分支。
+
+validator：长度、元素范围（≤long long 用 readLong；更大用 readToken/pattern）、单调/互异等题面约束。
+常见 edge：edge_n1, edge_nmax, all_equal, descending, all_negative, all_max_value, two_values。
+"""
+
+TYPE_STRING = """【字符串题型模块】
+优先 testlib：rnd.next(\"[a-z]{n}\") / rnd.next(\"[01]{n}\") / 逐字符 rnd.next('a','z')。
+可选 generator.h：
+  rand_string(n) / rand_string(n, LowerLetter|UpperLetter|…) /
+  rand_string(n, \"[a-e]\") / rand_string(lo, hi, format)；
+  rand_palindrome / rand_bracket_seq。
+【严禁】String(n,'a','z') 类。type 用 string 分支。
+
+validator：字符集、长度、子串/前后缀/周期等。
+常见 edge：edge_n1, edge_nmax, all_same, pattern_at_start/end, no_match, long_run, two_chars。
+"""
+
+TYPE_PERMUTATION = """【排列题型模块】
+优先 testlib：rnd.perm(n) → 0..n-1，再整体 +1 得 1..n。
+或 generator.h：rand_p(n) / rand_p(n, start)；子集排列用 unordered_set 去重采样。
+【严禁】Permutation 类。type 用 string 分支。
+
+validator：长度、范围、恰好为排列（无重复无遗漏）。
+"""
+
+TYPE_MATRIX = """【矩阵 / 网格题型模块】
+数值矩阵：testlib rnd.next 填 vector<vector<int>>。
+网格图：unweight::GridGraph g(n, m); g.set_row(r) 或 set_row_column(r,c,ignore); g.gen();
+  再 cout << g 或遍历 edges()；可 set_direction(true) 做有向网格。
+type 用 string 分支。
+
+validator：行列规模、元素范围、题面连通/对称等性质。
+"""
+
+_TYPE_MODULES = {
+    "tree": TYPE_TREE,
+    "weighted_tree": TYPE_TREE,
+    "graph": TYPE_GRAPH,
+    "weighted_graph": TYPE_GRAPH,
+    "geometry": TYPE_GEO,
+    "array": TYPE_ARRAY,
+    "string": TYPE_STRING,
+    "number_theory": TYPE_ARRAY,
+    "dp": TYPE_ARRAY,
+    "matrix": TYPE_MATRIX,
+    "range_query": TYPE_ARRAY,
+    "multi_test": TYPE_ARRAY,
+    "interactive": "",
+    "permutation": TYPE_PERMUTATION,
+}

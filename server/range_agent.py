@@ -16,7 +16,7 @@ from pipeline.gen_data import (
     normalize_range_json,
     validate_range_json,
 )
-from server.struct_hints import scan_structural_hints, scan_structural_titles
+from knowledge.struct_hints import scan_structural_hints, scan_structural_titles
 from utils.markup import to_plain_for_llm
 
 RANGE_ONLY_PROMPT = """你是出题数据规划助手。任务：根据题面与数据范围描述，只产出一份 range.json。
@@ -237,7 +237,7 @@ def propose_range_json(
     题型由 Range Agent 写入 range.json.problem_type（不单独调大模型判型；忽略 GUI 传入题型）。
     auto_discover_special：用户未填特殊提示时，仍根据标程/题面自动挖特殊方案。
     """
-    from server.few_shots import PROBLEM_TYPE_RANGE_HINT, resolve_problem_type_from_range
+    from knowledge.few_shots import PROBLEM_TYPE_RANGE_HINT, resolve_problem_type_from_range
 
     stmt = to_plain_for_llm(problem_statement)
     rng = to_plain_for_llm(data_range_desc)

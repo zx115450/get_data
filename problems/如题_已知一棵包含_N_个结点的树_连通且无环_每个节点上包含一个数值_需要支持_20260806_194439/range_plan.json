@@ -1,0 +1,23 @@
+{
+  "count": 20,
+  "constraints": {
+    "n": [
+      1,
+      250000
+    ]
+  },
+  "edge_cases": [
+    "edge_n1",
+    "edge_nmax",
+    "disconnected",
+    "chain",
+    "two_odd_vertices"
+  ],
+  "time_limit_ms": 5000,
+  "memory_limit_mb": 1024,
+  "special_constraints": [
+    "顶点为颜色字符串，边为木棍，允许多重边",
+    "要求判断无向多重图中是否存在欧拉路径（全部奇数度顶点数≤2且图连通）"
+  ],
+  "problem_type": "graph"
+}

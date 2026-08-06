@@ -17,13 +17,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from server import job_store, runner
-from server.few_shots import FEW_SHOTS
-from server.runners.resume import text_hash
-from server.few_shots_rag import (
+from storage import job_store
+from knowledge.few_shots import FEW_SHOTS
+from runners import run_job
+from runners.resume import text_hash
+from knowledge.few_shots_rag import (
     delete_corpus_item,
     get_corpus_item,
     list_corpus_items,
@@ -41,7 +39,24 @@ app = FastAPI(title="ACM 出数据后端")
 
 @app.on_event("startup")
 def _startup_sync_rag_templates():
-    """启动时同步固定 few-shot 模板到 RAG 语料（content 变更会清空旧向量）。"""
+    """启动时校验配置、恢复 job 索引、同步 RAG 模板。"""
+    try:
+        from config.settings import validate_runtime
+
+        validate_runtime(require_llm_key=True)
+        print("[config] runtime settings OK")
+    except ValueError as e:
+        # 本地缺 key 时仍允许起服务（便于打开 GUI），但打醒目警告
+        print(f"[config] WARNING: {e}")
+    try:
+        mig = job_store.migrate_legacy_gui_jobs()
+        if mig.get("merged"):
+            print(
+                f"[job_store] migrated gui/jobs → jobs/: "
+                f"{mig['merged']} job(s), {mig['files']} file(s)"
+            )
+    except Exception as e:
+        print(f"[job_store] legacy migrate skipped: {e}")
     try:
         n = job_store.load_persisted_jobs()
         if n:
@@ -199,7 +214,7 @@ def submit(req: JobRequest):
                 job_store.add_progress(job, "【取消】排队期间已取消")
                 return
             job_store.mark_job_started(job)
-            result = runner.run_job(
+            result = run_job(
                 job, req.std_code, req.lang,
                 req.problem_statement, req.data_range_desc,
                 req.problem_type,
@@ -228,7 +243,7 @@ def submit(req: JobRequest):
                         and bool(result["stats"].get("special_failed"))
                     )
                     write_success_context(
-                        Path("jobs") / job.id,
+                        job_store.JOBS_DIR / job.id,
                         job.id,
                         req.problem_statement,
                         req.std_code,
@@ -252,7 +267,19 @@ def submit(req: JobRequest):
                     job.status = job_store.JobStatus.ERROR
                     job.error = f"{type(e).__name__}: {e}"
             if job.status == job_store.JobStatus.ERROR:
-                job_store.add_progress(job, f"ERROR: {job.error}")
+                full = f"ERROR: {job.error}"
+                try:
+                    from agent.errors import format_error_for_progress, persist_error
+
+                    rel = persist_error(
+                        job_store.JOBS_DIR / job.id, full, kind="job_error", tool="job"
+                    )
+                    tip = f"\n（完整见 {rel} 与 errors/last_error.txt）" if rel else ""
+                    job_store.add_progress(
+                        job, format_error_for_progress(full) + tip
+                    )
+                except Exception:
+                    job_store.add_progress(job, full)
         finally:
             if slot:
                 job_store.release_job_slot()
@@ -288,7 +315,7 @@ def check_resume(req: ResumeCheckRequest):
                 **done_info,
             }
         # 父任务有 data.zip 但 special_failed=True：返回 partial，不能直接用 zip
-        parent_dir = Path("jobs") / prefer
+        parent_dir = job_store.JOBS_DIR / prefer
         if not parent_dir.is_dir():
             parent_dir = resume.JOBS_DIR / prefer
         if parent_dir.is_dir() and resume._is_special_failed_success(parent_dir):
@@ -327,7 +354,7 @@ def check_resume(req: ResumeCheckRequest):
 
     # 3) 失败任务续跑（显式父任务或自动扫描）
     if prefer:
-        parent_dir = Path("jobs") / prefer
+        parent_dir = job_store.JOBS_DIR / prefer
         if not parent_dir.is_dir():
             parent_dir = resume.JOBS_DIR / prefer
         if parent_dir.is_dir():
@@ -557,18 +584,24 @@ def api_merge_corpus(req: CorpusMergeRequest):
 
 
 if __name__ == "__main__":
-    import os
-
     import uvicorn
     from dotenv import load_dotenv
 
-    load_dotenv()
+    from config.settings import validate_runtime
 
-    host = os.getenv("SERVER_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    load_dotenv()
     try:
-        port = int(os.getenv("SERVER_PORT", "8000"))
-    except ValueError:
-        port = 8000
+        settings = validate_runtime(require_llm_key=True)
+    except ValueError as e:
+        print(f"ERROR: {e}")
+        print("可先运行: python main.py check-config")
+        raise SystemExit(1) from e
 
     # access_log=False 关闭每次 GET/POST 的访问日志，避免 GUI 轮询时刷屏
-    uvicorn.run("server.app:app", host=host, port=port, log_level="warning", access_log=False)
+    uvicorn.run(
+        "server.app:app",
+        host=settings.server_host,
+        port=settings.server_port,
+        log_level="warning",
+        access_log=False,
+    )

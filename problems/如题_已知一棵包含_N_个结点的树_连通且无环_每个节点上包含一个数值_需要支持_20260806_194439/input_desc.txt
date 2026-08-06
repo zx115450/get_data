@@ -1,0 +1,19 @@
+## 输入格式
+
+每个测试文件仅包含一个测试用例。
+
+第一行包含一个整数 $n$（$1 \leq n \leq 3 \times 10^5$）。
+
+第二行包含 $n$ 个整数 $a_1, a_2, \dots, a_n$（$0 \leq a_i < 2^{30}$）。
+
+第三行包含一个整数 $m$（$1 \leq m \leq 3 \times 10^5$）。
+
+接下来 $m$ 行，每行包含两个整数 $\text{type}$ 和 $x$（$1 \leq \text{type} \leq 3$，$0 \leq x < 2^{30}$），描述一次操作。
+
+## 数据范围
+
+- $1 \leq n \leq 3 \times 10^5$
+- $0 \leq a_i < 2^{30}$
+- $1 \leq m \leq 3 \times 10^5$
+- $1 \leq \text{type} \leq 3$
+- $0 \leq x < 2^{30}$

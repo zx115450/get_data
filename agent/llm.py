@@ -6,18 +6,34 @@
 注意：部分网关（openresty）对请求体有大小限制，会返回 413。
 因此发请求前会对历史消息做压缩：截断超大 tool 结果，并把已写入磁盘的
 write_gen / write_validate 源码参数从历史里换成摘要。
+
+对 429 / 5xx / 连接超时做指数退避重试；单任务可用 LLM_MAX_TOTAL_TOKENS 限预算。
 """
 import json
 import os
+import random
 import re
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any
 
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    OpenAI,
+    RateLimitError,
+)
+
+from config.settings import get_settings
 
 load_dotenv()
+
+
+class TokenBudgetExceeded(RuntimeError):
+    """单次任务累计 token 超出 LLM_MAX_TOTAL_TOKENS。"""
 
 
 @dataclass
@@ -140,44 +156,58 @@ def _notify_usage() -> None:
 
 
 def _openai_client(prefix: str = "") -> OpenAI:
-    """根据环境变量创建 OpenAI 兼容客户端。
+    """根据 Settings / 环境变量创建 OpenAI 兼容客户端。
 
     prefix 为空时读取 LLM_API_KEY / LLM_BASE_URL；
     prefix 为 EMBEDDING_ 时读取 EMBEDDING_API_KEY / EMBEDDING_BASE_URL。
     如果带 prefix 的变量未设置，则回退到不带 prefix 的变量（向后兼容）。
     """
-    key = os.getenv(f"{prefix}API_KEY" if prefix else "LLM_API_KEY", "")
-    base = os.getenv(f"{prefix}BASE_URL" if prefix else "LLM_BASE_URL") or None
-    if not key and prefix:
-        # embedding 专用变量未配置时，回退到 chat 的配置
-        key = os.getenv("LLM_API_KEY", "")
-        base = os.getenv("LLM_BASE_URL") or None
-    return OpenAI(api_key=key, base_url=base)
+    s = get_settings()
+    if prefix == "EMBEDDING_":
+        key = (s.embedding_api_key or "").strip()
+        base = (s.embedding_base_url or "").strip() or None
+        if not key:
+            key = (s.llm_api_key or "").strip()
+            base = (s.llm_base_url or "").strip() or None
+    else:
+        key = (s.llm_api_key or "").strip()
+        base = (s.llm_base_url or "").strip() or None
+    # Settings 未读到时再看 os.environ（兼容旧调用路径）
+    if not key:
+        key = os.getenv(f"{prefix}API_KEY" if prefix else "LLM_API_KEY", "")
+        base = os.getenv(f"{prefix}BASE_URL" if prefix else "LLM_BASE_URL") or None
+        if not key and prefix:
+            key = os.getenv("LLM_API_KEY", "")
+            base = os.getenv("LLM_BASE_URL") or None
+    return OpenAI(api_key=key or "missing", base_url=base)
 
 
-# Chat 客户端：用于 Agent 对话、题面简化/美化
-_chat_client = _openai_client("")
+def _chat_client() -> OpenAI:
+    return _openai_client("")
 
-# Embedding 客户端：用于 RAG few-shot 召回，可独立配置
-_embedding_client = _openai_client("EMBEDDING_")
 
-_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
-_EMBEDDING_MODEL = os.getenv("LLM_EMBEDDING_MODEL", "text-embedding-3-small")
+def _embedding_client() -> OpenAI:
+    return _openai_client("EMBEDDING_")
+
+
+def _model() -> str:
+    return (get_settings().llm_model or os.getenv("LLM_MODEL") or "gpt-4o-mini").strip()
+
+
+def _embedding_model() -> str:
+    return (
+        get_settings().llm_embedding_model
+        or os.getenv("LLM_EMBEDDING_MODEL")
+        or "text-embedding-3-small"
+    ).strip()
 
 
 def _max_tokens() -> int | None:
     """聊天补全 max_tokens（含 tool arguments）。
 
-    环境变量 LLM_MAX_TOKENS：正整数启用；0 或不设有效值则用默认 16384；
-    设为负数表示不传该参数（沿用服务商默认，易截断超长 write_gen）。
+    LLM_MAX_TOKENS：正整数启用；0 用默认 16384；负数表示不传该参数。
     """
-    raw = (os.getenv("LLM_MAX_TOKENS") or "").strip()
-    if raw == "":
-        return 16384
-    try:
-        n = int(raw)
-    except ValueError:
-        return 16384
+    n = int(get_settings().llm_max_tokens)
     if n < 0:
         return None
     if n == 0:
@@ -191,7 +221,85 @@ def embedding_configured() -> bool:
     仅当设置了 EMBEDDING_API_KEY 时视为可用。
     未配置时不应走 RAG（避免误用 chat 的 DeepSeek 等去调 embedding 接口失败）。
     """
+    key = (get_settings().embedding_api_key or "").strip()
+    if key:
+        return True
     return bool((os.getenv("EMBEDDING_API_KEY") or "").strip())
+
+
+def _check_token_budget() -> None:
+    """调用前检查累计用量；超限抛 TokenBudgetExceeded。"""
+    limit = int(get_settings().llm_max_total_tokens or 0)
+    if limit <= 0:
+        return
+    usage = _current_usage()
+    if usage.total_tokens >= limit:
+        raise TokenBudgetExceeded(
+            f"已用 {usage.total_tokens} tokens，达到上限 LLM_MAX_TOTAL_TOKENS={limit}"
+        )
+
+
+def _is_retryable_llm_error(exc: BaseException) -> bool:
+    """429 / 5xx / 连接超时可重试；413 不可重试。"""
+    if isinstance(exc, TokenBudgetExceeded):
+        return False
+    if isinstance(exc, (RateLimitError, APIConnectionError, APITimeoutError)):
+        return True
+    if isinstance(exc, APIStatusError):
+        code = getattr(exc, "status_code", None)
+        if code == 413:
+            return False
+        if code == 429 or (isinstance(code, int) and code >= 500):
+            return True
+    err = str(exc)
+    if "413" in err or "Request Entity Too Large" in err:
+        return False
+    lower = err.lower()
+    if "429" in err or "rate limit" in lower or "too many requests" in lower:
+        return True
+    for code in ("500", "502", "503", "504"):
+        if code in err:
+            return True
+    return False
+
+
+def _retry_wait_seconds(attempt: int) -> float:
+    """指数退避 + 抖动；夹在 min/max 之间。attempt 从 0 起。"""
+    s = get_settings()
+    base = float(s.llm_retry_min_wait)
+    cap = float(s.llm_retry_max_wait)
+    wait = min(cap, base * (2 ** attempt))
+    jitter = random.uniform(0, max(0.1, wait * 0.2))
+    return min(cap, wait + jitter)
+
+
+def _create_with_retry(create_fn, *, label: str = "chat"):
+    """对瞬时失败做有限次指数退避重试。"""
+    s = get_settings()
+    max_retries = max(0, int(s.llm_retry_max))
+    last_exc: BaseException | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            return create_fn()
+        except Exception as e:
+            last_exc = e
+            err = str(e)
+            if "413" in err or "Request Entity Too Large" in err:
+                raise RuntimeError(
+                    "LLM 请求体过大被网关拒绝 (413)。已启用历史压缩；"
+                    "若仍出现，请缩短标程/题面，或减少 Agent 重写 gen 的次数。"
+                    f"\n原始错误: {err[:300]}"
+                ) from e
+            if attempt >= max_retries or not _is_retryable_llm_error(e):
+                raise
+            wait = _retry_wait_seconds(attempt)
+            print(
+                f"[llm] {label} 瞬时失败 ({type(e).__name__})，"
+                f"{wait:.1f}s 后重试 ({attempt + 1}/{max_retries})…"
+            )
+            time.sleep(wait)
+    assert last_exc is not None
+    raise last_exc
 
 # 网关 413 防护：按场景配置不同工具结果的上下文占用上限（字符）
 # tool 结果：按工具类型决定保留多少（关键信息多的多留，大输出少留）
@@ -373,10 +481,11 @@ def chat(messages: list[dict], tool_schemas: list[dict]) -> list[Action]:
 
     可能返回多个（一次可调多个工具），也可能没有动作（纯文本回复）。
     """
+    _check_token_budget()
     compact_messages(messages)
 
     create_kwargs: dict[str, Any] = {
-        "model": _MODEL,
+        "model": _model(),
         "messages": messages,
         "tools": tool_schemas,
         "tool_choice": "auto",
@@ -385,18 +494,10 @@ def chat(messages: list[dict], tool_schemas: list[dict]) -> list[Action]:
     if mt is not None:
         create_kwargs["max_tokens"] = mt
 
-    try:
-        resp = _chat_client.chat.completions.create(**create_kwargs)
-    except Exception as e:
-        # 把 413 等网关错误说清楚，方便排查
-        err = str(e)
-        if "413" in err or "Request Entity Too Large" in err:
-            raise RuntimeError(
-                "LLM 请求体过大被网关拒绝 (413)。已启用历史压缩；"
-                "若仍出现，请缩短标程/题面，或减少 Agent 重写 gen 的次数。"
-                f"\n原始错误: {err[:300]}"
-            ) from e
-        raise
+    resp = _create_with_retry(
+        lambda: _chat_client().chat.completions.create(**create_kwargs),
+        label="chat",
+    )
 
     _current_usage().add_chat(getattr(resp, "usage", None))
     _notify_usage()
@@ -527,8 +628,9 @@ def parse_tool_arguments(raw: str) -> dict:
 
 def chat_text(system: str, user: str, temperature: float = 0.3) -> str:
     """无工具的纯文本补全，用于题面简化 / 美化等。"""
+    _check_token_budget()
     create_kwargs: dict[str, Any] = {
-        "model": _MODEL,
+        "model": _model(),
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -538,7 +640,10 @@ def chat_text(system: str, user: str, temperature: float = 0.3) -> str:
     mt = _max_tokens()
     if mt is not None:
         create_kwargs["max_tokens"] = mt
-    resp = _chat_client.chat.completions.create(**create_kwargs)
+    resp = _create_with_retry(
+        lambda: _chat_client().chat.completions.create(**create_kwargs),
+        label="chat_text",
+    )
     _current_usage().add_chat(getattr(resp, "usage", None))
     _notify_usage()
     return (resp.choices[0].message.content or "").strip()
@@ -555,11 +660,15 @@ def embed_text(text: str) -> list[float]:
     # 对超长文本做截断，避免部分网关限制
     if len(text) > 8000:
         text = text[:4000] + "\n...[truncated]...\n" + text[-2000:]
+    model = _embedding_model()
     try:
-        resp = _embedding_client.embeddings.create(model=_EMBEDDING_MODEL, input=text)
+        resp = _create_with_retry(
+            lambda: _embedding_client().embeddings.create(model=model, input=text),
+            label="embed",
+        )
     except Exception as e:
         err = str(e)
-        raise RuntimeError(f"embedding 调用失败 (model={_EMBEDDING_MODEL}): {err[:300]}") from e
+        raise RuntimeError(f"embedding 调用失败 (model={model}): {err[:300]}") from e
     _current_usage().add_embedding(getattr(resp, "usage", None))
     _notify_usage()
     return resp.data[0].embedding

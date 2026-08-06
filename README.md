@@ -40,10 +40,13 @@ cd F:\py_project\get_data
 python setup.py
 ```
 
-按提示选择大模型供应商、填写 API Key；是否启用 Embedding（不用可跳过）。  
-脚本会自动生成 `.env`、创建 `.venv` 并安装依赖。
+也可：`python scripts/bootstrap_env.py`（与 `setup.py` 相同逻辑）。
 
-3. 用 **PyCharm** 打开项目文件夹 → 解释器选 `.venv` → 运行 `gui.py`。
+按提示选择大模型供应商、填写 API Key；是否启用 Embedding（不用可跳过）。  
+脚本会自动生成 `.env`、创建 `.venv`，并经清华镜像安装依赖（含
+`pip install -e ".[dev]" --no-build-isolation`）。
+
+3. 用 **PyCharm** 打开项目文件夹 → 解释器选 `.venv` → 运行 `gui.py`（或 `python -m gui`）。
 
 ### 方式 B：手动安装
 
@@ -54,7 +57,7 @@ python setup.py
 cd F:\py_project\get_data
 ```
 
-3. 创建虚拟环境（推荐，避免弄乱系统 Python）：
+3. 创建并激活虚拟环境：
 
 ```powershell
 python -m venv .venv
@@ -63,13 +66,20 @@ python -m venv .venv
 
 成功后，命令行前面会出现 `(.venv)`。
 
-4. 安装依赖：
+4. 安装依赖（推荐 editable，与 `pyproject.toml` 对齐）：
 
 ```powershell
-pip install -r requirements.txt
+pip install -e ".[dev]" -i https://pypi.tuna.tsinghua.edu.cn/simple --no-build-isolation
 ```
 
-看到成功安装、没有红色报错即可。
+若只想按列表装依赖、暂不装包：
+
+```powershell
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+> `requirements.txt` 与 `pyproject.toml` 中的依赖列表保持同步；**以 `pyproject.toml` 为准**。  
+> editable 安装后，可直接 `import agent` / `import runners`，不必再改 `PYTHONPATH`。
 
 ---
 
@@ -83,6 +93,12 @@ copy .env.example .env
 ```
 
 3. 用记事本或 VS Code 打开 `.env`，填入你的 Key。
+
+启动前可自检：
+
+```powershell
+python main.py check-config
+```
 
 ### 最常见配置示例（推荐国内）
 
@@ -108,6 +124,14 @@ SERVER_PORT=8000
 
 **如果聊天和 Embedding 用同一家服务**，只需填 `LLM_API_KEY`、`LLM_BASE_URL`、`LLM_MODEL`、`LLM_EMBEDDING_MODEL`，`EMBEDDING_*` 可以留空。
 
+其它常用可选项（详见 `.env.example`）：
+
+| 变量 | 作用 |
+| --- | --- |
+| `LLM_MAX_TOTAL_TOKENS` | 单次任务累计 token 上限；`0` 表示不限制 |
+| `LLM_RETRY_MAX` 等 | 429 / 5xx 指数退避重试 |
+| `JOB_RETENTION_DAYS` / `JOB_MAX_KEEP` | `jobs/` 磁盘清理策略 |
+
 > 安全提醒：`.env` 里有密钥，**不要发给别人，也不要上传到 GitHub**。发给别人时只发 `.env.example`。
 
 ---
@@ -123,17 +147,21 @@ cd F:\py_project\get_data
 .\.venv\Scripts\activate
 ```
 
-2. 启动界面：
+2. 启动界面（任选其一）：
 
 ```powershell
 python gui.py
+# 或
+python -m gui
 ```
 
 3. 窗口打开后，先点顶部的 **「启动」**  
    - 状态显示端口与 PID 即表示后端已就绪  
    - 不用了可以点 **「停止」**
 
-> 也可以不用 GUI 按钮，另开一个终端执行 `python -m uvicorn server.app:app --host 127.0.0.1 --port 8000`，效果类似。
+> 也可以不用 GUI 按钮，另开一个终端执行：  
+> `python -m server`  
+> 或 `python -m uvicorn server.app:app --host 127.0.0.1 --port 8000`
 
 ---
 
@@ -265,7 +293,85 @@ Special Judge 或内置比较器产物（`checker.cpp` / 可执行文件 / `test
 
 ---
 
-## 七、常见问题
+## 七、命令行与运维
+
+除 GUI 外，根目录 `main.py` 提供常用命令：
+
+```powershell
+# 校验 .env / LLM 等配置是否可读
+python main.py check-config
+
+# 清理过期 jobs/（默认保留天数读 JOB_RETENTION_DAYS）
+python main.py clean-jobs --keep-days 30
+python main.py clean-jobs --max-keep 50 --dry-run
+
+# 汇总 agent_trace.jsonl：工具失败率 / 题型 token / nudge 空转
+python main.py analyze-traces
+python main.py analyze-traces --jobs-dir gui/jobs --top 20
+python main.py analyze-traces --json > trace_report.json
+
+# 对已有 range.json 的题目目录跑 CLI 流水线（开发用）
+python main.py gen --problem problems/example --out out --zip data.zip
+
+# Agent 小 demo（需已配置 LLM）
+python main.py demo
+```
+
+跑单元测试（不依赖真 LLM）：
+
+```powershell
+python -m pytest
+```
+
+安装后也可使用入口脚本（若已 `pip install -e .`）：
+
+- `get-data` → 等同 `python main.py …`
+- `get-data-gui` → 等同 `python -m gui`
+
+---
+
+## 八、项目结构（开发向）
+
+```text
+get_data/
+├── gui/                 # 桌面界面（python -m gui / gui.py）
+├── server/              # FastAPI HTTP（python -m server）
+├── runners/             # 出题任务编排（run_job → 各阶段）
+├── agent/               # LLM Agent 循环、tools、prompts/
+├── pipeline/            # 批跑 gen → 打包 zip（不调 LLM）
+├── storage/             # 题目工作区 + Job 持久化
+├── knowledge/           # few-shot / RAG / 结构提示
+├── config/              # pydantic-settings 启动校验
+├── sandbox/             # testlib.h、generator.h、内置 checker
+├── utils/               # markup 等
+├── tests/               # pytest
+├── scripts/             # bootstrap_env.py 一键初始化
+├── data/                # RAG 语料等共享数据
+├── problems/            # 本地题库工作区
+├── jobs/                # 运行时任务目录（勿提交密钥与大体量产物）
+├── main.py              # CLI
+├── gui.py               # 兼容入口 → gui.app
+├── setup.py             # 交互初始化（非 setuptools 打包脚本）
+├── pyproject.toml       # 包元数据、依赖、pytest、入口脚本
+├── requirements.txt     # 依赖列表镜像
+└── .env.example         # 环境变量模板
+```
+
+依赖方向概览：
+
+```text
+gui / main / server(HTTP)
+        ↓
+   runners  →  agent + pipeline
+        ↓
+   storage / knowledge / config
+```
+
+旧路径如 `server/job_store.py`、`problem_store.py` 仍保留薄兼容层，新代码请优先 import `storage` / `knowledge` / `runners`。
+
+---
+
+## 九、常见问题
 
 ### 1. 点「启动」失败 / 提交报连不上
 
@@ -283,6 +389,7 @@ Special Judge 或内置比较器产物（`checker.cpp` / 可执行文件 / `test
 - 检查 `.env` 是否保存、Key 是否复制完整（不要多空格、少字符）
 - 检查 `LLM_BASE_URL` 是否和平台一致
 - 到对应平台看账户余额与权限
+- 可先跑 `python main.py check-config`
 
 ### 4. 生成到一半报 ERROR
 
@@ -312,16 +419,24 @@ cd 项目目录
 python gui.py
 ```
 
-再点「启动」即可。
+再点「启动」即可。若拉取了新代码且依赖有变，再执行一次：
+
+```powershell
+pip install -e ".[dev]" -i https://pypi.tuna.tsinghua.edu.cn/simple --no-build-isolation
+```
+
+### 8. `import agent` / 测试报找不到模块？
+
+确认已在项目根执行过 `pip install -e ".[dev]"`，或至少用 `python -m pytest`（`pyproject.toml` 已配置 `pythonpath = ["."]`）。
 
 ---
 
-## 八、给别人发这个项目时注意
+## 十、给别人发这个项目时注意
 
 请打包 / 分享这些：
 
-- `agent/`、`server/`、`pipeline/`、`utils/`、`sandbox/`（含 `testlib.h`、`generator.h`、内置 checker 源码）、`data/`
-- `gui.py`、`requirements.txt`、`.env.example`、`.gitignore`、`README.md`
+- `agent/`、`server/`、`runners/`、`pipeline/`、`storage/`、`knowledge/`、`gui/`、`utils/`、`config/`、`sandbox/`（含 `testlib.h`、`generator.h`、内置 checker 源码）、`data/`、`tests/`、`scripts/`
+- `gui.py`、`main.py`、`pyproject.toml`、`requirements.txt`、`.env.example`、`.gitignore`、`README.md`、`setup.py`（或 `scripts/bootstrap_env.py`）、`setup.bat`
 
 其中 **`data/few_shots_rag_corpus.json`** 是 RAG few-shot 语料（含历史优质范例与向量）。  
 别人拿到后首次运行会自动加载，有助于提高生成准确性。你本地成功出题后，语料会同步写回这个文件，记得一并提交 / 打包。
@@ -338,12 +453,12 @@ python gui.py
 
 ---
 
-## 九、一句话流程（速查）
+## 十一、一句话流程（速查）
 
 ```text
 装 Python + g++
-  → python setup.py（或双击 setup.bat）填 API、装依赖
-  → 运行 gui.py，点「启动」
+  → python setup.py（或双击 setup.bat）填 API、装依赖（清华镜像 + editable --no-build-isolation）
+  → 运行 gui.py（或 python -m gui），点「启动」
   → 填标程 / 题面 / 输入描述（可选输出描述、数据方案）
   → 可选「一键美化」
   →「提交生成」→「下载 zip」

@@ -12,6 +12,7 @@
 import concurrent.futures
 
 from . import llm, prompts, tools
+from . import trace as agent_trace
 
 # 默认完整版：兼容旧代码，仍可用 system_prompt 覆盖。
 SYSTEM_PROMPT = prompts.default_full_prompt
@@ -259,7 +260,17 @@ def run(
         if range_only and range_done:
             step_schemas = _filter_schemas(step_schemas, {"write_range"})
 
-        actions = llm.chat(messages, step_schemas)
+        try:
+            actions = llm.chat(messages, step_schemas)
+        except llm.TokenBudgetExceeded as e:
+            if verbose:
+                print(f"[step {step}] token budget exceeded: {e}")
+            if on_event:
+                on_event(step, "budget", {"reason": str(e)}, str(e)[:120])
+            agent_trace.log_event(
+                step=step, tool="budget", result=str(e), args_size=0,
+            )
+            return f"预算用尽（token）：{e}"
 
         # LLM 没调任何工具：发 nudge 提醒它调工具，而不是直接 finish。
         # 这避免了「LLM 解释思路 → Agent 立刻终止 → 没产出 gen」的常见失败模式。
@@ -269,6 +280,10 @@ def run(
                     print(f"[step {step}] range already written; auto-finish (no tool call)")
                 if on_event:
                     on_event(step, "finish", {"auto": True, "reason": "range_written"}, "已写出 range.json")
+                agent_trace.log_event(
+                    step=step, tool="finish", result="OK",
+                    extra={"auto": True, "reason": "range_written"},
+                )
                 return "已写出 range.json（write_range 成功后自动结束）"
             nudge_count += 1
             if nudge_count > max_nudges:
@@ -276,6 +291,9 @@ def run(
                     print(f"[step {step}] LLM 连续 {max_nudges} 次不调工具，放弃")
                 if on_event:
                     on_event(step, "give_up", {"reason": "LLM 连续多次不调工具"}, "")
+                agent_trace.log_event(
+                    step=step, tool="give_up", result="LLM 连续多次不调工具",
+                )
                 return "预算用尽（LLM 连续多次不调工具）"
             if write_check_discipline and check_ok:
                 nudge_msg = (
@@ -294,6 +312,10 @@ def run(
                 print(f"[step {step}] nudge #{nudge_count}（LLM 没调工具）")
             if on_event:
                 on_event(step, "nudge", {"count": nudge_count}, nudge_msg[:120])
+            agent_trace.log_event(
+                step=step, tool="nudge", result=nudge_msg[:80],
+                extra={"count": nudge_count},
+            )
             continue
 
         # LLM 调了工具，重置 nudge 计数
@@ -409,6 +431,12 @@ def run(
                 summary = act.args.get("summary", "done")
                 if verbose:
                     print(f"[done] {summary}")
+                agent_trace.log_event(
+                    step=step,
+                    tool="finish",
+                    result="OK",
+                    args_size=agent_trace.args_size(act.args),
+                )
                 return summary
 
             result = results[idx]
@@ -448,6 +476,12 @@ def run(
                 print(f"        -> {_preview(result)}")
             if on_event:
                 on_event(step, act.name, dict(act.args), _preview(result))
+            agent_trace.log_event(
+                step=step,
+                tool=act.name,
+                result=result if isinstance(result, str) else str(result),
+                args_size=agent_trace.args_size(act.args),
+            )
 
             # 把工具结果作为 tool 消息塞回上下文
             # 必须带 tool_call_id，对应 assistant 的 tool_calls

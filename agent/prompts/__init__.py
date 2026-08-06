@@ -1,0 +1,77 @@
+"""模块化 System Prompt 构建器（包入口，兼容 from agent import prompts）。"""
+from __future__ import annotations
+
+from .builders import (
+    build_checker_coder_prompt,
+    build_checker_planner_prompt,
+    build_checker_prompt,
+    build_coder_prompt,
+    build_coder_rewrite_prompt,
+    build_fixer_prompt,
+    build_full_prompt,
+    build_gen_fixer_prompt,
+    build_planner_prompt,
+    build_range_prompt,
+    build_reviewer_prompt,
+    build_special_coder_prompt,
+    build_special_fixer_prompt,
+    default_full_prompt,
+)
+from .core import (
+    BASE_GEN_API_MANUAL,
+    BASE_GEN_RULES,
+    BASE_GEN_RULES_CORE,
+    BASE_VAL_RULES,
+    CLI_CONTRACT,
+    COMMON_CORE,
+    MULTI_TEST,
+    PERF,
+    RANGE_CONTRACT,
+    RANGE_ONLY_CORE,
+    RULES,
+    SCALE,
+    TOOLS_FULL,
+    TOOLS_RANGE,
+    WORKFLOW,
+    WRITE_CONTENT_GATE,
+)
+from .stages import (
+    CHECKER_CODER_PROMPT,
+    CHECKER_COMPLEXITY_RULES,
+    CHECKER_PLANNER_PROMPT,
+    CHECKER_SEMANTICS_RULES,
+    CHECKER_TEMPLATES_HELP,
+    CHECKER_TESTLIB_API,
+    CODER_PROMPT,
+    CODER_REWRITE_PROMPT,
+    PLANNER_PROMPT,
+    SPECIAL_CODER_PROMPT,
+    SPECIAL_FIXER_PROMPT,
+)
+from .types import (
+    TYPE_ARRAY,
+    TYPE_GEO,
+    TYPE_GRAPH,
+    TYPE_MATRIX,
+    TYPE_PERMUTATION,
+    TYPE_STRING,
+    TYPE_TREE,
+    _TYPE_MODULES,
+)
+
+__all__ = [
+    "build_range_prompt",
+    "build_planner_prompt",
+    "build_coder_prompt",
+    "build_coder_rewrite_prompt",
+    "build_full_prompt",
+    "build_gen_fixer_prompt",
+    "build_special_coder_prompt",
+    "build_special_fixer_prompt",
+    "build_checker_planner_prompt",
+    "build_checker_coder_prompt",
+    "build_checker_prompt",
+    "build_reviewer_prompt",
+    "build_fixer_prompt",
+    "default_full_prompt",
+]

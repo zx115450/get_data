@@ -11,9 +11,6 @@ import re
 import time
 from pathlib import Path
 
-import sys
-sys.path.append(str(Path(__file__).resolve().parent.parent))
-
 from sandbox.run import EXIT_MEMORY, is_stack_overflow, parse_memory_limit_mb, safe_run
 
 

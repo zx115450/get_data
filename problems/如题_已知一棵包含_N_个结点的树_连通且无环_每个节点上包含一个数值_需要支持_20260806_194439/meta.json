@@ -1,0 +1,11 @@
+{
+  "id": "如题_已知一棵包含_N_个结点的树_连通且无环_每个节点上包含一个数值_需要支持_20260806_194439",
+  "title": "题目描述",
+  "lang": "cpp",
+  "problem_type": "graph",
+  "last_job_id": "20260806_225525",
+  "updated_at": "2026-08-06T23:01:50",
+  "special_judge": false,
+  "builtin_checker": "无",
+  "source": "problem"
+}
