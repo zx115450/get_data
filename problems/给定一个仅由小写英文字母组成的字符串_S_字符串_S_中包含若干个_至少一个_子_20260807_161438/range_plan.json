@@ -1,0 +1,28 @@
+{
+  "count": 27,
+  "constraints": {
+    "T": [
+      1,
+      100
+    ],
+    "n": [
+      6,
+      1000
+    ]
+  },
+  "edge_cases": [
+    "edge_nmin",
+    "edge_nmax",
+    "edge_Tmax",
+    "day_only_start",
+    "gay_only_start"
+  ],
+  "time_limit_ms": 1000,
+  "memory_limit_mb": 256,
+  "special_constraints": [
+    "每组字符串至少包含一个子串 day 和一个子串 gay",
+    "字符串仅由小写英文字母组成",
+    "day 与 gay 起始字符不同（d vs g），子串间不会重叠"
+  ],
+  "problem_type": "string"
+}
