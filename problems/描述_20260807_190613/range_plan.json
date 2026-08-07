@@ -1,0 +1,27 @@
+{
+  "count": 20,
+  "constraints": {
+    "n": [
+      1,
+      1000
+    ],
+    "m": [
+      1,
+      1000
+    ],
+    "color": [
+      1,
+      1000000
+    ]
+  },
+  "edge_cases": [
+    "edge_11",
+    "edge_nmax",
+    "row",
+    "col",
+    "all_same_color"
+  ],
+  "time_limit_ms": 2000,
+  "memory_limit_mb": 256,
+  "problem_type": "graph, matrix"
+}

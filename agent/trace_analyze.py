@@ -34,11 +34,19 @@ def _is_fail_result(result: str) -> bool:
 
 def _job_problem_type(job_dir: Path) -> str:
     """从 meta.json / range.json / success_context 推断题型。"""
+
+    def _format_pt(raw):
+        if isinstance(raw, list):
+            return ", ".join(str(x) for x in raw if x)
+        if isinstance(raw, str):
+            return raw.strip()
+        return ""
+
     meta = job_dir / "meta.json"
     if meta.is_file():
         try:
             data = json.loads(meta.read_text(encoding="utf-8"))
-            pt = (data.get("problem_type") or "").strip()
+            pt = _format_pt(data.get("problem_type"))
             if pt:
                 return pt
         except (OSError, json.JSONDecodeError, TypeError):
@@ -50,7 +58,7 @@ def _job_problem_type(job_dir: Path) -> str:
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
             if isinstance(data, dict):
-                pt = (data.get("problem_type") or data.get("type") or "").strip()
+                pt = _format_pt(data.get("problem_type") or data.get("type"))
                 if pt:
                     return pt
         except (OSError, json.JSONDecodeError, TypeError):

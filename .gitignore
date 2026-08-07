@@ -26,7 +26,6 @@ jobs/
 .cache/
 out/
 *.log
-.gui_session.json
 
 # ---- 第三方完整源码树（已 vendoring 到 sandbox/generator.h + checker/）----
 ACM-generator-main/
@@ -60,7 +59,6 @@ Thumbs.db
 desktop.ini
 
 # ---- 本地杂项 ----
-docs/
 tmp/
 temp/
 *.tmp

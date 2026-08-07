@@ -21,7 +21,7 @@ def run_batch_and_pack(
     job: job_store.Job,
     job_dir: Path,
     produced: dict,
-    eff_type: str,
+    eff_type: str | list[str],
     special_judge: bool,
     stmt_plain: str = "",
     range_plain: str = "",
@@ -189,13 +189,15 @@ def run_batch_and_pack(
         job_store.add_progress(job, f"【数据大小】{size_text}")
 
     try:
-        added = add_job_to_corpus(job_dir, stats=stats, problem_type=eff_type)
+        from knowledge.few_shots import normalize_problem_types
+        type_for_corpus = ", ".join(normalize_problem_types(eff_type)) if isinstance(eff_type, list) else (eff_type or "")
+        added = add_job_to_corpus(job_dir, stats=stats, problem_type=type_for_corpus)
         if added:
             rate = added.get("valid_rate")
             rate_s = f", valid_rate={rate:.4f}" if isinstance(rate, (int, float)) else ""
             job_store.add_progress(
                 job,
-                f"RAG 语料库已更新: {added['key']} (type={added.get('problem_type') or eff_type}{rate_s})",
+                f"RAG 语料库已更新: {added['key']} (type={added.get('problem_type') or type_for_corpus}{rate_s})",
             )
         else:
             job_store.add_progress(job, "RAG 语料库未更新（质量过滤未通过、重复或已存在）")

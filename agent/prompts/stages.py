@@ -37,9 +37,12 @@ PLANNER_PROMPT = """你是算法竞赛测试数据生成器设计专家。任务
        必须写清 remain 拆分（先 T，再 n_i=min(hint, remain/(T-i), n_max)）；禁止双顶格空话。无多测则写「无多测」。
    - 4. 规模分层（必写认轴 + 全组合 + 状态密度分层）：2～6 行。
        * 写死本题的 A/B/C 轴各用哪个 constraints 名（没有的轴写「无」）；
-       * random：index 如何拆成各轴小/中/大（如 bA=i%3, bB=(i/3)%3, bC=(i/9)%3）；
+       * 【解轴 · 硬】规模轴必须 (index/3)%3（bB）；组数用 i%3（bA，无多测可改数值）；
+         数值/其它用更高位；二维无多测：bVal=i%3, bSize=(i/3)%3。
+         禁止规模=i%3；须写明 index∈{0,1,2} 时规模档为小（与自检对齐）；
        * 【状态密度】写清小/中/大档：小档可放宽；中档半开（约 1e3～min(5000,该档规模)）；
          大档唯一状态 ≤ 第 7 节 K（有限域复用）；禁止大档用小档宽域；
+         每档唯一数须再 ≤ 该档采样域基数（hi-lo+1 / 候选集大小）；写 min(目标,域大小)；
        * 声明套件内 3^k 组合都要出现；有 sum 时写清 remain 与「大 T→强制小 n」；
        * 禁止「组数恒 1」「数值全程打满上界」。
    - 5. edge_cases 映射（唯一定义处 · 每个名字一行）：
@@ -86,7 +89,9 @@ PLANNER_PROMPT = """你是算法竞赛测试数据生成器设计专家。任务
    或有 sum 却无 remain 拆分、或把 type 写成 int / `type == 0` → 不合格；
    第 1 节未写明有/无规模头，或标程无规模头却允许 gen 先输出规模整数 → 不合格；
    第 2 节超过 1 行或复述 range.json → 不合格；
+   第 4 节规模轴写成 i%3 / index%3，或未写明 (index/3)%3 为规模 → 不合格；
    第 4 节未写小/中/大状态密度分层（小宽、中半开、大≤K）→ 不合格；
+   第 4 节唯一数目标未要求 ≤ 该档域基数（或跨组合可能 uni>域大小）→ 不合格；
    第 8 节超过 4 行、或展开 edge 构造、或粘贴 opt/type 代码 → 不合格；
    第 7 节逐 edge 展开、或未区分 gen 5s 与 time_limit_ms、或 O(n^2) 建边池 → 不合格；
    第 7 节未给出具体整数 K、或 K>5000、或把 K 写成数组长度/刚好装下/与规模同阶/理论全集 → 不合格；
@@ -136,79 +141,20 @@ int main(int argc, char* argv[]) {
 """
 
 
-_GEN_API_GATE = """【generator.h 方法速查 — 写错会编译失败】
+_GEN_API_GATE = """【generator.h 通用门禁 — 写错会编译失败】
 流程：构造 → set_*/use_* → gen() → cout << obj 或 edges()/e.u()/e.v()/e.w()。
 setter/getter：name() 读、set_name(v) 写；edges()/nodes_weight() 只读；勿用 *_ref() 乱改。
 【命名空间 · 硬门禁】using namespace generator::all 只引入 rand_graph 等包，
   不会把 Tree/Chain/Flower/Graph 变成全局名。
-  类名必须带权重前缀，禁止裸写 Chain / Flower / Tree / Graph / …
-  无点权边权：unweight::Tree / unweight::Chain / unweight::Flower / unweight::Graph
-  有边权：edge_weight::Tree<int>（或 long long）+ set_edges_weight_function
-  有点权：node_weight::…；双权：both_weight::…（禁止 weight::）
-  正确：unweight::Chain ch(n); ch.gen();
-  错误：Chain ch(n);  → 'Chain' was not declared（编译器会提示 unweight::Chain）
-错误：
-  裸 Chain/Flower/Tree/Graph（缺 unweight:: 等前缀）/
+  类名必须带权重前缀（unweight:: / edge_weight:: / node_weight:: / both_weight::），
+  禁止裸写 Chain / Flower / Tree / Graph / DAG / …。
+禁止：
   weight:: / set_weight_limit / get_edges() / shuffle() / _edges /
   Sequence|Permutation|String|RandomPoints 类 /
   rnd.next(..., 1e9) / fill_inputs|hack|init_gen /
-  void f(Tree&) 传入 Chain/Flower（改 auto&/template 或分支内联）
+  void f(Tree&) 传入 Chain/Flower（改 auto&/template 或分支内联）。
+具体类用法、边界选型与 edge 示例见对应题型模块。
 """
-
-_GEN_API_GATE_TREE = """树构造要点（类名一律带前缀）：
-  unweight::Tree t(n); t.use_pruefer() 或 t.use_random_father(); t.gen();
-  unweight::Chain ch(n); ch.gen();     // 链；禁止裸 Chain
-  unweight::Flower fl(n); fl.gen();    // 星/菊花；禁止裸 Flower
-  unweight::FlowerChain fc(n); fc.set_flower_size(k) 或 set_flower_chain_size(fs,cs); fc.gen();
-  unweight::HeightTree ht(n); ht.set_height(h);  // 强制有根
-  unweight::MaxDegreeTree md(n); md.set_max_degree(d);
-  常用：set_begin_node(1)（默认多为 1）；set_output_node_count(false) 对齐无规模头标程
-  默认 cout：n[( root)] → [点权行] → n-1 行边；不对齐标程就遍历 edges() 手写
-  【多字段边】for (auto &e : t.edges()) printf("%d %d …\\n", e.u(), e.v(), …);
-  【类型】Tree/Chain/Flower/… 并列非继承；禁止 f(unweight::Tree&) 收 Chain/Flower。
-  多形态打印：auto dump=[&](auto &t){ t.gen(); for(auto &e:t.edges())…; };
-  或每个分支内联各自类型（unweight::Chain / unweight::Flower …）。
-单边权库生成：
-  edge_weight::Tree<int> t(n);
-  t.set_edges_weight_function([](){ return rnd.next(1, 1000000000); });
-  t.gen(); cout << t;
-  多权字段（如 a,b）：仍用 unweight:: + 自己 rnd 打印，勿强行 edge_weight。
-"""
-
-_GEN_API_GATE_GRAPH = """图构造要点（类名一律带前缀）：
-  unweight::Graph g(n,m); + set_direction/multiply_edge/self_loop/connect; g.gen();
-  unweight::BipartiteGraph + set_left_right / use_format_left_right / set_different_part；
-  unweight::DAG / Cactus / Forest / GridGraph（set_row_column）；
-  边数：max_edge_count()/rand_edge_count/set_edge_count；严禁 O(n^2) 枚举边池
-  禁止裸 Graph/DAG/…；单边权用 edge_weight::Graph<int> + set_edges_weight_function
-  默认 cout：n m → [点权行] → m 行边；不对齐则 edges() 手写
-"""
-
-_GEN_API_GATE_GEO = """几何：ConvexHull/SimplePolygon/Triangle + set_xy_limit + gen()；Point/rand_point；禁 RandomPoints
-"""
-
-_GEN_API_GATE_ARRAY = """数组/串函数：rand_p / rand_string / rand_sum（拆 sum_*）/ rand_vector；不是 Sequence 类
-【采样】rnd.next(lo,hi) 必须 lo≤hi；多约束放置必须一次枚举合法 (p1,p2) 再采；
-  严禁「先 rnd p1，再 pool 兼容 p2」；禁对空 vector 调 rnd.next(0,sz-1)；禁无上限拒绝采样；
-  失败勿用单一固定串糊弄 random（专用 edge 除外）。
-"""
-
-# problem_type → 附加到通用门禁后的题型速查（原文拆分，不改措辞）
-_GEN_API_GATE_BY_TYPE = {
-    "tree": _GEN_API_GATE_TREE,
-    "weighted_tree": _GEN_API_GATE_TREE,
-    "graph": _GEN_API_GATE_GRAPH,
-    "weighted_graph": _GEN_API_GATE_GRAPH,
-    "geometry": _GEN_API_GATE_GEO,
-    "array": _GEN_API_GATE_ARRAY,
-    "string": _GEN_API_GATE_ARRAY,
-    "number_theory": _GEN_API_GATE_ARRAY,
-    "dp": _GEN_API_GATE_ARRAY,
-    "range_query": _GEN_API_GATE_ARRAY,
-    "multi_test": _GEN_API_GATE_ARRAY,
-    "permutation": _GEN_API_GATE_ARRAY,
-    "matrix": _GEN_API_GATE_GRAPH,
-}
 
 _GEN_OPT_TYPE_TEMPLATE = """【固定样板 · gen opt/type · 必抄 · 与 plan 冲突时以本块为准】
 registerGen 之后、任何 type 分支之前，一次性消费全部 opt（禁止只在 random 里读）：
@@ -220,6 +166,7 @@ int index = opt<int>("index", 0);
 int count = opt<int>("count", 27);
 // 再 opt 本题 constraints（如 n、T、sum_n）；然后：
 if (type == "random") {
+    // 解轴硬：规模 = (index/3)%3（bB）；禁止规模 = index%3
     // 按 plan 第 4 节解 bA/bB/bC；有 sum_* 必须 remain 拆分：
     //   remain=S; for gi: cap=min(n_max,remain/(T-gi)); n_i=min(hint,cap);
     //   硬禁 bA=大 && bB=大（大 T 强制小 n）
@@ -240,8 +187,8 @@ plan 第 5/6 节是编码主规格；第 8 节仅为固定短模板（顺序提�
 【务必先读文首 WRITE_CONTENT_GATE】功能不可省略、源码必须完整；鼓励短实现，禁止半截/摘要。
 
 【gen 时限 · 硬闸】单次 gen 固定 ≤5s（与 time_limit_ms 无关）。须按 plan 第 7 节实现；
-若 run_gen / 自检回报 gen TIMEOUT：在第 7 节预算内换成等价更快实现（采样 / generator.h），
-禁止加大 time_limit_ms，禁止只靠重试。
+若 run_gen / 自检回报 gen TIMEOUT：在第 7 节预算内换成等价更快实现（采样 / generator.h）；
+若 while 凑唯一值死循环 → 先 uni=min(目标,域基数)；禁止加大 time_limit_ms，禁止只靠重试。
 
 可用工具：
 - read_file(path): 首轮只读 gen_plan.md（range.json 已在 task 中，不必再读）；写入后如需对照再读 gen.cpp / validator.cpp
@@ -284,8 +231,10 @@ plan 第 5/6 节是编码主规格；第 8 节仅为固定短模板（顺序提�
 11. 【复杂度 / gen≤5s / 分层状态】严格按 gen_plan 第 4/5/7 节：小中档多样、大档与打满上界的 edge ≤K；
     禁止 O(n^2) 建边池；禁止最大档默认每条输入一个新状态；plan 的 K 过大时大档仍按 ≤500 实现。
 12. 自检 OK → finish；FAIL → 只允许再修正一轮完整源码（仍须完整 content），修正不得偏离 plan 策略
-    （若 FAIL 像 gen 打成了答案，按第 3 条以输入格式为准修正；若 gen TIMEOUT，按第 7 节换更快等价实现；
-     若 std TIMEOUT，仅压该 type/同类最大档到 K≤200，保留小中档多样，禁止略微收窄取值域；
+    （若 FAIL 像 gen 打成了答案，按第 3 条以输入格式为准修正；
+     若 gen TIMEOUT：先 uni=min(目标,域基数)，再按第 7 节换更快等价实现；
+     若 std TIMEOUT：先核解轴（规模须 (index/3)%3），再按读标程方向调该 type/同类最大档
+     （多数压 K≤200；若标程随单种体量变差则反向调），保留小中档多样，禁止略微收窄取值域；
      若 validate 首 token 类型与第 1 节规模头约定不符 → 按第 1 节增删规模头，勿放宽范围/结构校验）。
 13. 禁止 __OMITTED_SOURCE__ 等摘要；骨架重写时先 read 旧文件与 gen_plan.md 再整份重写。
 14. 【覆盖完整性】plan/range 中的全部 edge_cases 与 constraints 不得遗漏；冲突对照摘要不足以推翻 plan。"""
@@ -295,7 +244,8 @@ CODER_REWRITE_PROMPT = """你是 ACM 数据生成器 / 校验器编码专家。�
 
 注意：不要写 gen_special.cpp；特殊样例由后续独立阶段处理。
 【务必先读文首 WRITE_CONTENT_GATE】功能不可省略、源码必须完整；鼓励短实现，禁止截断/空调用。
-【gen 时限】单次 gen ≤5s（与 time_limit_ms 无关）；TIMEOUT 时在第 7 节预算内换更快等价实现，禁止只加时限。
+【gen 时限】单次 gen ≤5s（与 time_limit_ms 无关）；TIMEOUT 时先 uni=min(目标,域基数)，
+再在第 7 节预算内换更快等价实现，禁止只加时限。
 
 可用工具：
 - read_file(path): 读取 gen_plan.md / range.json / gen.cpp / validator.cpp
@@ -328,9 +278,12 @@ CODER_REWRITE_PROMPT = """你是 ACM 数据生成器 / 校验器编码专家。�
      补权重前缀，如 unweight::Chain / unweight::Flower；using generator::all 不够；
    - 编译 invalid initialization of reference … Tree& from Chain/Flower：
      删掉 Tree& 辅助函数，改成 auto&/template 或分支内联；
-   - gen TIMEOUT / MEMORY（O(n^2) / 无上限拒绝采样死循环等）：改枚举合法集或有上限采样；禁止加大 time_limit_ms；
-   - std TIMEOUT / MEMORY：仅把 FAIL 的 type（及同类最大档）有效状态压到 K≤200，
-     用有限域复用凑满规模；保留小中档多样；禁止略微收窄取值区间；勿只加内存/时限；外层会再强制 full；
+   - gen TIMEOUT / MEMORY（O(n^2) / 无上限拒绝采样死循环等）：
+     先查唯一数 uni 是否 > 域基数（hi-lo+1/候选 size）→ uni=min(目标,域大小)；
+     否则改枚举合法集或有上限采样；禁止加大 time_limit_ms；
+   - std TIMEOUT / MEMORY：① 先核 FAIL index 解轴（规模须 (index/3)%3，禁规模=index%3）；
+     ② 再按读标程方向调该 type/同类最大档（多数压 K≤200 有限域复用；若标程随单种体量变差则提高种类/限单种体量）；
+     保留小中档多样；禁止略微收窄取值区间；勿只加内存/时限；外层会再强制 full；
    - 输入格式与 plan/标程读入顺序不匹配；或 validate 像 gen 打成了答案（Expected integer）；
    - validate 首 token 类型与第 1 节规模头约定不符（多打/少打了 T/n/m 等）→ 按第 1 节修正 gen，勿放宽范围/结构校验；
    - |S|/长度 out of range 或 token 不匹配 pattern 上下界、且多组/满长 edge 皆挂：
@@ -645,7 +598,8 @@ GEN_FIXER_WORKFLOW = """修复流程：
    - write_validate 编译/运行报错：先看是否 readLong 字面量歧义（须 LL）；
      有结构性质则补 ensuref；仅范围则检查 read* + skipBlanks + readEof；确保 inf.strict=false。
    - unused key 'seed'|'type'|'index'|'count'：在 type 分支前补齐全部 opt<>()，禁止只在 random 里读。
-   - gen TIMEOUT / MEMORY / rc != 0：若像无上限 while 重采 → 改枚举合法集；否则修算法复杂度。
+   - gen TIMEOUT / MEMORY / rc != 0：若 while 凑唯一值 → 先 uni=min(目标,域基数)；
+     若像无上限 while 重采合法对象 → 改枚举合法集；否则修算法复杂度。
    - validate FAILED：先分清 gen 真坏还是 validator 误读。
      若 |S|/长度 out of range 或 pattern `{lo,hi}` 不匹配且该 type 声称打满上界：
      先查定长拼装是否口算补齐导致拼超/拼短（应用 L-(int)s.size() 补齐）；
@@ -659,7 +613,8 @@ GEN_FIXER_WORKFLOW = """修复流程：
      或读到题面失败文案/答案形态（排列/方案串）而非输入字段：
      按 gen_plan 第 1 节重写 gen（只 cout 输入），不要放宽范围/结构校验。
    - std FAILED / TIMEOUT / MEMORY / STACK_OVERFLOW：对照 gen_plan 第 4/7 节分层；
-     TIMEOUT/MEMORY 时仅压该 type（及同类最大档）到 K≤200（有限域复用凑满规模），保留小中档多样；
+     TIMEOUT/MEMORY：先核解轴（规模=(index/3)%3），再按读标程方向调该 type/同类最大档
+     （多数压 K≤200 有限域复用；标程随单种体量变差则反向调）；保留小中档多样；
      禁止略微收窄取值区间；对齐字段顺序时修 gen；勿把单组空 stdout 当失败；勿只靠加内存/时限。
    - 全部测例 stdout 为空：套件级失败——补 random/混合测例的查询操作，或检查标程是否写了输出；不要破坏 *_update 边界语义。
    - Unexpected end of file / token expected 且 gen 输出为空：【疑似缺分支】
@@ -679,8 +634,9 @@ GEN_FIXER_RULES = """规则（文首已有 WRITE_CONTENT_GATE，此处再强调�
 5. 不要为修一个问题引入新 bug；优先小范围改动，避免推翻整个 plan。
 6. 写一次 → 等自动快速自检 → 再决定 finish 或结束本轮；禁止空转连写。
 7. 【空输出合法】单组 std stdout 为空不一定是错误（全更新无查询时答案本就为空）。若失败摘要写「全部测例 stdout 为空」，再补查询/混合操作或检查标程；不要为过检给 *_update 边界硬塞查询。
-8. TIMEOUT：gen 硬限 5s（与 time_limit_ms 无关）→ 换采样/generator.h；
-   std TIMEOUT → 仅压该 type/同类最大档到 K≤200（有限域复用），保留小中档多样，禁止半压微调；勿只靠加时限/内存。
+8. TIMEOUT：gen 硬限 5s（与 time_limit_ms 无关）→ 先查 uni≤域基数，再换采样/generator.h；
+   std TIMEOUT → 先核解轴（规模=(index/3)%3），再按读标程方向调该 type/同类最大档
+   （多数压 K≤200；少数反向调），保留小中档多样，禁止半压微调；勿只靠加时限/内存。
 9. gen 的 stdout 必须是【输入】；读到答案文案时修 gen。
    Expected EOF（末行）→ 补 skipBlanks 再 readEof；Unexpected white-space → 关 strict；勿改 gen 凑格式。
 """

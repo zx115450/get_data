@@ -37,6 +37,20 @@ from server.text_agent import beautify_text, simplify_text
 app = FastAPI(title="ACM 出数据后端")
 
 
+def _validate_request_problem_type(value: str | list[str] | None) -> None:
+    """校验 problem_type 是否全部为已知题型；为空或无法识别时跳过。"""
+    if not value:
+        return
+    from knowledge.few_shots import normalize_problem_types
+
+    types = normalize_problem_types(value)
+    if not types:
+        return
+    unknown = [t for t in types if t not in FEW_SHOTS]
+    if unknown:
+        raise HTTPException(400, f"problem_type 只支持: {list(FEW_SHOTS.keys())}")
+
+
 @app.on_event("startup")
 def _startup_sync_rag_templates():
     """启动时校验配置、恢复 job 索引、同步 RAG 模板。"""
@@ -72,7 +86,7 @@ def _startup_sync_rag_templates():
 class RangeProposeRequest(BaseModel):
     problem_statement: str = ""
     data_range_desc: str = ""
-    problem_type: str = ""
+    problem_type: str | list[str] = ""
     std_code: str = ""
     lang: str = "cpp"
     special_samples_desc: str = ""  # 特殊样例描述；非空时单独生成 special_samples_count 个特殊样例
@@ -92,7 +106,7 @@ class JobRequest(BaseModel):
     problem_statement: str = ""
     data_range_desc: str = ""
     output_desc: str = ""  # 输出描述，special judge 时作为 checker 判定参考
-    problem_type: str = ""
+    problem_type: str | list[str] = ""
     range_json: Optional[dict[str, Any]] = None  # 若提供则跳过 Agent 写 range
     special_judge: bool = False  # 是否生成 special judge / checker.zip
     builtin_checker: str = ""  # 可选 lcmp/wcmp/rcmp4/rcmp6/rcmp9/yesno
@@ -165,8 +179,7 @@ def propose_range(req: RangeProposeRequest):
     """第一步：只生成 range 方案（同步，可能要等几十秒）。"""
     if not (req.problem_statement or "").strip() and not (req.data_range_desc or "").strip():
         raise HTTPException(400, "题面与数据范围至少填一项")
-    if req.problem_type and req.problem_type not in FEW_SHOTS:
-        raise HTTPException(400, f"problem_type 只支持: {list(FEW_SHOTS)}")
+    _validate_request_problem_type(req.problem_type)
     if req.lang not in ("python", "cpp"):
         raise HTTPException(400, "lang 只支持 python / cpp")
     try:
@@ -195,8 +208,7 @@ def submit(req: JobRequest):
         raise HTTPException(400, "lang 只支持 python / cpp")
     if not req.std_code.strip():
         raise HTTPException(400, "std_code 不能为空")
-    if req.problem_type and req.problem_type not in FEW_SHOTS:
-        raise HTTPException(400, f"problem_type 只支持: {list(FEW_SHOTS)}")
+    _validate_request_problem_type(req.problem_type)
     from agent.tools import BUILTIN_CHECKERS
     bc = (req.builtin_checker or "").strip().lower()
     if bc and bc not in BUILTIN_CHECKERS:

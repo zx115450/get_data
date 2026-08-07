@@ -128,7 +128,11 @@ def _run_range_only_agent(
     reused=True 表示核心字段相对已有方案未改（可继续沿用旧 gen_plan）。
     """
     from pipeline.gen_data import normalize_range_json, validate_range_json
-    from knowledge.few_shots import PROBLEM_TYPE_RANGE_HINT, resolve_problem_type_from_range
+    from knowledge.few_shots import (
+        PROBLEM_TYPE_RANGE_HINT,
+        normalize_problem_type,
+        resolve_problem_types_from_range,
+    )
     from server.range_agent import _build_all_type_hints_block
 
     path = job_dir / "range.json"
@@ -223,7 +227,7 @@ def _run_range_only_agent(
         f"约束极值名须带 edge_ 前缀（edge_k_min，禁止 k_min）；结构名可无前缀。"
         f"{action_line}"
         f"务必填写 special_constraints 字段（即使为空数组也要写）。\n"
-        f"务必填写 problem_type（与题面一致的英文标识符）。\n"
+        f"务必填写 problem_type：一个或多个与题面一致的英文标识符（如 tree / tree,multi_test / [tree,multi_test]）。\n"
     )
 
     job_store.add_progress(job, progress_label)
@@ -253,10 +257,10 @@ def _run_range_only_agent(
 
     data = normalize_range_json(dict(data))
     data.pop("std_cmd", None)
-    typ = resolve_problem_type_from_range(data, stmt_plain, range_plain, std_code)
+    typ = resolve_problem_types_from_range(data, stmt_plain, range_plain, std_code)
     data["problem_type"] = typ
     data["auto_discover_special"] = bool(auto_discover_special)
-    job_store.add_progress(job, f"【Range】题型(range.json): {typ}")
+    job_store.add_progress(job, f"【Range】题型(range.json): {', '.join(typ)}")
 
     after_sig = _range_core_signature(data)
     summary_l = (summary or "").strip()
@@ -304,7 +308,7 @@ def _run_range_only_agent(
                 range_plain,
                 std_code=std_code,
                 user_hint=special_samples_desc,
-                problem_type=typ,
+                problem_type=normalize_problem_type(typ),
                 samples_per_scheme=max(1, int(special_samples_count or 1)),
                 auto_discover=bool(auto_discover_special),
             )
@@ -336,21 +340,24 @@ def _run_range_only_agent(
     job_store.add_progress(
         job,
         f"【Range】{action} range.json: count={data.get('count')} "
-        f"type={typ} edge_cases={data.get('edge_cases')}",
+        f"type={', '.join(typ)} edge_cases={data.get('edge_cases')}",
     )
     return data, typ, reused
 
 
 def _build_planner_few_shot_block(
     job: job_store.Job,
-    problem_type: str,
+    problem_type: str | list[str],
     stmt_plain: str,
     range_plain: str,
     std_code: str,
 ) -> str:
     """取压缩版 few-shot（结构要点），写进度日志，返回可拼进 Planner prompt 的文本块。"""
+    from knowledge.few_shots import normalize_problem_type
+
+    first_type = normalize_problem_type(problem_type) or "array"
     few_shot_block, few_shot_summary = get_few_shot_rag(
-        problem_type, stmt_plain, range_plain, std_code, top_k=2, compact=True,
+        first_type, stmt_plain, range_plain, std_code, top_k=2, compact=True,
     )
     if few_shot_summary.startswith("RAG 召回"):
         short = few_shot_summary.replace("RAG 召回 2 个模板: ", "")
@@ -563,7 +570,7 @@ def _build_planner_task(
     output_plain: str,
     std_block: str,
     range_json: dict,
-    eff_type: str,
+    eff_type: str | list[str],
     special_samples_desc: str = "",
     special_samples_count: int = 1,
     few_shot_block: str = "",
@@ -600,7 +607,7 @@ def _build_planner_task(
         f"\n【range.json】\n```json\n{json.dumps(range_json, ensure_ascii=False, indent=2)}```\n"
         f"{special_note}"
         f"{few_shot_block}"
-        f"\n题型: {eff_type}\n"
+        f"\n题型: {', '.join(eff_type) if isinstance(eff_type, list) else (eff_type or '')}\n"
         "\n要求：第 2 节仅 1 行 constraints/opt；edge_cases 每个一行（打满上界则同行写 ≤K复用）；"
         "第 6 节 ensuref 清单或 read*+skipBlanks+readEof（strict=false，不验格式）；"
         "第 7 节只写 O(...)+瓶颈一句+K=整数（禁止逐 edge 展开）；"
@@ -696,7 +703,7 @@ def _build_coder_task(
     output_plain: str,
     std_for_prompt: str,
     range_json: dict,
-    eff_type: str,
+    eff_type: str | list[str],
     resume_failure_block: str,
     special_samples_desc: str = "",
     special_samples_count: int = 1,
@@ -715,7 +722,8 @@ def _build_coder_task(
     if len(output_ref) > 400:
         output_ref = output_ref[:400] + "\n...（输出描述已截断）..."
 
-    conflict_parts = [f"【冲突对照摘要 · 题型 {eff_type}】仅当与 gen_plan 冲突或格式不明时参考；禁止据此改策略。"]
+    type_label = ", ".join(eff_type) if isinstance(eff_type, list) else (eff_type or "")
+    conflict_parts = [f"【冲突对照摘要 · 题型 {type_label}】仅当与 gen_plan 冲突或格式不明时参考；禁止据此改策略。"]
     if stmt_ref:
         conflict_parts.append(f"\n【题面摘要】\n{stmt_ref}")
     if range_ref:
@@ -732,7 +740,8 @@ def _build_coder_task(
     conflict_block = "\n".join(conflict_parts)
 
     skeleton = ""
-    if (eff_type or "") in ("tree", "weighted_tree", "graph", "weighted_graph"):
+    from knowledge.few_shots import normalize_problem_types
+    if set(normalize_problem_types(eff_type)) & {"tree", "weighted_tree", "graph", "weighted_graph"}:
         skeleton = (
             "\n【最短可编骨架 · 树/图 · 必遵守】\n"
             '#include "generator.h"\n'
@@ -929,7 +938,7 @@ def run_gen_agent(
         + ("reused" if range_reused else "rewritten"),
     )
 
-    typ = typ or "array"
+    typ = typ if typ else ["array"]
 
     if (job_dir / "gen.cpp.good").is_file() or (job_dir / "gen.py.good").is_file():
         restore_good_snapshot(job_dir)
@@ -976,10 +985,17 @@ def run_gen_agent(
         if not _plan_looks_complete(plan_text):
             job_store.add_progress(job, "【Plan】首次计划不完整，补一次可执行完整版")
             multi_retry = ""
-            if (typ or "") == "multi_test" or (
+            from knowledge.few_shots import normalize_problem_types
+            typ_has_multi = (
+                (isinstance(typ, list) and "multi_test" in typ)
+                or (isinstance(typ, str) and typ == "multi_test")
+            )
+            range_types = normalize_problem_types(range_json.get("problem_type") if isinstance(range_json, dict) else None)
+            range_has_multi = "multi_test" in range_types
+            if typ_has_multi or (
                 isinstance(range_json, dict)
                 and (
-                    (range_json.get("problem_type") == "multi_test")
+                    range_has_multi
                     or (
                         "t" in {str(k).lower() for k in (range_json.get("constraints") or {})}
                         and any(
@@ -991,7 +1007,8 @@ def run_gen_agent(
             ):
                 multi_retry = (
                     "\n【分布硬约束】第 4/8 节必须写清本题组数/规模/数值轴（名从 constraints 来，"
-                    "不一定叫 t/n/ai）的小中大【全组合】（如 bA=i%3,bB=(i/3)%3,bC=(i/9)%3）；"
+                    "不一定叫 t/n/ai）的小中大【全组合】"
+                    "（bA=i%3，bB=(i/3)%3 规模硬约定，bC=(i/9)%3）；"
                     "禁止 random 恒组数=1；禁止数值全程打满；有 sum 时禁止双顶格。"
                 )
             retry_prompt = (

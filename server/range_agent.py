@@ -145,20 +145,36 @@ _TYPE_HINT_HEADER = {
 }
 
 
-def _build_type_hint_block(problem_type: str) -> str:
-    """根据题型拼一段 edge_cases 建议文本，拼到 task 里。未知题型返回空串。"""
-    if not problem_type or problem_type not in _TYPE_EDGE_HINTS:
+def _build_type_hint_block(problem_type: str | list[str]) -> str:
+    """根据题型拼一段 edge_cases 建议文本，拼到 task 里。未知题型返回空串。
+
+    支持多题型：会合并每个已知类型的建议。
+    """
+    from knowledge.few_shots import normalize_problem_types
+
+    types = normalize_problem_types(problem_type)
+    if not types:
         return ""
-    header = _TYPE_HINT_HEADER.get(problem_type, "")
-    examples = _TYPE_EDGE_HINTS[problem_type]
-    joined = ", ".join(examples)
+    blocks = []
+    for typ in types:
+        if typ not in _TYPE_EDGE_HINTS:
+            continue
+        header = _TYPE_HINT_HEADER.get(typ, "")
+        examples = _TYPE_EDGE_HINTS[typ]
+        joined = ", ".join(examples)
+        blocks.append(
+            f"【题型 edge_cases 建议（{typ}）】\n"
+            f"{header}：\n{joined}\n"
+        )
+    if not blocks:
+        return ""
     return (
-        f"\n\n【题型 edge_cases 建议（{problem_type}）】\n"
-        f"{header}：\n{joined}\n"
-        f"这些只是建议清单（few-shot 同理仅供参考），最终 edge_cases 必须与题面/标程一致；"
-        f"若题面有特殊结构约束（如「图是 DAG」「图连通」「存在哈密顿路径」「可达负环」），"
-        f"必须额外加对应边界（如 dag_acyclic / connected / has_hamiltonian / negative_cycle_reachable）"
-        f"并在 gen 里真正保证该性质。\n"
+        "\n\n"
+        + "\n".join(blocks)
+        + "这些只是建议清单（few-shot 同理仅供参考），最终 edge_cases 必须与题面/标程一致；"
+        "若题面有特殊结构约束（如「图是 DAG」「图连通」「存在哈密顿路径」「可达负环」），"
+        "必须额外加对应边界（如 dag_acyclic / connected / has_hamiltonian / negative_cycle_reachable）"
+        "并在 gen 里真正保证该性质。\n"
     )
 
 
@@ -237,7 +253,11 @@ def propose_range_json(
     题型由 Range Agent 写入 range.json.problem_type（不单独调大模型判型；忽略 GUI 传入题型）。
     auto_discover_special：用户未填特殊提示时，仍根据标程/题面自动挖特殊方案。
     """
-    from knowledge.few_shots import PROBLEM_TYPE_RANGE_HINT, resolve_problem_type_from_range
+    from knowledge.few_shots import (
+        PROBLEM_TYPE_RANGE_HINT,
+        normalize_problem_type,
+        resolve_problem_types_from_range,
+    )
 
     stmt = to_plain_for_llm(problem_statement)
     rng = to_plain_for_llm(data_range_desc)
@@ -290,7 +310,7 @@ def propose_range_json(
         f"约束极值名须带 edge_ 前缀（edge_k_min，禁止 k_min）；结构名可无前缀。"
         f"写完 write_range 后 finish。"
         f"务必填写 special_constraints 字段（即使为空数组也要写）。\n"
-        f"务必填写 problem_type（与题面一致的英文标识符）。\n"
+        f"务必填写 problem_type：一个或多个与题面一致的英文标识符（如 tree / tree,multi_test / [tree,multi_test]）。\n"
     )
     summary = agent_run(
         task,
@@ -310,7 +330,7 @@ def propose_range_json(
 
     data = normalize_range_json(dict(data))
     data.pop("std_cmd", None)
-    typ = resolve_problem_type_from_range(data, stmt, rng, std_code)
+    typ = resolve_problem_types_from_range(data, stmt, rng, std_code)
     data["problem_type"] = typ
     data["auto_discover_special"] = bool(auto_discover_special)
     print(f"[range_agent] problem_type from range.json: {typ}", flush=True)
@@ -325,9 +345,10 @@ def propose_range_json(
         )
         # 常规样例数信任 LLM（≥下限）；若残留旧特殊计数先剥掉再叠加
         regular = infer_regular_count(data)
+        type_for_special = normalize_problem_type(typ)
         print(
             f"[range_agent] discover special schemes "
-            f"(hint_len={len(hint)}, auto={bool(auto_discover_special)}, type={typ}, regular={regular})",
+            f"(hint_len={len(hint)}, auto={bool(auto_discover_special)}, type={type_for_special}, regular={regular})",
             flush=True,
         )
         schemes = discover_special_schemes(
@@ -335,7 +356,7 @@ def propose_range_json(
             rng,
             std_code=std_code,
             user_hint=hint,
-            problem_type=typ,
+            problem_type=type_for_special,
             samples_per_scheme=max(1, int(special_samples_count or 1)),
             auto_discover=bool(auto_discover_special),
         )

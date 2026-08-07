@@ -18,7 +18,6 @@ from .builders import (
     default_full_prompt,
 )
 from .core import (
-    BASE_GEN_API_MANUAL,
     BASE_GEN_RULES,
     BASE_GEN_RULES_CORE,
     BASE_VAL_RULES,
@@ -50,10 +49,15 @@ from .stages import (
 )
 from .types import (
     TYPE_ARRAY,
+    TYPE_DP,
     TYPE_GEO,
     TYPE_GRAPH,
+    TYPE_INTERACTIVE,
     TYPE_MATRIX,
+    TYPE_MULTI_TEST,
+    TYPE_NUMBER_THEORY,
     TYPE_PERMUTATION,
+    TYPE_RANGE_QUERY,
     TYPE_STRING,
     TYPE_TREE,
     _TYPE_MODULES,

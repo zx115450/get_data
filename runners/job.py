@@ -6,7 +6,7 @@ from typing import Any
 
 from agent import tools
 from storage import job_store
-from knowledge.few_shots import normalize_problem_type
+from knowledge.few_shots import normalize_problem_types
 from pipeline.gen_data import special_enabled
 from . import agent, batch, failure, resume, review, scaffold, snapshot
 from .snapshot import has_gen_val_at_resume
@@ -21,7 +21,7 @@ def _exe(base: str) -> str:
 def _run_job_impl(
     job: job_store.Job, std_code: str, lang: str,
     problem_statement: str, data_range_desc: str,
-    problem_type: str,
+    problem_type: str | list[str] | None,
     output_desc: str,
     range_json,
     special_judge: bool,
@@ -174,20 +174,22 @@ def _run_job_impl(
     range_plain = to_plain_for_llm(data_range_desc or "")
     has_preset_range = isinstance(range_json, dict) and bool(range_json.get("constraints"))
     if has_preset_range:
-        eff_type = normalize_problem_type(problem_type) or normalize_problem_type(
-            str(range_json.get("problem_type") or "")
+        eff_type = normalize_problem_types(problem_type) or normalize_problem_types(
+            range_json.get("problem_type")
         )
+        has_user_type = bool(normalize_problem_types(problem_type))
         type_note = "候选(待 Range 审核)" + (
-            "/用户指定" if normalize_problem_type(problem_type) else (
+            "/用户指定" if has_user_type else (
                 "/来自 range.json" if eff_type else ""
             )
         )
     else:
-        eff_type = ""
+        eff_type = []
         type_note = "待 Range 写入 problem_type"
+    type_label = ", ".join(eff_type) if eff_type else "(未定)"
     job_store.add_progress(
         job,
-        f"题型: {eff_type or '(未定)'} ({type_note})"
+        f"题型: {type_label} ({type_note})"
         + f" | 题面 {len(to_plain_for_llm(problem_statement or ''))} 字"
         + f" | 范围描述 {len(range_plain)} 字 | std {len(std_code)} 字",
     )
@@ -219,6 +221,9 @@ def _run_job_impl(
         std_for_prompt=std_for_prompt,
         lang=lang,
     )
+    # 续跑路径可能返回字符串，统一为列表便于下游处理
+    if isinstance(eff_type, str):
+        eff_type = normalize_problem_types(eff_type) or [eff_type]
     scaffold.ensure_agent_log(job, job_dir)
 
     # 3) 校验产物
@@ -304,7 +309,7 @@ def _run_job_impl(
 
 def run_job(job: job_store.Job, std_code: str, lang: str,
             problem_statement: str, data_range_desc: str,
-            problem_type: str = "",
+            problem_type: str | list[str] | None = "",
             output_desc: str = "",
             range_json=None,
             special_judge: bool = False,

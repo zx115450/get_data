@@ -103,9 +103,12 @@ def run_gen(seed: int, type: str = "random", index: int = -1, count: int = -1) -
         if rc == 124:
             return (
                 f"ERROR gen TIMEOUT after 5s type={type} seed={seed}: "
-                f"gen 算法太慢（很可能用了 O(n^2) 枚举/预建大池子）。"
-                f"请 read_file(\"gen.cpp\") 找到对应分支，改用 unordered_set 随机采样，"
-                f"重新 write_gen，再继续自检。不要重试同一段代码。"
+                f"gen 算法太慢或死循环。"
+                f"先查：若 while/set 凑唯一值，uni 是否 > 域基数（hi-lo+1 / 候选 size）"
+                f"→ 改为 uni=min(目标,域大小)；"
+                f"否则避免 O(n^2) 枚举/预建大池，改有上限采样或 generator.h。"
+                f"请 read_file(\"gen.cpp\") 找到对应分支，重新 write_gen，再继续自检。"
+                f"不要重试同一段代码。"
             )
         if rc == EXIT_MEMORY:
             return (

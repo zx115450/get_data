@@ -27,7 +27,6 @@ from gui.constants import (
     BUILTIN_CHECKER_OPTIONS,
     EDGE_CASE_UI_LIMIT,
     LANGS,
-    PROBLEM_TYPES,
     _SERVER_HOST,
     _SERVER_PORT,
     _builtin_checker_id_from_label,
@@ -36,7 +35,7 @@ from gui.constants import (
     _trim_edge_cases,
 )
 from gui.server_manager import _kill_pids, _pids_listening_on_port
-from gui import session as gui_session
+from storage import problem_store
 from gui.widgets import (
     STAGES,
     ToolTip,
@@ -50,8 +49,6 @@ from gui.widgets import (
     _fit_to_screen,
     _try_enable_dpi_awareness,
 )
-
-problem_store = gui_session.problem_store
 
 
 class App:
@@ -72,7 +69,8 @@ class App:
 
         # 公共变量
         self.lang = tk.StringVar(value="cpp")
-        self.ptype = tk.StringVar(value="自动")
+        # 题型只读展示：由 Range Agent / LLM 写入，界面不可选手动指定
+        self.ptype = tk.StringVar(value="待模型判定")
         self.special_judge_var = tk.BooleanVar(value=False)
         self.builtin_checker = tk.StringVar(value="无")
         self.count_var = tk.StringVar(value="")  # 常规样例数（不含特殊样例）
@@ -131,6 +129,23 @@ class App:
         self.root.bind("<Configure>", self._on_root_configure, add="+")
 
         self._show_tab("std")
+
+    @staticmethod
+    def _format_ptype_display(raw) -> str:
+        """把 range/LLM 返回的题型格式化为界面只读文案。"""
+        if isinstance(raw, list):
+            text = ", ".join(str(x) for x in raw if x)
+        else:
+            text = str(raw or "").strip()
+        if not text or text in ("自动", "待模型判定"):
+            return "待模型判定"
+        return text
+
+    def _set_detected_ptype(self, raw) -> str:
+        """更新题型只读展示；返回规范化后的显示字符串。"""
+        text = self._format_ptype_display(raw)
+        self.ptype.set(text)
+        return text
 
     # ---- UI 构建 ----
     def _build_header(self):
@@ -363,11 +378,12 @@ class App:
             cfg, textvariable=self.lang, values=LANGS, width=8, state="readonly",
         ).pack(side="left", padx=4)
         ttk.Label(cfg, text="题型：").pack(side="left", padx=(16, 0))
-        ttk.Combobox(
-            cfg, textvariable=self.ptype, values=PROBLEM_TYPES, width=12, state="readonly",
+        ttk.Label(
+            cfg, textvariable=self.ptype, bootstyle="info", width=28,
         ).pack(side="left", padx=4)
         ttk.Label(
-            cfg, text="（未提供方案时 Range 阶段一律 LLM 自动判型）", bootstyle="secondary",
+            cfg, text="（由大模型根据题面/标程自动判定，可多选；界面不可改）",
+            bootstyle="secondary",
         ).pack(side="left")
 
         code_frm = ttk.Labelframe(tab_std, text="标准程序代码", padding=4)
@@ -1847,6 +1863,7 @@ class App:
         self.memory_limit_var.set("1024")
         self._set_special_desc("")
         self.auto_discover_special_var.set(False)
+        self._set_detected_ptype("")
         for i in self.cons_tree.get_children():
             self.cons_tree.delete(i)
         self._clear_edge_list_ui()
@@ -1920,7 +1937,7 @@ class App:
             return None
         return v if v > 0 else None
 
-    def apply_range_plan(self, data: dict, problem_type: str = "", schemes: list | None = None):
+    def apply_range_plan(self, data: dict, problem_type: str | list[str] = "", schemes: list | None = None):
         """把 range dict 填到可视化控件；若带 problem_type 则同步题型下拉框。
 
         count 在 range.json 中代表总样例数；UI 的 count_entry 代表常规样例数。
@@ -1930,7 +1947,11 @@ class App:
             data = normalize_range_json(dict(data or {}))
         except Exception:
             data = dict(data or {})
-        ptype = (problem_type or data.get("problem_type") or "").strip()
+        raw_pt = problem_type or data.get("problem_type") or ""
+        if isinstance(raw_pt, list):
+            ptype = ", ".join(str(x) for x in raw_pt if x)
+        else:
+            ptype = str(raw_pt).strip()
         total_count = int(data.get("count") or 15)
         special_count = int(data.get("special_samples_count") or 0)
         special_desc = (data.get("special_samples_desc") or "").strip()
@@ -1995,8 +2016,9 @@ class App:
             self.auto_discover_special_var.set(bool(data.get("auto_discover_special")))
         if ptype:
             self.range_data["problem_type"] = ptype
-            if ptype in PROBLEM_TYPES:
-                self.ptype.set(ptype)
+            self._set_detected_ptype(ptype)
+        else:
+            self._set_detected_ptype("")
         self.count_var.set(str(regular_count))
         self.time_limit_var.set(str(time_limit))
         self.memory_limit_var.set(str(memory_limit))
@@ -2088,10 +2110,8 @@ class App:
             out["special_schemes"] = [dict(s) for s in self.special_schemes]
         if self.auto_discover_special_var.get():
             out["auto_discover_special"] = True
-        ptype = self.ptype.get()
-        if ptype and ptype != "自动":
-            out["problem_type"] = ptype
-        elif isinstance(self.range_data, dict) and self.range_data.get("problem_type"):
+        # 题型只来自 LLM 已写入的 range_data，不用界面下拉覆盖
+        if isinstance(self.range_data, dict) and self.range_data.get("problem_type"):
             out["problem_type"] = self.range_data["problem_type"]
         # 无多测 T 时剔除 edge_T1 等；与服务端 normalize 对齐
         try:
@@ -2195,11 +2215,9 @@ class App:
             return
 
         plan = self.collect_range_from_ui()
-        # 无完整方案时不传题型，由 Range 写入 problem_type（避免历史下拉写死 number_theory）
+        # 界面不传题型；有方案时带上 LLM 已写入的 problem_type，否则由 Range 重新判定
         if plan:
-            ptype = self.ptype.get()
-            if ptype == "自动":
-                ptype = plan.get("problem_type") or ""
+            ptype = plan.get("problem_type") or ""
         else:
             ptype = ""
         bc = _builtin_checker_id_from_label(self.builtin_checker.get())
@@ -2212,7 +2230,7 @@ class App:
         body = {
             "std_code": std,
             "lang": self.lang.get(),
-            "problem_type": ptype if ptype != "自动" else "",
+            "problem_type": "",  # 始终由大模型判定，界面不可指定
             "problem_statement": stmt,
             "data_range_desc": rng,
             "output_desc": out,
@@ -2223,10 +2241,13 @@ class App:
             "auto_discover_special": auto_disc,
         }
         if plan:
+            # range_json 内可保留 LLM 已判题型，供 Range 审核；顶层 problem_type 仍为空
             body["range_json"] = plan
             body["special_samples_count"] = int(plan.get("special_samples_count") or per_scheme)
             if plan.get("auto_discover_special"):
                 body["auto_discover_special"] = True
+            if ptype:
+                self._set_detected_ptype(ptype)
         # 历史 Job 加载时已选定的复用意图
         if self.pending_resume_parent_id:
             body["resume_context"] = {"parent_job_id": self.pending_resume_parent_id}
@@ -2426,8 +2447,6 @@ class App:
         except Exception:
             # 兜底：只看 data.zip
             try:
-                from pathlib import Path
-                import problem_store
                 d = problem_store.JOBS_DIR / str(job_id)
                 if not (d / "data.zip").is_file():
                     return None
@@ -3398,7 +3417,10 @@ class App:
             "id": self.current_problem_id or "",
             "title": title,
             "lang": self.lang.get() or "cpp",
-            "problem_type": self.ptype.get() or "自动",
+            "problem_type": self._format_ptype_display(
+                (isinstance(self.range_data, dict) and self.range_data.get("problem_type"))
+                or self.ptype.get()
+            ),
             "std_code": _get(self.std_code),
             "statement": stmt,
             "input_desc": _get(self.range_desc),
@@ -3438,11 +3460,10 @@ class App:
         lang = (ws.get("lang") or "cpp").strip().lower()
         if lang in LANGS:
             self.lang.set(lang)
-        ptype = (ws.get("problem_type") or "自动").strip() or "自动"
-        if ptype in PROBLEM_TYPES:
-            self.ptype.set(ptype)
-        else:
-            self.ptype.set("自动")
+        raw_pt = ws.get("problem_type") or ""
+        if isinstance(ws.get("range_plan"), dict) and ws["range_plan"].get("problem_type"):
+            raw_pt = ws["range_plan"].get("problem_type") or raw_pt
+        self._set_detected_ptype(raw_pt)
         self.special_judge_var.set(bool(ws.get("special_judge")))
         self.builtin_checker.set(_builtin_checker_label_from_any(ws.get("builtin_checker") or "无"))
         src = ws.get("source") or ""
@@ -3462,7 +3483,7 @@ class App:
                 self.job_id = str(ws.get("last_job_id"))
         plan = ws.get("range_plan")
         if load_range_plan and isinstance(plan, dict) and plan.get("constraints"):
-            self.apply_range_plan(plan, problem_type=ptype if ptype != "自动" else "")
+            self.apply_range_plan(plan, problem_type=plan.get("problem_type") or raw_pt)
         elif src in ("problem", "job") or not load_range_plan:
             self.clear_range_plan()
         self._update_problem_title_label(ws.get("title") or "")

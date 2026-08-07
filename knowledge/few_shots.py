@@ -160,9 +160,11 @@ KNOWN_PROBLEM_TYPES = tuple(FEW_SHOTS.keys())
 # 拼进 Range Agent 的 task/system：要求在同一次 write_range 里写出 problem_type
 PROBLEM_TYPE_RANGE_HINT = (
     "【problem_type — 必填】在 range.json 中写入字段 problem_type，"
-    "取值必须是下列之一（只写标识符，不要写中文）：\n"
+    "可以写一个或多个题型标识符（用 JSON 数组或逗号分隔，不要写中文）。\n"
+    "例如：\"tree\"、\"tree, multi_test\"、{\"tree\", \"multi_test\"} 或 [\"tree\", \"multi_test\"]。\n"
+    "可选值："
     + ", ".join(KNOWN_PROBLEM_TYPES)
-    + "\n\n分类原则（按优先级）：\n"
+    + "\n\n分类原则（按优先级；一个题目可同时具备多个属性）：\n"
     "1. 输入主体是树（n-1 条边、有根/无根树、子树、树上路径、树链剖分、LCA 等）"
     "→ tree；以边权/点权为主 → weighted_tree。\n"
     "2. 输入主体是一般图（连通性、最短路、DAG、二分图、网络流等）"
@@ -173,35 +175,86 @@ PROBLEM_TYPE_RANGE_HINT = (
     "多测 T+sum → multi_test；区间数据结构查询 → range_query；"
     "DP/背包 → dp；二维网格 → matrix；交互题 → interactive。\n"
     "5. 其余序列/数组题 → array。\n"
-    "先定 problem_type，再按该题型设计 edge_cases（见下方各题型建议）。\n"
+    "可同时写多个类型：如输入是「多测的树链剖分」可写 [\"tree\", \"multi_test\"]；"
+    "「区间 DP」可写 [\"dp\", \"range_query\"]。"
+    "系统会把这几个题型的提示词约束合并后交给 Coder。\n"
+    "先定 problem_type（们），再按这些题型设计 edge_cases（见下方各题型建议）。\n"
 )
 
 
-def normalize_problem_type(raw: str) -> str:
-    """把自由文本规范成已知题型标识；无法识别返回空串。"""
+def normalize_problem_types(raw: str | list | tuple | None) -> list[str]:
+    """把自由文本或列表规范成已知题型标识列表；去重保序；无法识别返回空列表。
+
+    支持："tree, multi_test"、["tree", "multi_test"]、"tree" 等。
+    """
     if not raw:
-        return ""
-    t = str(raw).strip().lower().replace(" ", "_").replace("-", "_")
-    t = t.strip("`\"'.,;:()[]")
-    if t in FEW_SHOTS:
-        return t
-    for line in str(raw).splitlines():
-        cand = line.strip().lower().replace(" ", "_").replace("-", "_")
-        cand = cand.strip("`\"'.,;:()[]")
-        # 允许 "题型: tree" / "type=tree"
-        m = re.search(
-            r"(?:problem_type|type|题型)\s*[:=：]\s*([a-z_]+)",
-            cand,
-        )
-        if m and m.group(1) in FEW_SHOTS:
-            return m.group(1)
-        if cand in FEW_SHOTS:
-            return cand
-    text = str(raw).lower()
-    for typ in KNOWN_PROBLEM_TYPES:
-        if re.search(rf"\b{re.escape(typ)}\b", text):
-            return typ
-    return ""
+        return []
+    if isinstance(raw, (list, tuple)):
+        tokens = [str(x) for x in raw]
+    else:
+        # 按中文/英文逗号、分号或空白分割；题型标识本身不含空白
+        tokens = re.split(r"[，,;；\s]+", str(raw).strip())
+    result: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        t = token.strip().lower().replace(" ", "_").replace("-", "_")
+        t = t.strip("`\"'.,;:()[]")
+        if not t:
+            continue
+        # 允许 "题型: tree" / "type=tree" 这种行内写法
+        m = re.search(r"(?:problem_type|type|题型)\s*[:=：]\s*([a-z_]+)", t)
+        if m:
+            t = m.group(1)
+        if t in FEW_SHOTS and t not in seen:
+            seen.add(t)
+            result.append(t)
+    return result
+
+
+def normalize_problem_type(raw: str | list | tuple | None) -> str:
+    """单题型兜底：返回第一个识别到的题型标识；没有返回空串。"""
+    types = normalize_problem_types(raw)
+    return types[0] if types else ""
+
+
+def detect_problem_types(
+    problem_statement: str,
+    data_range_desc: str = "",
+    std_code: str = "",
+) -> list[str]:
+    """关键词判型：返回得分 > 0 的题型列表，按得分降序，最多取 3 个。"""
+    stmt_scores = _score_by_keywords(problem_statement + " " + data_range_desc, _TYPE_KEYWORDS)
+    code_scores = _score_by_keywords(std_code, _STD_CODE_KEYWORDS)
+
+    scores = {typ: stmt_scores.get(typ, 0) + code_scores.get(typ, 0)
+              for typ in set(stmt_scores) | set(code_scores)}
+    sorted_types = [typ for typ, _ in sorted(scores.items(), key=lambda kv: -kv[1]) if scores[typ] > 0]
+    return sorted_types[:3]
+
+
+def detect_problem_type(
+    problem_statement: str,
+    data_range_desc: str = "",
+    std_code: str = "",
+) -> str:
+    """关键词判型单题型兜底：返回得分最高题型；全无命中默认 array。"""
+    types = detect_problem_types(problem_statement, data_range_desc, std_code)
+    return types[0] if types else "array"
+
+
+def resolve_problem_types_from_range(
+    range_json: dict | None,
+    problem_statement: str = "",
+    data_range_desc: str = "",
+    std_code: str = "",
+) -> list[str]:
+    """从 range.json 的 problem_type 取多题型；无效/缺失时关键词兜底，再默认 array。"""
+    if isinstance(range_json, dict):
+        types = normalize_problem_types(range_json.get("problem_type"))
+        if types:
+            return types
+    detected = detect_problem_types(problem_statement, data_range_desc, std_code)
+    return detected if detected else ["array"]
 
 
 def resolve_problem_type_from_range(
@@ -210,14 +263,9 @@ def resolve_problem_type_from_range(
     data_range_desc: str = "",
     std_code: str = "",
 ) -> str:
-    """从 range.json 的 problem_type 取值；无效/缺失时关键词兜底，再默认 array。"""
-    if isinstance(range_json, dict):
-        typ = normalize_problem_type(str(range_json.get("problem_type") or ""))
-        if typ:
-            return typ
-    return (
-        detect_problem_type(problem_statement, data_range_desc, std_code) or "array"
-    )
+    """单题型兼容入口：返回多题型中的第一个；用于仍需字符串的场景。"""
+    types = resolve_problem_types_from_range(range_json, problem_statement, data_range_desc, std_code)
+    return types[0] if types else "array"
 
 
 def get_few_shot(

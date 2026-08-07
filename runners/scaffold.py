@@ -14,7 +14,7 @@ def save_problem_workspace(
     problem_statement: str = "",
     data_range_desc: str = "",
     output_desc: str = "",
-    problem_type: str = "",
+    problem_type: str | list[str] | None = "",
 ) -> None:
     """把题面/输入/输出原文落到 job 目录，供 GUI「历史题目」回载。"""
     try:

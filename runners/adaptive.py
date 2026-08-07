@@ -1,7 +1,9 @@
 """Gen Agent 自适应步数。"""
 
+from knowledge.few_shots import normalize_problem_types
 
-def adaptive_steps(range_json: dict | None, problem_type: str, resume_info: dict | None) -> int:
+
+def adaptive_steps(range_json: dict | None, problem_type: str | list[str] | None, resume_info: dict | None) -> int:
     """根据题目复杂度给 Gen Agent 自适应步数。"""
     base = 50
     if resume_info:
@@ -31,9 +33,10 @@ def adaptive_steps(range_json: dict | None, problem_type: str, resume_info: dict
         score += 2
     elif special > 0:
         score += 1
-    if problem_type in ("graph", "tree", "geometry", "interactive", "dp"):
+    types = set(normalize_problem_types(problem_type))
+    if types & {"graph", "tree", "geometry", "interactive", "dp"}:
         score += 1
-    if problem_type in ("string", "matrix"):
+    if types & {"string", "matrix"}:
         score += 1
     steps = base + score * 10
     return max(50, min(steps, 100))

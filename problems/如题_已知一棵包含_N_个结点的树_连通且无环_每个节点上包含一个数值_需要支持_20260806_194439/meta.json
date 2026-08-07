@@ -3,8 +3,8 @@
   "title": "给定一个仅由小写英文字母组成的字符串 $S$。字符串 $S$ 中包含若干个（至少一个）子串 day 和若干个（至少一个）子串 gay，它们可能与其他字符穿插出现",
   "lang": "cpp",
   "problem_type": "string",
-  "last_job_id": "20260807_170054",
-  "updated_at": "2026-08-07T17:00:54",
+  "last_job_id": "20260807_180505",
+  "updated_at": "2026-08-07T18:05:05",
   "special_judge": false,
   "builtin_checker": "无",
   "source": "problem"

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from .core import (
-    BASE_GEN_RULES,
     BASE_GEN_RULES_CORE,
     BASE_VAL_RULES,
     CLI_CONTRACT,
@@ -39,16 +38,30 @@ from .stages import (
     SPECIAL_CODER_PROMPT,
     SPECIAL_FIXER_PROMPT,
     _GEN_API_GATE,
-    _GEN_API_GATE_BY_TYPE,
 )
 from .types import _TYPE_MODULES
 
-def _needs_perf(problem_type: str, range_json: dict | None) -> bool:
+
+def _normalize_problem_types(problem_type: str | list[str] | None) -> list[str]:
+    """把单字符串、逗号分隔串或列表统一成已知题型列表。"""
+    from knowledge.few_shots import normalize_problem_types
+
+    return normalize_problem_types(problem_type)
+
+
+_PERF_TYPES = frozenset({
+    "tree", "weighted_tree", "graph", "weighted_graph",
+    "geometry", "matrix", "range_query", "dp",
+})
+
+
+def _needs_perf(problem_type: str | list[str] | None, range_json: dict | None) -> bool:
     """是否注入性能硬约束模块。
 
     默认对树图、矩阵、大范围题启用；数组题若范围小可关闭。
     """
-    if problem_type in ("tree", "weighted_tree", "graph", "weighted_graph", "geometry", "matrix", "range_query", "dp"):
+    types = _normalize_problem_types(problem_type)
+    if any(t in _PERF_TYPES for t in types):
         return True
     if range_json is None:
         return False
@@ -62,11 +75,12 @@ def _needs_perf(problem_type: str, range_json: dict | None) -> bool:
 def _needs_multi(range_json: dict | None, problem_statement: str = "", std_code: str = "") -> bool:
     """是否注入多测 + sum 约束模块。
 
-    检测：题型 multi_test，或 constraints 含 T/t + sum_*，或题面/标程有 T + sum 描述。
+    检测：题型含 multi_test，或 constraints 含 T/t + sum_*，或题面/标程有 T + sum 描述。
     """
     if range_json is None:
         return False
-    if range_json.get("problem_type") == "multi_test":
+    types = _normalize_problem_types(range_json.get("problem_type"))
+    if "multi_test" in types:
         return True
     cons = range_json.get("constraints") or {}
     cons_keys = {str(k).lower() for k in cons}
@@ -80,7 +94,7 @@ def _needs_multi(range_json: dict | None, problem_statement: str = "", std_code:
 
 
 def build_full_prompt(
-    problem_type: str = "",
+    problem_type: str | list[str] | None = None,
     *,
     range_json: dict | None = None,
     problem_statement: str = "",
@@ -89,7 +103,7 @@ def build_full_prompt(
     """组装 gen/validator 阶段的完整 System Prompt。
 
     Args:
-        problem_type: 题型，如 tree/graph/array/geometry 等。
+        problem_type: 题型，可传一个标识符、逗号分隔串或列表，如 tree/graph/array/geometry 等。
         range_json: 已规划好的 range.json（可能为 None）。
         problem_statement: 题面文本，用于多测检测。
         std_code: 标程源码，用于多测检测。
@@ -109,15 +123,11 @@ def build_full_prompt(
     if _needs_perf(problem_type, range_json):
         parts.append(PERF)
 
-    parts.append(BASE_GEN_RULES)
+    parts.append(BASE_GEN_RULES_CORE)
     parts.append(BASE_VAL_RULES)
-
-    type_module = _TYPE_MODULES.get(problem_type, "")
-    if type_module:
-        parts.append(type_module)
-
     parts.append(RULES)
-    return "\n\n".join(parts)
+
+    return _with_type_modules(parts, problem_type)
 
 
 def build_range_prompt() -> str:
@@ -145,20 +155,24 @@ def build_planner_prompt() -> str:
     """
     return "\n\n".join([PLANNER_PROMPT, SCALE, MULTI_TEST, PERF])
 
-def _with_type_modules(base_parts: list[str], problem_type: str = "") -> str:
-    """在通用规则后追加题型门禁片段 + 题型模块（tree/graph 等）。"""
+def _with_type_modules(base_parts: list[str], problem_type: str | list[str] | None = None) -> str:
+    """在通用规则后追加题型模块（tree/graph 等）。
+
+    支持多题型：会按顺序去重追加每个类型对应的 TYPE_* 模块。
+    题型模块内已包含该类 API 与门禁，不再额外追加 _GEN_API_GATE_BY_TYPE。
+    """
     parts = list(base_parts)
-    pt = problem_type or ""
-    gate_extra = _GEN_API_GATE_BY_TYPE.get(pt, "")
-    if gate_extra:
-        parts.append(gate_extra)
-    type_module = _TYPE_MODULES.get(pt, "")
-    if type_module:
-        parts.append(type_module)
+    types = _normalize_problem_types(problem_type)
+    seen: set[str] = set()
+    for typ in types:
+        type_module = _TYPE_MODULES.get(typ)
+        if type_module and typ not in seen:
+            parts.append(type_module)
+            seen.add(typ)
     return "\n\n".join(parts)
 
 
-def build_coder_prompt(problem_type: str = "") -> str:
+def build_coder_prompt(problem_type: str | list[str] | None = None) -> str:
     """返回 Coder 阶段（硬自检）的 System Prompt。
 
     不注入 BASE_GEN_API_MANUAL：CODER_PROMPT 已含 _GEN_API_GATE，另附 TYPE_*。
@@ -169,7 +183,7 @@ def build_coder_prompt(problem_type: str = "") -> str:
     )
 
 
-def build_coder_rewrite_prompt(problem_type: str = "") -> str:
+def build_coder_rewrite_prompt(problem_type: str | list[str] | None = None) -> str:
     """返回 Coder Rewrite（骨架重写）阶段的 System Prompt。"""
     return _with_type_modules(
         [WRITE_CONTENT_GATE, CODER_REWRITE_PROMPT, PERF, BASE_GEN_RULES_CORE, BASE_VAL_RULES],
@@ -208,7 +222,7 @@ def build_fixer_prompt() -> str:
         FIXER_RULES,
     ])
 
-def build_gen_fixer_prompt(problem_type: str = "") -> str:
+def build_gen_fixer_prompt(problem_type: str | list[str] | None = None) -> str:
     """返回阶段 2（Gen Agent 自检失败后）Fixer Agent 的 System Prompt。
 
     已含 _GEN_API_GATE + TYPE_*，只附 BASE_GEN_RULES_CORE，避免与手册重复。
@@ -227,15 +241,15 @@ def build_gen_fixer_prompt(problem_type: str = "") -> str:
     )
 
 
-def build_special_coder_prompt(problem_type: str = "") -> str:
+def build_special_coder_prompt(problem_type: str | list[str] | None = None) -> str:
     """返回 SpecialCoder 阶段的 System Prompt。"""
     return _with_type_modules(
-        [SPECIAL_CODER_PROMPT, BASE_GEN_RULES],
+        [SPECIAL_CODER_PROMPT, BASE_GEN_RULES_CORE],
         problem_type,
     )
 
 
-def build_special_fixer_prompt(problem_type: str = "") -> str:
+def build_special_fixer_prompt(problem_type: str | list[str] | None = None) -> str:
     """返回 Special Fixer 阶段的 System Prompt。"""
     return _with_type_modules(
         [SPECIAL_FIXER_PROMPT, _GEN_API_GATE, BASE_GEN_RULES_CORE],

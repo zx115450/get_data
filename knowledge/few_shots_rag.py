@@ -492,8 +492,8 @@ def compress_few_shot_content(content: str) -> str:
     if multi_bucket or ("sum_n" in text and ("T_MAX" in text or "edge_Tmax" in text)) or ("bA" in text and "bB" in text):
         org_parts.append(
             "多测：random 用 index 解组数/规模/数值轴的小中大全组合"
-            "（如 bA=i%3,bB=(i/3)%3,bC=(i/9)%3；轴名以本题 constraints 为准）；"
-            "有 sum 时禁止组数与单组规模双顶格；禁止 random 恒组数=1"
+            "（bA=i%3 组数/数值，bB=(i/3)%3 规模硬约定，bC=(i/9)%3；"
+            "轴名以本题 constraints 为准）；有 sum 时禁止组数与单组规模双顶格；禁止 random 恒组数=1"
         )
         if "bC" in text or "a_lo" in text or "mag_bucket" in text:
             org_parts.append(

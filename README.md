@@ -172,9 +172,10 @@ python -m gui
 ### 1. 标程
 
 - **语言**：选 `cpp` 或 `python`（和你的标程一致）
-- **题型**：不会选就留「自动」。点「生成方案」时由 Range Agent **一并**写入 `range.json.problem_type`（不再单独调大模型判型），并回填下拉框。可选类型包括：
+- **题型**：不会选就留「自动」。点「生成方案」时由 Range Agent **一并**写入 `range.json.problem_type`（可写一个或多个，如 `graph, matrix`），并回填界面。可选类型包括：
   - 基础：`array` / `tree` / `graph` / `string` / `number_theory` / `multi_test`
-  - 扩展：`geometry` / `dp` / `matrix` / `range_query` / `weighted_tree` / `weighted_graph` / `interactive`
+  - 扩展：`geometry` / `dp` / `matrix` / `range_query` / `weighted_tree` / `weighted_graph` / `interactive` / `permutation`
+  - 多类型时，Coder 会合并对应题型提示词模块
 - 把**能正确通过样例的标程代码**完整粘贴进去
 
 标程非常重要：后面生成的输入会丢给标程跑，才能得到 `.out` 答案。
@@ -254,16 +255,16 @@ python -m gui
 
 ### 同题复用（自动）
 
-提交时，后端会尝试从 `jobs/` 里**最近 3 个带 `failure_context.json` 的历史任务**中找「同题」：
+提交时会尝试复用 `jobs/` 里的同题历史（题面原文 SHA256 + 标程原文 SHA256 + 语言三者一致）：
 
-- 判定依据：题面原文 SHA256 + 标程原文 SHA256 + 语言（`cpp` / `python`）三者完全一致
-- 命中后会复制父任务已有产物（例如 `range.json`），少做重复劳动
-- 因此：即使 GUI 没填「数据方案」，日志里也可能出现「同题校验通过…复制 range.json」，并跳过写 range
+1. **成功任务**：扫描最近约 **10** 个带 `data.zip` 的成功 job；命中可直接复用测例包，少跑整条流水线  
+2. **失败/取消上下文**：扫描最近约 **3** 个带 `failure_context.json` 的任务；命中可复制已有产物（如 `range.json`）并续跑  
 
 注意：
 
 - 只比对原文指纹，不看语义；题面或标程改一个字就不算同题
-- `failure_context.json` 一般在任务**失败或取消**时写入；纯成功结束的 job 通常不会成为候选父任务
+- GUI 日志里的「最近 10 个成功任务中未找到同题 data.zip」属于第 1 类检查
+- 因此：即使 GUI 没填「数据方案」，也可能因第 2 类复用而跳过写 range
 
 ---
 
@@ -295,7 +296,15 @@ Special Judge 或内置比较器产物（`checker.cpp` / 可执行文件 / `test
 
 ## 七、命令行与运维
 
-除 GUI 外，根目录 `main.py` 提供常用命令：
+根目录 `main.py` 是 **CLI 入口**（不是 GUI）。必须带子命令，例如：
+
+```powershell
+python main.py check-config
+```
+
+若只执行 `python main.py`（无子命令），会报 `the following arguments are required: cmd`，属正常提示。
+
+常用命令：
 
 ```powershell
 # 校验 .env / LLM 等配置是否可读
@@ -307,7 +316,7 @@ python main.py clean-jobs --max-keep 50 --dry-run
 
 # 汇总 agent_trace.jsonl：工具失败率 / 题型 token / nudge 空转
 python main.py analyze-traces
-python main.py analyze-traces --jobs-dir gui/jobs --top 20
+python main.py analyze-traces --jobs-dir jobs --top 20
 python main.py analyze-traces --json > trace_report.json
 
 # 对已有 range.json 的题目目录跑 CLI 流水线（开发用）
@@ -315,6 +324,14 @@ python main.py gen --problem problems/example --out out --zip data.zip
 
 # Agent 小 demo（需已配置 LLM）
 python main.py demo
+```
+
+日常出数据请用 GUI：
+
+```powershell
+python gui.py
+# 或
+python -m gui
 ```
 
 跑单元测试（不依赖真 LLM）：
@@ -335,21 +352,24 @@ python -m pytest
 ```text
 get_data/
 ├── gui/                 # 桌面界面（python -m gui / gui.py）
-├── server/              # FastAPI HTTP（python -m server）
-├── runners/             # 出题任务编排（run_job → 各阶段）
+├── server/              # FastAPI HTTP（python -m server）；部分文件为兼容转发
+├── runners/             # 出题任务编排（run_job → 各阶段）← 编排逻辑以这里为准
 ├── agent/               # LLM Agent 循环、tools、prompts/
 ├── pipeline/            # 批跑 gen → 打包 zip（不调 LLM）
-├── storage/             # 题目工作区 + Job 持久化
+├── storage/             # 题库 / Job / GUI 会话持久化
 ├── knowledge/           # few-shot / RAG / 结构提示
 ├── config/              # pydantic-settings 启动校验
 ├── sandbox/             # testlib.h、generator.h、内置 checker
 ├── utils/               # markup 等
+├── docs/                # 设计/变更说明等文档（可纳入 git）
+│                        # 例：docs/llm-agent-pipeline.md（大模型流水线与分支策略）
 ├── tests/               # pytest
 ├── scripts/             # bootstrap_env.py 一键初始化
 ├── data/                # RAG 语料等共享数据
 ├── problems/            # 本地题库工作区
 ├── jobs/                # 运行时任务目录（勿提交密钥与大体量产物）
-├── main.py              # CLI
+├── .cache/              # 本地缓存（含 GUI 草稿会话；已 gitignore）
+├── main.py              # CLI（必须带子命令）
 ├── gui.py               # 兼容入口 → gui.app
 ├── setup.py             # 交互初始化（非 setuptools 打包脚本）
 ├── pyproject.toml       # 包元数据、依赖、pytest、入口脚本
@@ -367,7 +387,19 @@ gui / main / server(HTTP)
    storage / knowledge / config
 ```
 
-旧路径如 `server/job_store.py`、`problem_store.py` 仍保留薄兼容层，新代码请优先 import `storage` / `knowledge` / `runners`。
+导入约定（请优先用正式包，勿再增加根目录兼容文件）：
+
+| 用途 | 正确 import |
+| --- | --- |
+| 题库 / 会话 / jobs 目录常量 | `storage.problem_store` / `storage.job_store` |
+| 任务编排 | `runners.*` |
+| few-shot / RAG | `knowledge.*` |
+
+说明：
+
+- GUI 草稿会话保存在 `.cache/gui_session.json`（不再放项目根目录）
+- `server/job_store.py`、`server/few_shots*.py`、`server/runners/*` 等仍可能是薄兼容层，新代码请直接 import 上表路径
+- 根目录已不再提供 `problem_store.py`；`gui/session.py` 也已移除
 
 ---
 
@@ -429,13 +461,21 @@ pip install -e ".[dev]" -i https://pypi.tuna.tsinghua.edu.cn/simple --no-build-i
 
 确认已在项目根执行过 `pip install -e ".[dev]"`，或至少用 `python -m pytest`（`pyproject.toml` 已配置 `pythonpath = ["."]`）。
 
+### 9. 裸跑 `python main.py` 报 `cmd` 必填？
+
+正常。`main.py` 是 CLI，必须带子命令（见「七、命令行与运维」）。要开界面请用 `python gui.py`。
+
+### 10. GUI 关掉后草稿去哪了？
+
+保存在 `.cache/gui_session.json`。删掉该文件只影响「下次打开是否恢复未写入题库的编辑」，不影响 `problems/` 与 `jobs/`。
+
 ---
 
 ## 十、给别人发这个项目时注意
 
 请打包 / 分享这些：
 
-- `agent/`、`server/`、`runners/`、`pipeline/`、`storage/`、`knowledge/`、`gui/`、`utils/`、`config/`、`sandbox/`（含 `testlib.h`、`generator.h`、内置 checker 源码）、`data/`、`tests/`、`scripts/`
+- `agent/`、`server/`、`runners/`、`pipeline/`、`storage/`、`knowledge/`、`gui/`、`utils/`、`config/`、`sandbox/`（含 `testlib.h`、`generator.h`、内置 checker 源码）、`data/`、`docs/`、`tests/`、`scripts/`
 - `gui.py`、`main.py`、`pyproject.toml`、`requirements.txt`、`.env.example`、`.gitignore`、`README.md`、`setup.py`（或 `scripts/bootstrap_env.py`）、`setup.bat`
 
 其中 **`data/few_shots_rag_corpus.json`** 是 RAG few-shot 语料（含历史优质范例与向量）。  
@@ -445,7 +485,7 @@ pip install -e ".[dev]" -i https://pypi.tuna.tsinghua.edu.cn/simple --no-build-i
 
 - `.env`（含你的密钥）
 - `.venv/`（对方自己装）
-- `jobs/`、`.cache/`（本地运行副本；种子在 `data/` 里已够用）
+- `jobs/`、`.cache/`（本地运行副本与 GUI 草稿；种子在 `data/` 里已够用）
 
 对方按本文「二、安装」和「三、配置」操作即可。
 

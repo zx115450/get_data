@@ -93,7 +93,7 @@ range.json 必须是合法 JSON，含：
 """
 
 RANGE_CONTRACT = """range.json 必须含：
-- problem_type: 题型标识符（英文枚举，与题面/标程匹配；可选项与分类原则见 task）
+- problem_type: 题型标识符（一个或多个英文枚举，与题面/标程匹配；可写字符串、逗号分隔串或 JSON 数组，如 "tree" / "tree, multi_test" / ["tree", "multi_test"]）
 - count: 正整数；本阶段写【常规样例数】。统一规则：count ≥ max(15, 3^k)，
   k = random 小中大轴数（见 SCALE；一维≥15、二维≥15、三维≥27）。用户未特别要求时不要无故写小于下限。
   有特殊样例时仍只写常规数，系统稍后会把 count 改成 常规 + 特殊。
@@ -150,10 +150,15 @@ random 必须对「本题 constraints 里的关键轴」做小/中/大覆盖，�
   B「大」= 组数很小且单组规模靠近 min(上界, sum 剩余)；禁止组数与每组规模同时顶格（必爆 sum）。
   有 sum 时必须按 MULTI_TEST「remain 拆分」实现，禁止只口头写「禁止双顶格」。
 
-【排列组合 · 必须】random 用 --index/--count 枚举各轴小中大的笛卡尔积，例如三维：
-  int i = opt<int>("index",0), C = max(1, opt<int>("count",27));
-  int bA = i % 3, bB = (i / 3) % 3, bC = (i / 9) % 3;  // 0小 1中 2大
-  // 缺某轴则不要取模该维；二维则 b0=i%3, b1=(i/3)%3
+【解轴 · 与自检对齐 · 硬】规模轴必须落在 (index/3)%3（三维记 bB）。
+  因此 index∈{0,1,2} 时规模档必为小；禁止 bSize = index % 3；禁止「规模走低位」的镜像解轴。
+  标准写法（0小 1中 2大）：
+    int i = opt<int>("index",0), C = max(1, opt<int>("count",27));
+    int bA = i % 3, bB = (i / 3) % 3, bC = (i / 9) % 3;
+    // bA=组数（无多测则可改作数值轴）；bB=规模（硬）；bC=数值/其它
+    // 二维无多测：bVal = i%3, bSize = (i/3)%3 —— 规模仍在 (i/3)%3，禁止放到 i%3
+  缺某轴则不要取模该维。自检小档压测依赖此约定（index 0/1/2 = 小规模）。
+【排列组合 · 必须】random 用 --index/--count 按上式枚举各轴小中大笛卡尔积；
 套件内每个组合至少出现一次（count ≥ max(15, 3^k)）；
 禁止只用一维对 n 插值、禁止数值轴全程 rnd(L,R) 打满、禁止多测 random 恒组数=1。
 
@@ -165,6 +170,9 @@ random 必须对「本题 constraints 里的关键轴」做小/中/大覆盖，�
   - 小档：状态域可放宽（唯一状态可接近该档规模）；
   - 中档：状态域半开（约 1e3～min(5000, 该档规模)）；
   - 大档：唯一状态 ≤ K，有限域复用凑满规模；
+  - 【唯一数 ≤ 域基数 · 硬】每档目标唯一状态数 uni 必须再 min 当前采样域大小
+    （如 hi-lo+1、字符表长、候选集 size）；跨轴全组合时小值域档尤易不够装中/大档 uni。
+    域装不下则降低 uni，保留规模与值域分层；禁止为凑 uni 去并档/改宽 lo-hi。
   - 种类敏感边界：另开中档规模 edge（或 random 中档），禁止「满规模上界 + 满种类」同一测点。
 """
 
@@ -211,6 +219,7 @@ PERF = """【性能硬约束 — 极重要 · Planner 与 Coder 均须遵守】
   - 内存：勿申请超几百 MB 的 vector；n=2e5 时 O(n)/O(n+m) 安全，O(n^2) 一定不安全。
   - TIMEOUT 处理：立刻改算法（枚举合法集 / 有上限采样 / generator.h），
     禁止无上限 while 重采碰运气；禁止只加时限；禁止用单一固定串糊弄整个 random。
+    若 while 凑唯一值：先查 uni 是否 > 域基数（hi-lo+1 / 候选 size），是则 uni=min(目标,域大小)。
 为满足 std ≤ time_limit_ms（与 gen 5s 硬限分开 · 防 std TIMEOUT）：
   - 【K 的定义 · 硬】K = 为让 std 在 time_limit 内稳定跑完而人为设定的「最大档有效状态上限」。
     唯一对象按标程实际吃什么计（唯一数值/键/顶点/权值种类等）。
@@ -222,7 +231,11 @@ PERF = """【性能硬约束 — 极重要 · Planner 与 Coder 均须遵守】
     * 可选种类边界 edge（如 many_distinct）：用中档规模拉高唯一状态；禁止与 edge_nmax 合并成「满规模+满种类」。
   - 【满规模 ≠ 满状态】大档规模打满时，从大小为 K 的有限域采样/复用凑满；禁止默认每条输入一个新状态。
   - 【读标程】结合数组上界、map/set、并查集是否压缩、多层循环等估瓶颈；不能仅凭「看起来线性」宣称安全。
-  - std TIMEOUT：仅压 FAIL 的 type 及同类最大档到 K≤200；保留小中档多样；禁止略微收窄；禁止只加时限/内存。
+    先判断有效状态变少是变快还是变慢：多数题大档压种类；若标程随「单种状态体量」变差，
+    应提高种类或限制单种体量，禁止盲目再压 K。
+  - std TIMEOUT：① 先核对 FAIL 的 index 是否因解轴错误落入大档（规模须在 (index/3)%3）；是则先修解轴；
+    ② 再按读标程方向调 FAIL type/同类最大档（多数压到 K≤200 有限域复用；少数题按标程反向调）；
+    保留小中档多样；禁止略微收窄；禁止只加时限/内存。
 """
 
 BASE_GEN_RULES_CORE = """gen.cpp 必须满足（testlib / ACM-generator 写法）：
@@ -248,6 +261,10 @@ BASE_GEN_RULES_CORE = """gen.cpp 必须满足（testlib / ACM-generator 写法�
     若用拒绝采样：必须设尝试上限；用尽仍失败 → 改成枚举合法集，
     禁止用单一固定串糊弄 random 多样性。
     固定首尾仅可用于专门 edge（如 pattern_at_start），或 n 极小且合法配置本就极少时的显式小档策略。
+  - 【唯一状态数 ≤ 域基数 · 硬】palette / 去重采样 / 有限域构造前：
+    uni = min(计划目标, 规模上限, 域大小)；域大小 = hi-lo+1、字符表长、候选 vector.size() 等。
+    禁止 uni > 域大小时仍 while 采满（域穷尽 → 死循环 → gen TIMEOUT）。
+    跨轴全组合下小值域档装不下中/大档种类目标时：降低 uni，勿并档改宽值域。
   - 只向 stdout 打印测例（printf/cout），调试信息走 stderr（fprintf(stderr,...)）
   - 禁止 std::shuffle(..., rnd)；打乱用 for+swap+rnd.next(0,i)
   - 未声明的标识符不要用（不要写 clock()/clamp 等除非自己实现或正确头文件）
@@ -260,11 +277,12 @@ BASE_GEN_RULES_CORE = """gen.cpp 必须满足（testlib / ACM-generator 写法�
     generator.h 默认输出若含首行规模字段，必须与第 1 节一致；不符则关输出开关或手写记录，禁止盲 cout << obj。
   - 【禁止截断 content】严格遵守 WRITE_CONTENT_GATE：功能不可省略、源码必须完整；
     鼓励短实现；出现 missing_content / recovered / 截断时立即整份重写。
+  - 【解轴 · 硬】规模档必须用 (index/3)%3（与 plan 第 4 节、自检小档压测一致）；禁止 index%3 当地规模。
   - 【满规模 ≠ 满状态 · 分层】constraints 上界只约束输出规模。
     * 大档 random 与打满上界的 edge：有效状态 ≤ gen_plan 第 7 节的 K（有限域复用凑满）；
     * 小/中档：按 plan 第 4 节放宽/半开状态域，保留多样性；
-    * 若 plan 的 K>500 或与规模同阶：实现时仍按 K≤500（TIMEOUT 后该最大档 ≤200）构造大档，
-      不必忠实错误大 K；小中档多样保留。
+    * 若 plan 的 K>500 或与规模同阶：实现时仍按 K≤500 构造大档；
+      TIMEOUT 且读标程确认应压种类时再将该最大档 ≤200；不必忠实错误大 K；小中档多样保留。
     禁止默认每条输入一个新状态；禁止「略收取值区间但仍可达上万种」冒充大档降密度。
   - 【定长拼装】目标长度 L 由前缀/循环块+补齐得到时：禁止口算补齐个数；
     先追加固定段，再按 L-(int)used 补齐（如 string(L-(int)s.size(), fill)）；拼完长度必须 == L。
@@ -278,92 +296,7 @@ BASE_GEN_RULES_CORE = """gen.cpp 必须满足（testlib / ACM-generator 写法�
     树/图类名必须 unweight:: / edge_weight:: 等前缀（禁止裸 Chain/Flower/Tree/Graph）；
     勿虚构 get_edges/shuffle/weight::/1e9。
 """
-
-BASE_GEN_API_MANUAL = """ACM-generator（generator.h）方法用法（对照官方手册 chutian-scpc.github.io/generator-docs）——
-本项目只用「结构/数组生成 API」，不用 fill_inputs / hack / compare / init_gen；
-入口仍是 registerGen + --seed/--type/--index/--count；using namespace generator::all。
-
-【通用流程】
-  1) 构造：Xxx obj(args…); 或先默认构造再 set_node_count / set_edge_count
-  2) 配置：set_*(…) / use_*(…)；有权须 set_nodes_weight_function / set_edges_weight_function
-  3) 生成：obj.gen();   // 未 gen 前不要读 edges()/points()
-  4) 输出：cout << obj; 或 for (auto &e : obj.edges()) … / 读 points()
-【setter / getter 约定】成员名在文档里写作 node_count，代码里：
-  node_count() 取值；set_node_count(n) 设值；node_count_ref() 拿内部引用（勿滥用）。
-  edges() / nodes_weight() 只能获取、不能 set；edges() 已换成真实结点编号。
-【四种权重命名空间】（类名前缀，构造与 set_* 用法一致；缺前缀会编译失败）：
-  unweight::X                 // 无点权边权；手写多字段边时也用这个
-  node_weight::X<NodeT>       // 须 set_nodes_weight_function([](){ return …; })
-  edge_weight::X<EdgeT>       // 须 set_edges_weight_function([](){ return …; })
-  both_weight::X<NodeT,EdgeT> // 两个 function 都要设
-  using namespace generator::all 不会把 Tree/Chain 变成全局名；必须写 unweight::Tree 等。
-【边 / 点权访问】
-  for (auto &e : t.edges()) { int u = e.u(), v = e.v(); /* 有边权：e.w() */ }
-  无边权边默认打印 "u v"；有边权默认 "u v w"。点权默认打印 w。
-【树 · 构造与方法】（示例一律带前缀）
-  unweight::Tree t(n);           // begin 默认 1；可 set_begin_node / use_pruefer / use_random_father
-  unweight::Chain ch(n);         // 链；禁止裸 Chain
-  unweight::Flower fl(n);        // 星；禁止裸 Flower
-  unweight::FlowerChain fc(n); fc.set_flower_size(k) 或 set_flower_chain_size(fs, cs)
-  unweight::HeightTree ht(n); ht.set_height(h);  // 强制有根；禁用 set_is_rooted
-  unweight::MaxDegreeTree md(n); md.set_max_degree(d)
-  MaxSonTree / DegreeTree / SonTree：同样加 unweight:: 或对应权重前缀
-  【类型】Tree/Chain/Flower/… 并列非继承；禁止 f(unweight::Tree&) 接收 Chain/Flower；
-    多形态打印用 auto& lambda / template，或分支内联各自类型。
-  算法切换（仅 Tree）：use_random_father() / use_pruefer() / set_tree_generator(…)
-  常用 set：set_node_count / set_begin_node / set_is_rooted / set_root
-    set_output_node_count(false) / set_output_root(false) / set_swap_node
-【树 · 默认 cout 格式】（末尾无多余空行）
-  首行：n（可关）；有根且 output_root 时同行为 n r 或仅 r
-  若有点权：下一行 n 个点权
-  随后 n-1 行边（u v [w]）
-  【重要】默认格式必须对齐标程；若标程只要边、或先 m 再边、或多字段 → 禁止盲 cout << t，改遍历 edges()
-【图 · 构造与方法】（同样必须带前缀）
-  unweight::Graph g(n, m=0); 同形：unweight::DAG / CycleGraph / WheelGraph / Cactus / Forest / …
-  unweight::BipartiteGraph(n, m=0, begin=1, left=-1)；set_left / set_left_right / rand_left()
-    输出首行：use_format_node() | use_format_left_right() | use_format_node_left() | use_format_node_right()
-    set_different_part(true) 时左右部各自从 begin 起编号
-  unweight::GridGraph(n, m=0)；set_row / set_row_column(r,c,ignore=0) / rand_row()
-  Forest：add_tree_size(sz) / set_trees_size({…})
-  性质：set_direction / set_multiply_edge / set_self_loop / set_connect
-  边数辅助：min_edge_count() / max_edge_count() / rand_edge_count(lo,hi) / set_edge_count
-  输出开关：set_output_node_count / set_output_edge_count
-【图 · 默认 cout 格式】
-  首行 n m（可分别关掉 n 或 m）；有点权则下一行 n 个权；再 m 行 u v [w]
-【几何 · 方法】
-  ConvexHull<T>(n, xl,xr,yl,yr) / SimplePolygon / Triangle；T 有符号整型或浮点（禁 unsigned）
-  set_xy_limit(xl,xr,yl,yr) 或 set_xy_limit("[-1e9,1e9]")；另有 set_x_limit / set_y_limit
-  ConvexHull 另有 set_max_try（默认 10，失败会异常）
-  单点：Point<T> p; p.rand(…); 或 rand_point<T>(…)
-  图形：…; obj.gen(); cout << obj;
-  默认输出：先 n（可 set_output_node_count(false)），再 n 行 x y；Triangle 为一行六个坐标
-  生成允许三点共线（非严格）；要严格凸自行过滤
-【数组 / 串 / 排列（函数，不是类）】
-  rand_p(n) → 0..n-1；rand_p(n, start) → 从 start 起
-  rand_string(n [, CharType|format]) / rand_string(lo,hi,…) / rand_palindrome / rand_bracket_seq
-  rand_sum(size, sum) / rand_sum(size,sum,min_part) / rand_sum(size,sum,from,to)  // 多测拆 sum_* 很有用
-  rand_vector：随机数组；更稳妥仍可用 testlib rnd.next / rnd.perm / rnd.next(\"[a-z]{n}\")
-【正确示例】
-  unweight::Tree t(n); t.gen(); cout << t << "\\n";
-  unweight::Chain ch(n); ch.set_begin_node(1); ch.gen();
-  for (auto &e : ch.edges()) printf("%d %d\\n", e.u(), e.v());
-  unweight::Flower fl(n); fl.gen();
-  edge_weight::Tree<int> t(n);
-  t.set_edges_weight_function([](){ return rnd.next(1, 1000000000); }); t.gen(); cout << t;
-  unweight::Tree t(n); t.gen();
-  for (auto &e : t.edges()) printf("%d %d %d %d\\n", e.u(), e.v(), a, b);  // 多字段边
-【错误 · 不存在或会编译失败】
-  Chain ch(n); / Flower fl(n); / Tree t(n); / Graph g(n,m);  // 缺 unweight:: 等前缀
-  weight::… / set_weight_limit（用 edge_weight:: + set_edges_weight_function）
-  get_edges()（用 edges()）/ Tree::shuffle() / 访问 _edges
-  虚构类 Sequence / Permutation / String / RandomPoints
-  rnd.next(1, 1e9)（仅 rnd.next：1e9 是 double → ambiguous；改 1000000000 或 LL。
-    勿套用到 validator 的 readLong——那里裸 int 上下界仍可能歧义，必须带 LL）
-  fill_inputs / hack / compare / init_gen（官方批处理，本框架禁用）
-"""
-
-# 完整手册（旧路径 / SpecialCoder 等仍可能整段注入）
-BASE_GEN_RULES = BASE_GEN_RULES_CORE + "\n\n" + BASE_GEN_API_MANUAL
+BASE_GEN_RULES = BASE_GEN_RULES_CORE
 
 BASE_VAL_RULES = """validator.cpp 写法（testlib）：
   - 【职责 · 只验合法性 · 不验输入格式】校验取值范围与题面结构性质；

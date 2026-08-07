@@ -42,7 +42,7 @@ include = [
 ]
 
 [tool.setuptools]
-py-modules = ["main", "problem_store"]
+py-modules = ["main"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

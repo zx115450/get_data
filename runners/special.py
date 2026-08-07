@@ -539,7 +539,7 @@ def run_special_agent(
     job: job_store.Job,
     job_dir: Path,
     range_json: dict,
-    typ: str,
+    typ: str | list[str],
     on_event,
     stmt_plain: str = "",
     range_plain: str = "",

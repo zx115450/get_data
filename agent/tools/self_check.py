@@ -46,9 +46,10 @@ def _constraint_lo(constraints: dict | None, keys: tuple[str, ...] = ("n", "N", 
 
 
 def _small_n_tier_indices(count: int) -> list[int]:
-    """与常见 gen 解轴 bB=(index//3)%3 对齐：返回小规模档 index（优先 0,1,2）。
+    """与 gen 解轴硬约定 bB=(index//3)%3 对齐：返回小规模档 index（优先 0,1,2）。
 
     index%9 ∈ {0,1,2} ⇒ bB=0（小 n）；其中 0/1/2 覆盖 bA 小/中/大 × 小 n。
+    禁止 gen 把规模放到 index%3（会与本压测错位）。
     """
     c = max(1, int(count or 1))
     out: list[int] = []
@@ -670,9 +671,15 @@ def run_self_check(
         elif timeoutish:
             fix_hint = (
                 "请根据 FAIL 修复 gen/validator 后重新 write_* 再 run_self_check。"
-                "【TIMEOUT/MEMORY】仅把该 type（及同类最大档）有效状态压到 K≤200，"
-                "用有限域复用凑满规模；保留小中档多样；禁止略微收窄取值区间；"
-                "满 constraints 上界 ≠ 状态数拉满；勿只靠加时限/内存。"
+                "【TIMEOUT/MEMORY】若为 gen TIMEOUT：先查唯一数 uni 是否 > 域基数"
+                "（hi-lo+1 / 候选 size）→ uni=min(目标,域大小)；再避免 O(n^2)/无上限 while。"
+                "若为 std TIMEOUT/MEMORY：① 先核 FAIL 的 index 解轴：规模须在 (index/3)%3，"
+                "禁止规模=index%3；误入大档则先修解轴。"
+                "② 再读标程判断有效状态变少是变快还是变慢："
+                "多数题把该 type/同类最大档压到 K≤200（有限域复用）；"
+                "若标程随单种状态体量变差则提高种类或限制单种体量，禁止盲目再压 K。"
+                "保留小中档多样；禁止略微收窄取值区间；满 constraints 上界 ≠ 状态数拉满；"
+                "勿只靠加时限/内存。"
             )
         else:
             fix_hint = (

@@ -1,0 +1,35 @@
+{
+  "count": 20,
+  "constraints": {
+    "t": [
+      1,
+      100
+    ],
+    "n": [
+      1,
+      10000
+    ],
+    "a": [
+      0,
+      1000000000
+    ],
+    "m": [
+      1,
+      1000000
+    ],
+    "k": [
+      0,
+      2000000000
+    ]
+  },
+  "edge_cases": [
+    "edge_n1",
+    "edge_nmax",
+    "edge_Tmax",
+    "edge_m_max",
+    "edge_k_max"
+  ],
+  "time_limit_ms": 5000,
+  "memory_limit_mb": 1024,
+  "problem_type": "array, multi_test"
+}

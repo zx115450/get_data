@@ -103,7 +103,8 @@ TYPE_ARRAY = """【数组 / 序列题型模块】
 【严禁】虚构类 Sequence / Permutation / String。type 用 string 分支。
 
 validator：长度、元素范围（≤long long 用 readLong；更大用 readToken/pattern）、单调/互异等题面约束。
-常见 edge：edge_n1, edge_nmax, all_equal, descending, all_negative, all_max_value, two_values。
+常见 edge：edge_n1, edge_nmax, all_equal, descending, all_negative, all_max_value, two_values, monotone, alternating。
+- 大档：数值种类 ≤ K，用有限域复用凑满规模；禁止满 n 且每个元素全新大随机。
 """
 
 TYPE_STRING = """【字符串题型模块】
@@ -148,18 +149,81 @@ validator：读 S 必须 readToken / readToken(\"[a-z]{…}\")；禁止 readInt(
 TYPE_PERMUTATION = """【排列题型模块】
 优先 testlib：rnd.perm(n) → 0..n-1，再整体 +1 得 1..n。
 或 generator.h：rand_p(n) / rand_p(n, start)；子集排列用 unordered_set 去重采样。
-【严禁】Permutation 类。type 用 string 分支。
+- 子集排列：从 1..n 中选出 k 个再做排列；k 小时直接枚举，k 大时用 unordered_set 采样。
+- 特殊结构：逆序数极端（正序 / 逆序）、相邻差受限、循环节少。
+- 常见 edge：edge_n1, edge_nmax, sorted, reversed, few_swaps, fixed_point_free。
+- 大档：若排列只是下标，n 可打满；若带值域，种类 ≤ K。
+- 严禁 Permutation 类。type 用 string 分支。
 
-validator：长度、范围、恰好为排列（无重复无遗漏）。
+validator：长度、范围 1..n、无重复。
+- 注意：若题目本质是「排列数组」但无特殊排列约束，可归 array。
 """
 
-TYPE_MATRIX = """【矩阵 / 网格题型模块】
-数值矩阵：testlib rnd.next 填 vector<vector<int>>。
+TYPE_MATRIX = r"""【矩阵 / 网格题型模块】
+数值矩阵：testlib rnd.next 填 vector<vector<int>>；输出按标程：先 n m 再 n 行，或按展平。
 网格图：unweight::GridGraph g(n, m); g.set_row(r) 或 set_row_column(r,c,ignore); g.gen();
   再 cout << g 或遍历 edges()；可 set_direction(true) 做有向网格。
+- 退化：全 0、全 1、单位阵、对角 / 反对角、单行 / 单列。
+- 迷宫 / 网格：保证起点到终点有路（先铺一条主路径再随机加墙），或按题面允许不可达。
+- 大档：矩阵元素种类 ≤ K，禁止 n×m 打满且每个格随机大值。
+- 常见 edge：edge_11, edge_nmax, row, col, all_zero, diagonal, anti_diagonal。
 type 用 string 分支。
 
-validator：行列规模、元素范围、题面连通/对称等性质。
+validator：行列规模、元素范围、题面连通 / 对称等约束。
+"""
+
+TYPE_NUMBER_THEORY = r"""【数论题型模块】
+数值构造优先让标程能 cheaply 验证：先固定小素数池 / gcd / 因子 / 模数，再生成。
+- 素数：预生成小素数表（如 ≤1e6），从大素数中抽样；禁止对每个 ai 做无上限试除。
+- gcd / lcm：可先生成基 g，再乘互素系数，保证 gcd 可控。
+- 逆元 / 同余：保证数值与模数互素；若要求非互素，按题面单独开 edge。
+- 组合数 / 阶乘：n 受模数限制，大档不超过 K 个不同阶乘值。
+- 模意义：用 long long；超 long long 见公共规则字符串构造。
+- 常用 testlib：rnd.next / rnd.perm；rand_sum 用于多测拆分。
+- 常见 edge：edge_n1, edge_nmax, all_equal, all_prime, coprime_pair, all_even, powers_of_two, square_free。
+- 大档：数值种类 ≤ K（如固定小素数池循环使用），禁止满 n 且每个数全新大随机。
+- 数论 validator：范围、互素（gcd=1）、素数、同余、模数约束等。
+"""
+
+TYPE_DP = r"""【动态规划 / 背包题型模块】
+输入主体是序列 / 数组 / 物品时按 array 模块生成；额外注意 DP 转移敏感点。
+- 背包：容量 W 与物品数量 / 体积小中大全覆盖；edge all_heavy（单件体积接近 W）、many_tiny（体积极小）、exact_fit（总体积 = W）。
+- 区间 / 序列 DP：中档拉高元素种类（1e3～5e3），大档种类 ≤ K，防止 O(n²·V) 标程炸。
+- 树形 DP：若输入主体是树，应判 tree 而非 dp；本模块不覆盖树形。
+- 状态压缩：n 一般 ≤ 20，不要对 n=1e5 用状压。
+- 常见 edge：edge_n1, edge_nmax, all_equal, all_zero, all_max_value, two_values, monotone。
+- 大档：数值 / 颜色 / 段数种类 ≤ K，用有限域复用凑满规模；禁止「满 n + 满值域」。
+- validator：范围、可选单调 / 互异 / 非负等。
+"""
+
+TYPE_RANGE_QUERY = r"""【区间查询 / 数据结构题型模块】
+通常先输入结构（数组 / 序列 / 图），再读操作数 q。
+- 双轴：结构规模 n 与操作数 q 都要小中大全覆盖；禁止 q 固定为 1 或 n 打满。
+- 操作类型：更新 / 查询比例要多样；全更新导致空 .out 是合法答案（见公共规则）。
+- 询问分布：point_queries / range_all / 随机区间；保证覆盖边界点。
+- 大档：操作值域 ≤ K（如更新值只从固定池取），防止标程 O(q log n) 内部常数爆炸。
+- 常见 edge：edge_n1, edge_nmax, q1, qmax, point_queries, range_all, only_update, only_query。
+- 多测：按公共 MULTI_TEST 拆分 sum_n / sum_q。
+- validator：结构字段 + 操作字段范围、下标合法、操作类型合法。
+"""
+
+TYPE_MULTI_TEST = r"""【多测题型模块】
+本类型只强化「多测 + sum」约束；具体每组数据仍按真实主体题型（array / string / tree / …）构造。
+- 必须按公共 MULTI_TEST 做 remain 拆分：先定 T，再 n_i = min(hint, remain / (T - i))。
+- 禁 edge_T1；T = 1 已被 edge_nmax / 攻规模覆盖。
+- 推荐 edge：edge_Tmax（或 big_T_small_n）、edge_nmax / small_T_big_n、sum_full。
+- 大 T 强制小 n；大 n 强制小 T；禁止双顶格。
+- 多测 validator：T 范围、sum_* 校验。
+- 注意：输入主体是树 / 图时，problem_type 仍写 tree / graph，系统会额外注入 MULTI_TEST。
+"""
+
+TYPE_INTERACTIVE = r"""【交互题型模块】
+当前框架以非交互批数据为主。若 problem_type 为 interactive：
+- 默认降级：生成能让交互协议 offline 可运行的初始输入（如第一次询问前的局面）。
+- 禁止在 gen.cpp 里伪造交互中间态（询问 / 回答序列）作为 .in。
+- 真正的交互判定由 checker / interactor 负责，本阶段只保证初始输入合法。
+- 若题目无法降级，请在 range.json 中明确说明，并直接 finish。
+- 常见：先输出初始局面规模，再按主体题型（array / graph / …）构造该局面。
 """
 
 _TYPE_MODULES = {
@@ -170,11 +234,11 @@ _TYPE_MODULES = {
     "geometry": TYPE_GEO,
     "array": TYPE_ARRAY,
     "string": TYPE_STRING,
-    "number_theory": TYPE_ARRAY,
-    "dp": TYPE_ARRAY,
+    "number_theory": TYPE_NUMBER_THEORY,
+    "dp": TYPE_DP,
     "matrix": TYPE_MATRIX,
-    "range_query": TYPE_ARRAY,
-    "multi_test": TYPE_ARRAY,
-    "interactive": "",
+    "range_query": TYPE_RANGE_QUERY,
+    "multi_test": TYPE_MULTI_TEST,
+    "interactive": TYPE_INTERACTIVE,
     "permutation": TYPE_PERMUTATION,
 }

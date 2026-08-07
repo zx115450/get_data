@@ -8,8 +8,9 @@ load_dotenv()
 _SERVER_HOST = os.getenv("SERVER_HOST", "127.0.0.1").strip() or "127.0.0.1"
 _SERVER_PORT = int(os.getenv("SERVER_PORT") or "8000")
 BASE = f"http://{_SERVER_HOST}:{_SERVER_PORT}"
+# 历史兼容：界面已不再提供题型下拉（由大模型判定）。RAG 筛选等仍可参考下列标识。
 PROBLEM_TYPES = [
-    "自动", "array", "tree", "graph", "string", "number_theory", "geometry",
+    "array", "tree", "graph", "string", "number_theory", "geometry",
     "multi_test", "dp", "matrix", "range_query", "weighted_tree", "weighted_graph",
     "interactive",
 ]

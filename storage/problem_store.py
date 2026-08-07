@@ -10,10 +10,19 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 PROBLEMS_DIR = ROOT / "problems"
 JOBS_DIR = ROOT / "jobs"
-SESSION_PATH = ROOT / ".gui_session.json"
+# GUI 草稿会话：放 .cache，避免污染项目根目录
+SESSION_PATH = ROOT / ".cache" / "gui_session.json"
+_LEGACY_SESSION_PATH = ROOT / ".gui_session.json"
 
 # 不作为「历史题目」列出的目录名
 _SKIP_PROBLEM_DIRS = {"example", "_session", "__pycache__"}
+
+
+def _format_problem_type(raw: Any) -> str:
+    """把题型格式化为可显示字符串；列表用逗号连接。"""
+    if isinstance(raw, list):
+        return ", ".join(str(x) for x in raw if x)
+    return str(raw or "")
 
 TEXT_FILES = {
     "statement": "statement.txt",
@@ -130,7 +139,7 @@ def save_problem_texts_to_dir(
     output_desc: str = "",
     std_code: str = "",
     lang: str = "cpp",
-    problem_type: str = "",
+    problem_type: str | list[str] | None = "",
     title: str = "",
     last_job_id: str = "",
     range_plan: dict | None = None,
@@ -214,7 +223,7 @@ def load_workspace_from_dir(src: Path, *, source: str = "") -> dict[str, Any] | 
         "id": str(meta.get("id") or src.name),
         "title": str(meta.get("title") or extract_title(statement, fallback=src.name)),
         "lang": lang,
-        "problem_type": str(meta.get("problem_type") or "自动") or "自动",
+        "problem_type": _format_problem_type(meta.get("problem_type")) or "自动",
         "std_code": std_code,
         "statement": statement,
         "input_desc": input_desc,
@@ -411,14 +420,24 @@ def delete_problem(problem_id: str) -> bool:
 def save_session(workspace: dict[str, Any]) -> None:
     data = dict(workspace)
     data["saved_at"] = datetime.now().isoformat(timespec="seconds")
+    SESSION_PATH.parent.mkdir(parents=True, exist_ok=True)
     _write_text(SESSION_PATH, json.dumps(data, ensure_ascii=False, indent=2))
+    # 根目录旧路径若仍在，写入成功后清理，避免两份草稿
+    if _LEGACY_SESSION_PATH.is_file() and _LEGACY_SESSION_PATH.resolve() != SESSION_PATH.resolve():
+        try:
+            _LEGACY_SESSION_PATH.unlink()
+        except OSError:
+            pass
 
 
 def load_session() -> dict[str, Any] | None:
-    if not SESSION_PATH.is_file():
+    path = SESSION_PATH if SESSION_PATH.is_file() else None
+    if path is None and _LEGACY_SESSION_PATH.is_file():
+        path = _LEGACY_SESSION_PATH
+    if path is None:
         return None
     try:
-        data = json.loads(SESSION_PATH.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
     if not isinstance(data, dict):
@@ -432,4 +451,10 @@ def load_session() -> dict[str, Any] | None:
         for k in ("std_code", "statement", "input_desc", "output_desc")
     ):
         return None
+    # 从旧路径读到后迁到 .cache
+    if path == _LEGACY_SESSION_PATH and path.resolve() != SESSION_PATH.resolve():
+        try:
+            save_session(ws)
+        except Exception:
+            pass
     return ws

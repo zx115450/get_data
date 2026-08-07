@@ -1,0 +1,27 @@
+{
+  "count": 18,
+  "constraints": {
+    "m": [
+      0,
+      250000
+    ],
+    "word_len": [
+      1,
+      10
+    ]
+  },
+  "edge_cases": [
+    "edge_m_min",
+    "edge_m_max",
+    "chain",
+    "path",
+    "disconnected"
+  ],
+  "time_limit_ms": 3000,
+  "memory_limit_mb": 1024,
+  "special_constraints": [
+    "木棍两端颜色接触相同，等价于图中每个顶点度数为偶或恰有2个奇度顶点（欧拉路径）",
+    "图必须连通（除去孤立点外）才能有欧拉路径"
+  ],
+  "problem_type": "graph, string"
+}
