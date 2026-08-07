@@ -1,23 +1,28 @@
 {
-  "count": 20,
+  "count": 15,
   "constraints": {
-    "n": [
+    "T": [
       1,
-      250000
+      100
+    ],
+    "S": [
+      6,
+      1000
     ]
   },
   "edge_cases": [
-    "edge_n1",
-    "edge_nmax",
-    "disconnected",
-    "chain",
-    "two_odd_vertices"
+    "edge_S_min",
+    "edge_S_max",
+    "pattern_at_start",
+    "pattern_at_end",
+    "all_same"
   ],
-  "time_limit_ms": 5000,
-  "memory_limit_mb": 1024,
+  "time_limit_ms": 1000,
+  "memory_limit_mb": 256,
   "special_constraints": [
-    "顶点为颜色字符串，边为木棍，允许多重边",
-    "要求判断无向多重图中是否存在欧拉路径（全部奇数度顶点数≤2且图连通）"
+    "每组字符串至少包含一个子串 day",
+    "每组字符串至少包含一个子串 gay",
+    "day 和 gay 首字母不同，不存在重叠"
   ],
-  "problem_type": "graph"
+  "problem_type": "string"
 }

@@ -1,10 +1,10 @@
 {
   "id": "如题_已知一棵包含_N_个结点的树_连通且无环_每个节点上包含一个数值_需要支持_20260806_194439",
-  "title": "题目描述",
+  "title": "给定一个仅由小写英文字母组成的字符串 $S$。字符串 $S$ 中包含若干个（至少一个）子串 day 和若干个（至少一个）子串 gay，它们可能与其他字符穿插出现",
   "lang": "cpp",
-  "problem_type": "graph",
-  "last_job_id": "20260806_225525",
-  "updated_at": "2026-08-06T23:01:50",
+  "problem_type": "string",
+  "last_job_id": "20260807_170054",
+  "updated_at": "2026-08-07T17:00:54",
   "special_judge": false,
   "builtin_checker": "无",
   "source": "problem"

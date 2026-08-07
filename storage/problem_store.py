@@ -56,6 +56,49 @@ def slugify_title(title: str) -> str:
     return (s[:40] or "problem")
 
 
+def normalize_problem_text(text: str) -> str:
+    """比较题面用：去 LaTeX $、折叠空白、小写。"""
+    s = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    s = re.sub(r"\$+", "", s)
+    s = re.sub(r"\s+", " ", s).strip().lower()
+    return s
+
+
+def statement_fingerprint(statement: str, *, n: int = 200) -> str:
+    return normalize_problem_text(statement)[: max(0, int(n))]
+
+
+def should_fork_problem(
+    existing: dict[str, Any] | None,
+    workspace: dict[str, Any],
+) -> bool:
+    """题面相对题库条目已明显换题 → True（应另存新 ID，勿原地覆盖）。
+
+    以题面标题（首行）为主：标题相同/高度相似视为同题微调；
+    标题明显不同则判定换题。标题缺失时回退到正文指纹。
+    """
+    if not existing:
+        return False
+    old_stmt = str(existing.get("statement") or "")
+    new_stmt = str(workspace.get("statement") or "")
+    if not old_stmt.strip() or not new_stmt.strip():
+        return False
+    old_title = normalize_problem_text(extract_title(old_stmt))
+    new_title = normalize_problem_text(extract_title(new_stmt))
+    if old_title and new_title:
+        if old_title == new_title:
+            return False
+        prefix = min(len(old_title), len(new_title), 24)
+        if prefix >= 12 and old_title[:prefix] == new_title[:prefix]:
+            return False
+        return True
+    old_fp = statement_fingerprint(old_stmt, n=160)
+    new_fp = statement_fingerprint(new_stmt, n=160)
+    if not old_fp or not new_fp:
+        return False
+    return old_fp[:80] != new_fp[:80]
+
+
 def empty_workspace() -> dict[str, Any]:
     return {
         "id": "",
@@ -231,13 +274,24 @@ def upsert_problem(
     *,
     problem_id: str | None = None,
     title: str | None = None,
+    force_new: bool = False,
+    forbid_divergent_overwrite: bool = False,
 ) -> dict[str, Any]:
-    """写入/更新 problems/<id>/，返回 meta（含 id）。"""
+    """写入/更新 problems/<id>/，返回 meta（含 id）。
+
+    force_new：忽略已有 id，按题面 slug 新建目录。
+    forbid_divergent_overwrite：若指定 id 已存在且题面明显换题，自动改走新建
+    （防止粘贴新题覆盖旧题库条目）。
+    """
     PROBLEMS_DIR.mkdir(parents=True, exist_ok=True)
-    pid = (problem_id or workspace.get("id") or "").strip()
+    pid = "" if force_new else (problem_id or workspace.get("id") or "").strip()
     ttl = (title if title is not None else workspace.get("title")) or extract_title(
         workspace.get("statement") or "", fallback=""
     )
+    if pid and forbid_divergent_overwrite:
+        existing = load_workspace_from_dir(PROBLEMS_DIR / pid, source="problem")
+        if should_fork_problem(existing, workspace):
+            pid = ""
     if not pid:
         base = slugify_title(ttl)
         pid = f"{base}_{_now_id()}"

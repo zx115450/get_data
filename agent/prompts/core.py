@@ -209,7 +209,8 @@ PERF = """【性能硬约束 — 极重要 · Planner 与 Coder 均须遵守】
       * K 接近 N 才退化；题目里通常 m << n*(n-1)/2。
   - 输出大文件用 printf / 快速 cout（已开 sync_with_stdio(false)），不要 endl。
   - 内存：勿申请超几百 MB 的 vector；n=2e5 时 O(n)/O(n+m) 安全，O(n^2) 一定不安全。
-  - TIMEOUT 处理：立刻改算法（随机采样 / generator.h），禁止只靠重试碰运气，禁止只加时限。
+  - TIMEOUT 处理：立刻改算法（枚举合法集 / 有上限采样 / generator.h），
+    禁止无上限 while 重采碰运气；禁止只加时限；禁止用单一固定串糊弄整个 random。
 为满足 std ≤ time_limit_ms（与 gen 5s 硬限分开 · 防 std TIMEOUT）：
   - 【K 的定义 · 硬】K = 为让 std 在 time_limit 内稳定跑完而人为设定的「最大档有效状态上限」。
     唯一对象按标程实际吃什么计（唯一数值/键/顶点/权值种类等）。
@@ -237,6 +238,16 @@ BASE_GEN_RULES_CORE = """gen.cpp 必须满足（testlib / ACM-generator 写法�
     某变量暂不用可 (void)x 或 [[maybe_unused]]，但 opt<>() 调用不能省。
   - --type 取值：字符串 "random"（默认分支）+ range.json edge_cases 里的每个名字
   - 用 rnd.next(l,r)/rnd.perm 或 generator::all 的 API 生成，保证可复现
+  - 【rnd.next 区间 · 硬门禁】调用 rnd.next(lo, hi) 前必须 lo ≤ hi（含相等）；
+    lo > hi → testlib 报 random_t::next: n must be positive / 崩溃。
+    禁止用 p±len 推「左右段」却不检查上下界（短串尤易炸）。
+    禁止对空 vector/候选集调用 rnd.next(0, size-1)（size==0 ⇒ hi=-1）。
+  - 【约束构造 · 优先可证明非空】需满足「至少含某子串/不重叠放置/互异」等时：
+    优先一次枚举全部合法对象（如所有不重叠 (p1,p2)）再 rnd 选一个；保证集合非空再采样。
+    【严禁】先随机钉死一个位置/对象，再收集「与之兼容」的候选再采——短约束下候选常空必炸。
+    若用拒绝采样：必须设尝试上限；用尽仍失败 → 改成枚举合法集，
+    禁止用单一固定串糊弄 random 多样性。
+    固定首尾仅可用于专门 edge（如 pattern_at_start），或 n 极小且合法配置本就极少时的显式小档策略。
   - 只向 stdout 打印测例（printf/cout），调试信息走 stderr（fprintf(stderr,...)）
   - 禁止 std::shuffle(..., rnd)；打乱用 for+swap+rnd.next(0,i)
   - 未声明的标识符不要用（不要写 clock()/clamp 等除非自己实现或正确头文件）
@@ -255,6 +266,8 @@ BASE_GEN_RULES_CORE = """gen.cpp 必须满足（testlib / ACM-generator 写法�
     * 若 plan 的 K>500 或与规模同阶：实现时仍按 K≤500（TIMEOUT 后该最大档 ≤200）构造大档，
       不必忠实错误大 K；小中档多样保留。
     禁止默认每条输入一个新状态；禁止「略收取值区间但仍可达上万种」冒充大档降密度。
+  - 【定长拼装】目标长度 L 由前缀/循环块+补齐得到时：禁止口算补齐个数；
+    先追加固定段，再按 L-(int)used 补齐（如 string(L-(int)s.size(), fill)）；拼完长度必须 == L。
   - 【超 long long · 用字符串构造】若题面/constraints 数值超出 64 位有符号整数
     （|x| > 9·10^18，或位数/上界明确超过 long long，如 10^100、千位大整数）：
     禁止用 int/long long/__int128 存或 rnd.next 采样该值；必须按十进制字符串构造并输出
@@ -359,6 +372,12 @@ BASE_VAL_RULES = """validator.cpp 写法（testlib）：
       inf.strict = false;  // 关闭严格空白；连续 read* 即可，空白自动跳过
   - 用 inf.readInt(l, r) / readLong / readInts / readToken 按标程字段顺序读入；
     禁止为「格式门禁」写 readSpace / readEoln。
+  - 【读字符串 · 硬门禁】单行一词（小写串 / 数字串 / token）必须用
+      inf.readToken() 或 inf.readToken(\"[a-z]{L,R}\", \"S\")；
+      禁止：readInt(T) / readInt(n) 之后立刻 readString()/readLine() 读下一行串。
+      readString=readLine：只读【当前行剩余】到行末；T 独占一行时第一次会读到空串
+      → 假报 |S| out of range / missing pattern，与 gen 无关。
+      仅当字段本身含空格（整句文案）才用 readLine/readString。
   - 【收尾 · 硬门禁】readEof() 不跳空白；strict=false 读完后指针常停在行末 \\n。
       必须：inf.skipBlanks(); inf.readEof();
       禁止：裸 inf.readEof();（合法输入也会 Expected EOF）。
@@ -374,6 +393,7 @@ BASE_VAL_RULES = """validator.cpp 写法（testlib）：
   - 范围不符 / ensuref 失败会 quit 到 stderr。
     Unexpected white-space → 设 inf.strict=false，去掉 readSpace/readEoln，勿改 gen。
     Expected EOF（已读完全部字段、报在末行）→ 补 skipBlanks() 再 readEof；勿改 gen 删换行。
+    |S|/长度 out of range 且 gen 明显打了非空串 → 先查是否误用 readString，再查 gen。
   - 【ensuref 政策】树/图题，或 range.json special_constraints / 题面「保证/约定」含结构性质
     → 必须 ensuref 校验（连通用并查集/BFS，禁止深递归 DFS）；
     仅有范围、无结构性质 → 只用 read* + skipBlanks + readEof，禁止编造 ensuref。

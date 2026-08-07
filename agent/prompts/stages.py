@@ -43,13 +43,27 @@ PLANNER_PROMPT = """你是算法竞赛测试数据生成器设计专家。任务
        * 声明套件内 3^k 组合都要出现；有 sum 时写清 remain 与「大 T→强制小 n」；
        * 禁止「组数恒 1」「数值全程打满上界」。
    - 5. edge_cases 映射（唯一定义处 · 每个名字一行）：
-       格式：`- name: 参数/构造 + 打印输入 + API；若打满规模上界则追加「≤K复用: …」`。
+       格式：`- name: 参数/构造（须满足全部 special_constraints）+ 打印输入 + API；若打满规模上界则追加「≤K复用: …」`。
        【分支名】name 原样 → type == "name"；禁止自行加/删 edge_ 前缀。
+       【special_constraints / 题面保证 · 硬门禁 · 优先于状态密度】
+         * 每个 edge 的构造必须仍满足 range.json special_constraints 与第 6 节全部 ensuref；
+           写完每一行默念：能否通过第 6 节全部 ensuref？不能则重写。
+         * 「≤K 复用 / all_same / 少种模式循环」只降低多样性，不得删掉任一必含模式/结构；
+           禁止为降密度而漏掉题面要求的多种必含模式之一。
+         * 有限域复用不得破坏题面保证；必含的多种模式各自至少保留 1 个，再对其它位置复用。
+       【定长拼装 · 硬门禁】
+         * 目标规模 L（|S|/n/m/边数等）若由多段拼接、循环块 + 补齐得到：必须写出可核对等式
+           （各段长度或「块长×次数」之和 = L；补齐数 = L − 已用，且 ≥0）。
+         * 禁止只写「拼到 L / 补若干」却不写各段长度与和；写完自检左边之和 = 声明的 L。
+       【多模式植入】须放置 ≥2 个互不重叠定长片段时：plan 写明「一次枚举合法 (p1,p2) 再采」；
+         禁止「先采 p1 再滤 p2」；n=各长之和时写特判拼接。
        树/图：t.gen(); cout << t 或 edges()；禁止 get_edges/shuffle。
        种类敏感边界用中档规模；禁止写答案/失败文案；不要写 edge_T1。
        【禁止】第 7/8 节再展开任何 edge 构造细节。
    - 6. validator（可执行清单，尽量短）：
        * 读入顺序与 gen/标程对齐；inf.strict=false（不验空格/换行格式）；
+       * 单行一词字符串字段写死 readToken / readToken(pattern)；
+         禁止 readInt 后接 readString/readLine（会读到空串）；
        * 有结构性质 → 列出 ensuref 项；仅范围 → 写「read* + skipBlanks + readEof，无 ensuref」；
        * 禁止 readSpace/readEoln；收尾必须写 skipBlanks() 再 readEof()（禁止裸 readEof）。
    - 7. 复杂度与规模预算（短 · 禁止逐 edge 展开）：
@@ -76,13 +90,19 @@ PLANNER_PROMPT = """你是算法竞赛测试数据生成器设计专家。任务
    第 8 节超过 4 行、或展开 edge 构造、或粘贴 opt/type 代码 → 不合格；
    第 7 节逐 edge 展开、或未区分 gen 5s 与 time_limit_ms、或 O(n^2) 建边池 → 不合格；
    第 7 节未给出具体整数 K、或 K>5000、或把 K 写成数组长度/刚好装下/与规模同阶/理论全集 → 不合格；
-   第 5 节打满上界的 edge 写「共规模个不同状态 / 一边一新状态」且无 ≤K 复用 → 不合格。
+   第 5 节打满上界的 edge 写「共规模个不同状态 / 一边一新状态」且无 ≤K 复用 → 不合格；
+   第 5 节任一 edge 构造明显违反 special_constraints / 第 6 节 ensuref
+   （漏掉题面要求的必含模式/结构）→ 不合格；
+   第 5 节定长 edge 未给出「各段长度之和 = 目标 L」的可核对等式，或等式与目标 L 不符 → 不合格。
 
 只输出 Markdown 计划，然后结束。"""
 
 _VALIDATOR_GATE = """【validator 写法 · 硬政策】
 - 【职责】只验合法性（范围 + 结构 ensuref），不验输入格式（空格/换行/行末空白）。
-- registerValidation 后必须 inf.strict = false；连续 readInt/readLong/readInts，禁止为格式写 readSpace/readEoln。
+- registerValidation 后必须 inf.strict = false；连续 readInt/readLong/readInts/readToken，禁止为格式写 readSpace/readEoln。
+- 【读字符串 · 硬门禁】单行一词用 readToken / readToken(pattern)；
+  禁止 readInt(T) 后 readString()/readLine() 读下一行串（读到空串 → 假 |S| out of range）。
+  仅整句含空格才用 readLine/readString。
 - 【收尾 · 硬门禁】readEof() 不跳空白；必须 inf.skipBlanks(); inf.readEof();
   禁止裸 readEof()（行末 \\n 会误报 Expected EOF）。
 - 【ensuref】树/图题，或 range.json special_constraints / 题面「保证/约定」含结构性质
@@ -100,11 +120,14 @@ using namespace std;
 int main(int argc, char* argv[]) {
     registerValidation(argc, argv);
     inf.strict = false;  // 不验空白格式
-    int n = inf.readInt(1, 100000);
-    int m = inf.readInt(0, 100000);
-    // 可变长一行：auto p = inf.readInts(k, 1, n);
-    long long w = inf.readLong(1LL, 1000000000LL);  // 上下界必须带 LL
-    // ... ensuref 结构性质（如需要）
+    int T = inf.readInt(1, 100);
+    for (int t = 0; t < T; t++) {
+        // 下一行字符串：必须 readToken，禁止 readString/readLine
+        string s = inf.readToken("[a-z]{1,1000}", "S");
+        // int n = inf.readInt(1, 100000);
+        // long long w = inf.readLong(1LL, 1000000000LL);  // 上下界必须带 LL
+        // ... ensuref 结构性质（如需要）
+    }
     inf.skipBlanks();  // 必做：吃掉行末空白，否则 readEof 误报
     inf.readEof();
     return 0;
@@ -164,7 +187,10 @@ _GEN_API_GATE_GRAPH = """图构造要点（类名一律带前缀）：
 _GEN_API_GATE_GEO = """几何：ConvexHull/SimplePolygon/Triangle + set_xy_limit + gen()；Point/rand_point；禁 RandomPoints
 """
 
-_GEN_API_GATE_ARRAY = """数组函数：rand_p / rand_string / rand_sum（拆 sum_*）/ rand_vector；不是 Sequence 类
+_GEN_API_GATE_ARRAY = """数组/串函数：rand_p / rand_string / rand_sum（拆 sum_*）/ rand_vector；不是 Sequence 类
+【采样】rnd.next(lo,hi) 必须 lo≤hi；多约束放置必须一次枚举合法 (p1,p2) 再采；
+  严禁「先 rnd p1，再 pool 兼容 p2」；禁对空 vector 调 rnd.next(0,sz-1)；禁无上限拒绝采样；
+  失败勿用单一固定串糊弄 random（专用 edge 除外）。
 """
 
 # problem_type → 附加到通用门禁后的题型速查（原文拆分，不改措辞）
@@ -235,6 +261,11 @@ plan 第 5/6 节是编码主规格；第 8 节仅为固定短模板（顺序提�
    而第 1 节输入格式或标程读入与此矛盾：以第 1 节 + 标程读入为准实现 gen（只打印输入字段），
    忽略第 5 节中的「输出答案」步骤；不必先判定「plan 是否混淆」。validator 仍按第 6 节校验【输入】。
    规模头严格按第 1 节：无规模头则禁止先打印 n/m/T 等计数；有规模头则必须按约定顺序打印。
+3b. 【定长拼装】打满上界的串/数组若由前缀/循环块+补齐得到：禁止口算补齐个数；
+   用目标 L 与已用长度：先追加固定段，再 `s += string(L - (int)s.size(), fill)`（或等价）；
+   拼完应保证 size/长度 == L。validate 报长度/pattern 上下界不符且该 type 声称满 L → 先查拼超/拼短。
+3c. 【多模式植入】random/小档若须放置 ≥2 个互不重叠定长片段：必须一次枚举合法 (p1,p2) 对再采；
+   禁止先 rnd p1 再收集兼容 p2 的 pool（短串 pool 空 → n must be positive）。n=各模式长之和时特判拼接。
 4. 读完 plan 后按第 5/6/8 节直接 write_gen + write_validate（可并行，各自完整 content）。禁止重复读 gen_plan.md。
    【首轮禁止空读】首轮没有 gen.cpp / validator.cpp：禁止写入前读它们。
 5. include / registerGen / API 按 plan；opt/type 必须用上方【固定样板】（plan 若写 int type / 缺省样板，以样板为准）。
@@ -287,6 +318,9 @@ CODER_REWRITE_PROMPT = """你是 ACM 数据生成器 / 校验器编码专家。�
    - unused key / 仅在 random 分支读 index/count（须分支前全部 opt）；
    - 编译 no match for operator== / opt<int>(\"type\") / if (type == 0)：按固定样板改成 string type；
    - 编译 call of overloaded next / ambiguous（rnd.next）：把 1e9 改成 1000000000 或 1000000000LL；
+   - 运行 random_t::next: n must be positive：rnd.next(lo,hi) 出现 lo>hi（短串 p±len 拆段常见）；
+     或多模式「先 rnd p1 再 pool 兼容 p2」导致空候选。改一次枚举所有不重叠 (p1,p2) 再采；
+     n=各模式长之和时特判拼接；禁止用单一固定串糊弄整个 random；
    - 编译 call of overloaded readLong / ambiguous：上下界必须带 LL
      （readLong(1LL, 1000000000LL)）；禁止只改成裸 1000000000（仍是 int，仍歧义）；
    - weight:: / set_weight_limit：单权改 edge_weight:: + set_edges_weight_function；多字段边改 unweight:: + edges()；
@@ -294,11 +328,14 @@ CODER_REWRITE_PROMPT = """你是 ACM 数据生成器 / 校验器编码专家。�
      补权重前缀，如 unweight::Chain / unweight::Flower；using generator::all 不够；
    - 编译 invalid initialization of reference … Tree& from Chain/Flower：
      删掉 Tree& 辅助函数，改成 auto&/template 或分支内联；
-   - gen TIMEOUT / MEMORY（超出 plan 第 7 节 / O(n^2) 枚举等）：换采样或 generator.h，禁止加大 time_limit_ms；
+   - gen TIMEOUT / MEMORY（O(n^2) / 无上限拒绝采样死循环等）：改枚举合法集或有上限采样；禁止加大 time_limit_ms；
    - std TIMEOUT / MEMORY：仅把 FAIL 的 type（及同类最大档）有效状态压到 K≤200，
      用有限域复用凑满规模；保留小中档多样；禁止略微收窄取值区间；勿只加内存/时限；外层会再强制 full；
    - 输入格式与 plan/标程读入顺序不匹配；或 validate 像 gen 打成了答案（Expected integer）；
    - validate 首 token 类型与第 1 节规模头约定不符（多打/少打了 T/n/m 等）→ 按第 1 节修正 gen，勿放宽范围/结构校验；
+   - |S|/长度 out of range 或 token 不匹配 pattern 上下界、且多组/满长 edge 皆挂：
+     先查定长拼装是否拼超/拼短（禁止口算补齐字面量，用 L-(int)s.size()）；
+     再查 validator 是否 readInt 后误用 readString/readLine → 改 readToken；
    - Unexpected white-space：设 inf.strict=false，去掉 readSpace/readEoln；
    - Expected EOF（已读完字段、报在末行）：补 skipBlanks() 再 readEof；禁止裸 readEof；
    - write_* 截断/空 content / 编译半截失败（必须整份重写 content）；
@@ -596,6 +633,10 @@ GEN_FIXER_WORKFLOW = """修复流程：
    - 编译 invalid initialization of reference … Tree& from Chain/Flower：
      删掉 Tree& 辅助函数，改成 auto&/template 或分支内联。
    - 编译 call of overloaded next / ambiguous：把 rnd.next 里的 1e9 改成 1000000000 或 LL。
+   - 运行 random_t::next: n must be positive：rnd.next(lo,hi) 的 lo>hi，
+     或空候选 vector 上 rnd.next(0,sz-1)；
+     若代码是「先 rnd p1 再 pool 兼容 p2」→ 改一次枚举所有不重叠 (p1,p2) 再采；
+     n=各模式长之和时特判拼接；禁止用固定串糊弄整个 random。
    - 编译 call of overloaded readLong / ambiguous：上下界带 LL
      （readLong(1LL, 1000000000LL)）；不要只改成裸 1000000000。
    - weight:: / set_weight_limit：单权用 edge_weight:: + set_edges_weight_function；多字段边用 unweight:: + edges()。
@@ -604,8 +645,12 @@ GEN_FIXER_WORKFLOW = """修复流程：
    - write_validate 编译/运行报错：先看是否 readLong 字面量歧义（须 LL）；
      有结构性质则补 ensuref；仅范围则检查 read* + skipBlanks + readEof；确保 inf.strict=false。
    - unused key 'seed'|'type'|'index'|'count'：在 type 分支前补齐全部 opt<>()，禁止只在 random 里读。
-   - gen TIMEOUT / MEMORY / rc != 0：生成器算法超出 plan 复杂度预算，修 gen.cpp。
-   - validate FAILED：gen 输出违反范围/结构约束；优先修 gen.cpp，必要时再调整 validator.cpp（不能为了过校验而牺牲正确性）。
+   - gen TIMEOUT / MEMORY / rc != 0：若像无上限 while 重采 → 改枚举合法集；否则修算法复杂度。
+   - validate FAILED：先分清 gen 真坏还是 validator 误读。
+     若 |S|/长度 out of range 或 pattern `{lo,hi}` 不匹配且该 type 声称打满上界：
+     先查定长拼装是否口算补齐导致拼超/拼短（应用 L-(int)s.size() 补齐）；
+     若疑似空串：查 validator 是否 readInt 后误用 readString/readLine → 改 readToken；
+     结构/范围真违反才改 gen；不能为过校验牺牲正确性。
    - Unexpected white-space：validator 仍在 strict 格式读 →
      设 inf.strict=false 并去掉 readSpace/readEoln；禁止为此改 gen 去删空格。
    - Expected EOF（报在末行、字段已读完）：缺 skipBlanks → 改为 inf.skipBlanks(); inf.readEof();

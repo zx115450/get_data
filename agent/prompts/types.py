@@ -114,7 +114,34 @@ TYPE_STRING = """【字符串题型模块】
   rand_palindrome / rand_bracket_seq。
 【严禁】String(n,'a','z') 类。type 用 string 分支。
 
-validator：字符集、长度、子串/前后缀/周期等。
+【植入多个定长模式 / 保证含子串 · 硬门禁】
+  题面要求至少含两个互不重叠定长模式（记长 LA、LB，如两段长度各为 3）时：
+  1) 【唯一合法写法】一次枚举所有不重叠起点对 (p1,p2)，集合非空后再
+     rnd.next(0, sz-1)；n 极小（n==LA+LB）时特判两种固定拼接顺序。
+  2) 【严禁 · 先采再滤】禁止先 rnd 一个 p1，再把「与 p1 不重叠的 p2」推进 vector/pool
+     后对 pool 做 rnd.next(0, size-1)：短串上 pool 常空 → n must be positive 崩溃。
+  3) 禁止：用 p±len 拆左右区间却不保证 lo≤hi；禁止无上限 while(重叠)重采。
+  4) 拒绝采样若保留：必须有上限；用尽 → 改枚举合法对，勿把 random 退化成永远同一固定串。
+  5) pattern_at_start/end 等 edge 才用「固定首/尾」；random 小档也要多样且 n=LA+LB 可跑通。
+
+  【反例 · 禁止】（先 p1 再 pool——短串必炸）
+    int p1 = rnd.next(0, n - LA);
+    vector<int> pool;
+    for (int x = 0; x + LB <= n; ++x)
+      if (不与 p1 重叠) pool.push_back(x);
+    int p2 = pool[rnd.next(0, (int)pool.size() - 1)];  // size==0 → 崩溃
+
+  【正例 · 必须】
+    if (n == LA + LB) { /* 两种拼接顺序特判 */ return; }
+    vector<pair<int,int>> cand;
+    for (int p1 = 0; p1 + LA <= n; ++p1)
+      for (int p2 = 0; p2 + LB <= n; ++p2)
+        if (不重叠(p1,LA,p2,LB)) cand.push_back({p1, p2});
+    auto [p1, p2] = cand[rnd.next(0, (int)cand.size() - 1)];  // n>=LA+LB 时 cand 恒非空
+
+validator：读 S 必须 readToken / readToken(\"[a-z]{…}\")；禁止 readInt(T) 后 readString/readLine。
+  再 ensuref 字符集、长度、子串/前后缀/周期等。
+【定长串】满长度用 L - 已用长度补齐；禁止「块长 + 手写填充个数」口算导致 ≠L。
 常见 edge：edge_n1, edge_nmax, all_same, pattern_at_start/end, no_match, long_run, two_chars。
 """
 

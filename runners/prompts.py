@@ -320,10 +320,11 @@ def build_gen_fixer_task(
         f"\n【自检失败摘要】\n```\n{error_log}\n```",
         "\n【动作】\n"
         "1. 先 read_file(\"gen_plan.md\") 对齐策略，再 read_file(\"gen.cpp\") / \"validator.cpp\"。\n"
-        "2. 根据失败类型判断根因：gen TIMEOUT/MEMORY → 优化算法；"
+        "2. 根据失败类型判断根因：gen TIMEOUT/MEMORY → 优化算法（无上限拒绝采样→改枚举合法集）；"
         "validate FAILED → 先看 stderr："
         "Expected EOF（报在末行）→ validator 补 skipBlanks() 再 readEof（禁止裸 readEof）；"
         "Unexpected white-space → 设 inf.strict=false 并去掉 readSpace/readEoln；"
+        "random_t::next n must be positive → rnd.next(lo,hi) 的 lo>hi，改枚举合法位再采；"
         "范围/结构失败则优先修 gen；std FAILED → 对齐字段顺序/降低规模。\n"
         "   unused key seed/type/index/count → 在 type 分支前补齐全部 opt<>()。\n"
         "   编译 no match for operator== / opt<int>(\"type\") / if (type == 0) → "

@@ -17,6 +17,87 @@ from .context import (
 from .run import _is_special_type, run_gen, run_property_check, run_validate
 from .write import write_gen, write_special_check, write_special_gen, write_validate
 
+# random 小档压测：多 seed × 小规模档 index，尽早撞出空候选 rnd.next(0,-1)
+_MIN_TIER_STRESS_SEEDS_FAST = 3
+_MIN_TIER_STRESS_SEEDS_FULL = 2
+_MIN_TIER_STRESS_BASE_SEED = 2200
+
+
+def _constraint_lo(constraints: dict | None, keys: tuple[str, ...] = ("n", "N", "S", "|S|", "len", "length")) -> int | None:
+    """从 constraints 取规模下界（优先 n / S / |S|）。"""
+    if not isinstance(constraints, dict):
+        return None
+    lower = {str(k).lower(): k for k in constraints}
+    for want in keys:
+        raw_key = lower.get(want.lower())
+        if raw_key is None:
+            continue
+        v = constraints[raw_key]
+        if isinstance(v, (list, tuple)) and len(v) >= 1:
+            try:
+                return int(v[0])
+            except (TypeError, ValueError):
+                continue
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _small_n_tier_indices(count: int) -> list[int]:
+    """与常见 gen 解轴 bB=(index//3)%3 对齐：返回小规模档 index（优先 0,1,2）。
+
+    index%9 ∈ {0,1,2} ⇒ bB=0（小 n）；其中 0/1/2 覆盖 bA 小/中/大 × 小 n。
+    """
+    c = max(1, int(count or 1))
+    out: list[int] = []
+    for i in range(min(c, 9)):
+        if (i // 3) % 3 == 0:
+            out.append(i)
+    return out or [0]
+
+
+def _append_min_tier_random_stress(
+    checks: list[tuple[str, int, int, int | None]],
+    count: int,
+    *,
+    seeds_per_index: int,
+    base_seed: int = _MIN_TIER_STRESS_BASE_SEED,
+) -> None:
+    """追加 random 小档多 seed 压测（不落盘）。"""
+    seeds_per_index = max(1, int(seeds_per_index))
+    for j, idx in enumerate(_small_n_tier_indices(count)):
+        for s in range(seeds_per_index):
+            checks.append(("random", base_seed + j * 10 + s, idx, None))
+
+
+def _rnd_empty_hint(fails: list[str]) -> str:
+    """空候选 / lo>hi 类 gen 崩溃时的定点修复提示。"""
+    blob = "\n".join(fails)
+    if "n must be positive" not in blob and "must be positive" not in blob.lower():
+        return ""
+    return (
+        "【定点】random_t::next n must be positive：多为空候选或 lo>hi。"
+        "若先 rnd 一个位置再 pool 兼容位置 → 改一次枚举所有不重叠 (p1,p2)，非空再采；"
+        "n=各模式长之和时特判拼接。禁止对空 vector 调 rnd.next(0,sz-1)。"
+    )
+
+
+def _val_readstring_hint(fails: list[str]) -> str:
+    """validator 误用 readString 导致假 |S| out of range 时的定点提示。"""
+    blob = "\n".join(fails)
+    if "out of range" not in blob.lower() and "|S|" not in blob:
+        return ""
+    # 几乎所有 type 都 validate 失败且像长度问题 → 高度疑似读空串
+    val_fails = [f for f in fails if "validate" in f.lower()]
+    if len(val_fails) < 2:
+        return ""
+    return (
+        "【定点】多组 validate 报 |S|/长度 out of range：优先查 validator——"
+        "禁止 readInt(T) 后用 readString/readLine（只读当前行剩余，常得空串）；"
+        "单行一词改 inf.readToken(\"[a-z]{L,R}\", \"S\")。确认后再查 gen。"
+    )
 def ensure_self_check_prereqs(
     skip_recompile: set[str] | frozenset[str] | None = None,
     require_special: bool | None = None,
@@ -367,7 +448,9 @@ def run_self_check(
          成功则写入 out/{i+1}.in/.out，供阶段 4 批量 reuse_existing 复用；
       2) 再对每个 edge_case 补一次 index=count-1 的最大档压测（不落盘）。
     fast_mode=True：减少组数并使用中等规模，用于修复循环中间轮次；不写 out/。
+      额外对 random 小档 index（bB=0，通常 0/1/2）跑多 seed 压测，尽早暴露空候选采样崩溃。
     tiny_mode=True：只跑最小档，用于完整自检失败后的返工轮；不写 out/。
+      同样追加小档多 seed。
     skip_special=True：跳过特殊样例（普通 Gen 阶段；不要求 gen_special）。
     special_only=True：只测 special_samples（SpecialCoder 阶段）。
 
@@ -460,6 +543,7 @@ def run_self_check(
         for i, typ in enumerate(edge_cases):
             checks.append((typ, 1000 + i, 0, None))
         checks.append(("random", 2000, 0, None))
+        _append_min_tier_random_stress(checks, count, seeds_per_index=2)
         if has_special:
             checks.append(("special_samples", 2500, 0, None))
         for name in multi_hints:
@@ -471,6 +555,10 @@ def run_self_check(
             checks.append((typ, 1000 + i, min(i, mid_index), None))
         checks.append(("random", 2000, 0, None))
         checks.append(("random", 2001, mid_index, None))
+        # 小档多 seed：尽早撞 n≈下界时空候选 rnd.next 崩溃（勿等 full 才进 Rewrite）
+        _append_min_tier_random_stress(
+            checks, count, seeds_per_index=_MIN_TIER_STRESS_SEEDS_FAST,
+        )
         if has_special:
             checks.append(("special_samples", 2500, mid_index, None))
         for name in multi_hints:
@@ -509,6 +597,10 @@ def run_self_check(
         for name in multi_hints:
             if name in edge_cases:
                 checks.append((name, 11000 + hash(name) % 100, max_idx, None))
+        # 小档多 seed 补充压测（不落盘）：降低「调度未抽到极短 n」漏网
+        _append_min_tier_random_stress(
+            checks, count, seeds_per_index=_MIN_TIER_STRESS_SEEDS_FULL,
+        )
 
     # 去重保序：交付组按 persist_slot 优先；压测按 (type, index, seed)
     seen = set()
@@ -533,6 +625,14 @@ def run_self_check(
         lines.append("full: aligned with batch schedule; OK cases written to out/ for reuse")
     if isinstance(constraints, dict) and constraints:
         lines.append(f"constraints_keys={list(constraints.keys())}")
+        n_lo = _constraint_lo(constraints)
+        min_idxs = _small_n_tier_indices(count)
+        if n_lo is not None:
+            lines.append(
+                f"stress: random min-tier indices={min_idxs} (constraints n_lo={n_lo})"
+            )
+        else:
+            lines.append(f"stress: random min-tier indices={min_idxs}")
     fails = []
     written = 0
     nonempty_out = 0
@@ -561,6 +661,8 @@ def run_self_check(
             ("TIMEOUT" in f) or ("MEMORY_LIMIT" in f) for f in fails
         )
         branch_hint = _self_check_branch_miss_hint(fails)
+        rnd_hint = _rnd_empty_hint(fails)
+        val_hint = _val_readstring_hint(fails)
         if special_only:
             fix_hint = (
                 "请根据 FAIL 修复 gen_special.cpp 后重新 write_special_gen 再 run_self_check。"
@@ -576,6 +678,10 @@ def run_self_check(
             fix_hint = (
                 "请根据 FAIL 修复 gen/validator 后重新 write_* 再 run_self_check。"
             )
+        if val_hint:
+            fix_hint = val_hint + "\n" + fix_hint
+        if rnd_hint:
+            fix_hint = rnd_hint + "\n" + fix_hint
         if branch_hint:
             fix_hint = branch_hint + "\n" + fix_hint
         result = (

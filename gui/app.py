@@ -162,7 +162,19 @@ class App:
             act_box, text="保存题目", bootstyle="outline-secondary", command=self.on_save_problem,
         )
         self.btn_save_problem.pack(side="left", padx=2)
-        ToolTip(self.btn_save_problem, "保存标程/题面/输入/输出到题库（problems/）")
+        ToolTip(self.btn_save_problem, "保存标程/题面/输入/输出到题库（problems/）；换题时会提示另存或覆盖")
+        self.btn_save_as_new = ttk.Button(
+            act_box, text="另存为新题", bootstyle="outline-secondary",
+            command=self.on_save_as_new_problem,
+        )
+        self.btn_save_as_new.pack(side="left", padx=2)
+        ToolTip(self.btn_save_as_new, "始终新建题库条目，不覆盖当前关联的旧题")
+        self.btn_new_problem = ttk.Button(
+            act_box, text="新建题目", bootstyle="outline-secondary",
+            command=self.on_new_problem,
+        )
+        self.btn_new_problem.pack(side="left", padx=2)
+        ToolTip(self.btn_new_problem, "清空工作区并断开题库 ID，避免粘贴新题覆盖旧题")
         self.btn_open_history = ttk.Button(
             act_box, text="历史题目", bootstyle="outline-secondary",
             command=lambda: self._show_tab("history"),
@@ -669,6 +681,13 @@ class App:
             hist_ops, text="保存当前为题目", bootstyle="outline-secondary", command=self.on_save_problem,
         ).pack(side="left", padx=2)
         ttk.Button(
+            hist_ops, text="另存为新题", bootstyle="outline-secondary",
+            command=self.on_save_as_new_problem,
+        ).pack(side="left", padx=2)
+        ttk.Button(
+            hist_ops, text="新建题目", bootstyle="outline-secondary", command=self.on_new_problem,
+        ).pack(side="left", padx=2)
+        ttk.Button(
             hist_ops, text="删除题库条目", bootstyle="outline-danger", command=self.on_history_delete,
         ).pack(side="left", padx=2)
         self.history_status = tk.StringVar(value="点「刷新列表」查看已出题目与 Job")
@@ -1061,6 +1080,8 @@ class App:
         compact = mode in ("compact", "narrow")
         try:
             self.btn_save_problem.config(text="保存" if compact else "保存题目")
+            self.btn_save_as_new.config(text="另存" if compact else "另存为新题")
+            self.btn_new_problem.config(text="新建" if compact else "新建题目")
             self.btn_open_history.config(text="历史" if compact else "历史题目")
             self.btn_beautify_all.config(text="美化" if compact else "一键美化")
             self.btn_submit.config(text="提交" if compact else "提交生成")
@@ -2278,7 +2299,13 @@ class App:
             self.pending_resume_parent_id = None
             self.prefer_skip_resume = False
             try:
-                msg = self._persist_workspace(to_problem=True, to_job=True)
+                # 后台线程：禁止弹窗；换题时自动另存，避免覆盖旧题
+                msg = self._persist_workspace(
+                    to_problem=True,
+                    to_job=True,
+                    confirm_fork=False,
+                    auto_fork_on_diverge=True,
+                )
                 self.root_after(lambda m=msg: self._append_log(f"提交后落盘: {m}"))
             except Exception as e:
                 self.root_after(lambda err=e: self._append_log(f"提交后落盘失败: {err}"))
@@ -2487,7 +2514,12 @@ class App:
             f"checker={'有' if has_checker else '无'}；跳过全部生成阶段"
         )
         try:
-            self._persist_workspace(to_problem=True, to_job=False)
+            self._persist_workspace(
+                to_problem=True,
+                to_job=False,
+                confirm_fork=False,
+                auto_fork_on_diverge=True,
+            )
         except Exception:
             pass
 
@@ -3440,8 +3472,21 @@ class App:
         )
         return True
 
-    def _persist_workspace(self, *, to_problem: bool = True, to_job: bool = True) -> str:
-        """保存会话；可选写入题库与当前 job。返回简短说明。"""
+    def _persist_workspace(
+        self,
+        *,
+        to_problem: bool = True,
+        to_job: bool = True,
+        force_new: bool = False,
+        confirm_fork: bool = True,
+        auto_fork_on_diverge: bool = False,
+    ) -> str:
+        """保存会话；可选写入题库与当前 job。返回简短说明。
+
+        force_new：另存为新题（断开旧 ID）。
+        confirm_fork：题面相对题库明显换题时弹窗（是=另存 / 否=覆盖 / 取消=中止）。
+        auto_fork_on_diverge：不弹窗，换题时自动另存（关闭窗口用）。
+        """
         ws = self.collect_workspace()
         notes = []
         if to_problem and any(
@@ -3449,14 +3494,51 @@ class App:
             for k in ("std_code", "statement", "input_desc", "output_desc")
         ):
             try:
-                meta = problem_store.upsert_problem(
-                    ws, problem_id=self.current_problem_id or None
-                )
-                self.current_problem_id = str(meta.get("id") or self.current_problem_id)
-                ws["id"] = self.current_problem_id
-                ws["title"] = meta.get("title") or ws.get("title") or ""
-                self._update_problem_title_label(ws["title"])
-                notes.append(f"题库:{self.current_problem_id}")
+                pid = None if force_new else (self.current_problem_id or None)
+                do_force_new = bool(force_new)
+                if pid and not do_force_new:
+                    existing = problem_store.load_problem(pid)
+                    if problem_store.should_fork_problem(existing, ws):
+                        if auto_fork_on_diverge:
+                            do_force_new = True
+                            pid = None
+                            notes.append("换题自动另存")
+                        elif confirm_fork:
+                            ans = messagebox.askyesnocancel(
+                                "检测到换题",
+                                "当前题面与已关联题库条目差异较大，继续保存会覆盖旧题。\n\n"
+                                f"旧条目：{pid}\n"
+                                f"旧标题：{(existing or {}).get('title') or '（无）'}\n"
+                                f"新标题：{ws.get('title') or '（无）'}\n\n"
+                                "是 = 另存为新题（推荐）\n"
+                                "否 = 覆盖旧条目\n"
+                                "取消 = 不保存到题库",
+                            )
+                            if ans is None:
+                                notes.append("题库:已取消")
+                                # 仍写会话 / job
+                                pid = "__skip__"
+                            elif ans:
+                                do_force_new = True
+                                pid = None
+                                notes.append("换题另存")
+                            else:
+                                notes.append("换题覆盖")
+                        else:
+                            # 无确认且非自动另存：store 护栏强制新建
+                            do_force_new = False
+                if pid != "__skip__":
+                    meta = problem_store.upsert_problem(
+                        ws,
+                        problem_id=None if do_force_new else pid,
+                        force_new=do_force_new,
+                        forbid_divergent_overwrite=not do_force_new and not confirm_fork,
+                    )
+                    self.current_problem_id = str(meta.get("id") or self.current_problem_id)
+                    ws["id"] = self.current_problem_id
+                    ws["title"] = meta.get("title") or ws.get("title") or ""
+                    self._update_problem_title_label(ws["title"])
+                    notes.append(f"题库:{self.current_problem_id}")
             except Exception as e:
                 notes.append(f"题库失败:{e}")
         if to_job and self.job_id:
@@ -3478,6 +3560,37 @@ class App:
         self._append_log(f"保存题目: {msg}")
         if hasattr(self, "history_tree"):
             self.on_history_refresh()
+
+    def on_save_as_new_problem(self):
+        msg = self._persist_workspace(
+            to_problem=True, to_job=bool(self.job_id), force_new=True, confirm_fork=False,
+        )
+        self.status.set(f"已另存 — {msg}")
+        self._append_log(f"另存为新题: {msg}")
+        if hasattr(self, "history_tree"):
+            self.on_history_refresh()
+
+    def on_new_problem(self):
+        cur = self.collect_workspace()
+        has_cur = any(
+            (cur.get(k) or "").strip()
+            for k in ("std_code", "statement", "input_desc", "output_desc")
+        )
+        if has_cur and not messagebox.askyesno(
+            "新建题目",
+            "将清空当前标程/题面/输入/输出，并断开题库关联。\n未保存的修改会丢失。继续？",
+        ):
+            return
+        empty = problem_store.empty_workspace()
+        self.current_problem_id = ""
+        self.job_id = ""
+        self.pending_resume_parent_id = None
+        self.prefer_skip_resume = False
+        self.apply_workspace(empty, confirm=False, load_range_plan=False)
+        self.clear_range_plan()
+        self._update_problem_title_label("")
+        self.status.set("已新建空白题目（未关联题库）")
+        self._append_log("新建题目：已清空工作区并断开题库 ID")
 
     def on_history_refresh(self):
         if not hasattr(self, "history_tree"):
@@ -3700,7 +3813,13 @@ class App:
 
     def on_close(self):
         try:
-            msg = self._persist_workspace(to_problem=True, to_job=bool(self.job_id))
+            # 关闭时若已换题，自动另存，避免静默覆盖旧题库
+            msg = self._persist_workspace(
+                to_problem=True,
+                to_job=bool(self.job_id),
+                confirm_fork=False,
+                auto_fork_on_diverge=True,
+            )
             print(f"[gui] close save: {msg}")
         except Exception as e:
             try:
