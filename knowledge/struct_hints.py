@@ -94,13 +94,33 @@ _STRUCT_CONSTRAINT_HINTS = [
         ),
     },
     {
+        "keywords": (
+            "为根", "指向孩子", "父亲指向", "恰有一个父亲", "恰好有一个父亲",
+            "没有边指向", "parent", "rooted tree", "u→v", "u → v",
+        ),
+        "title": "有根有向树",
+        "hint": (
+            "题面要求有根有向树（根 R、边由父亲指向孩子）。生成器禁止无根默认："
+            "unweight::Tree t(n); t.set_is_rooted(true); t.set_root(R); t.set_output_root(false); "
+            "t.gen(); 再 cout << t 或按 e.u()→e.v() 打印（边须父→子）。"
+            "Chain/Flower 需要方向时同样 set_is_rooted(true)+set_root(R)。"
+            "禁止依赖无根 Tree 的随机端点交换（未 set_is_rooted 就 cout << t 易打出指向根的边）。"
+            "手写边永远打印「父亲 孩子」。"
+            "validator：ensuref(v!=R)；非根 indeg==1；并查集连通（边数=n-1、无自环）。"
+        ),
+    },
+    {
         "keywords": ("树", "tree"),
         "title": "树",
         "hint": (
             "题面要求图是树（n-1 条边、连通、无环）。优先用 generator.h："
             "unweight::Tree / Chain（链）/ Flower（菊花）/ FlowerChain / MaxSonTree。"
-            "正确：t.gen(); cout << t（默认输出 n 与边）；自定义顺序用 for (auto &e : t.edges())。"
-            "get_edges() / t.shuffle() 不存在，写错会编译失败。validator 建议用 ensuref 校验边数=n-1、无自环、无重边、连通、无环。"
+            "仅当题面为无向树（无根、无父→子方向）时，才可裸写 t.gen(); cout << t；"
+            "若题面写根 / 父亲 / 有向边 / u→v，禁止无根默认，必须按「有根有向树」提醒："
+            "set_is_rooted(true); set_root(R); set_output_root(false); 再 gen()。"
+            "自定义顺序用 for (auto &e : t.edges())。"
+            "get_edges() / t.shuffle() 不存在，写错会编译失败。"
+            "validator：边数=n-1、无自环、无重边、连通、无环；有根时再验无边指向根 + 非根恰一父亲。"
         ),
     },
     {

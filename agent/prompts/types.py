@@ -15,8 +15,15 @@ TYPE_TREE = """【树图题型模块 — tree / weighted_tree】
     unweight::MaxDegreeTree md(n)：set_max_degree(d)
     MaxSonTree / DegreeTree / SonTree：同样必须 unweight:: 或对应权重前缀
   流程：构造 →（可选 set_begin_node(1)）→ gen() → cout 或遍历 edges()
-  【默认输出可用时】
+  【默认输出可用时 · 仅无向无根树】
       unweight::Tree t(n); t.gen(); cout << t << "\\n";
+  【有根/有向 · 硬门禁】题面或 special_constraints 要求根 R、边父亲→孩子时：
+      unweight::Tree t(n);
+      t.set_is_rooted(true); t.set_root(R); t.set_output_root(false);
+      t.gen(); cout << t;  // 或 edges() 按 e.u()→e.v() 打印
+    禁止：未 set_is_rooted 就 cout << t（会随机 swap，易出指向根的边）。
+    Chain/Flower 同理需要方向时也要有根。
+    手写边：永远打印父亲 孩子，禁止孩子 父亲。
   【对齐标程 · 多字段边】禁止盲 cout << t：
       unweight::Tree t(n); t.set_begin_node(1); t.gen();
       for (auto &e : t.edges()) printf("%d %d %d %d\\n", e.u(), e.v(), a, b);
@@ -33,7 +40,8 @@ TYPE_TREE = """【树图题型模块 — tree / weighted_tree】
   仍须 registerGen + --seed/--type/--index/--count；禁止 fill_inputs/hack/init_gen。
 
 树图默认按「无自环、无重边」处理；题面允许则另说。
-树 validator：边数=n-1、无自环、无重边、连通、无环；带权再验权值范围。
+树 validator：边数=n-1、无自环、无重边、连通、无环；带权再验权值范围；
+  有根时再验「无边指向根 + 非根恰一父亲」。
 """
 
 TYPE_GRAPH = """【图题型模块 — graph / weighted_graph】
