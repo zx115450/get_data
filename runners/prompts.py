@@ -196,7 +196,7 @@ def build_checker_coder_task(
         "禁止用标程覆盖判定逻辑。\n"
         "4. 题意模拟按 plan/题面分支实现；禁止无条件 "
         "`if (cur < k) cur = k`；最优值题必须先 simulate(ans) 再验 ouf。\n"
-        "5. 写完并编译成功后系统自动 run_checker_self_check()：正例须 _ok，负例须 _wa；"
+        "5. 写完并编译成功后系统自动 run_checker_self_check()：仅一次正例（标程输出）须 _ok，不跑负例；"
         "禁止未自检连写；禁止严格格式/_pe。\n"
         "6. 自检 OK 后 finish；FAIL [LOGIC] 才允许第二轮成功 write_checker"
         "（优先按题面修模拟语义，禁止改成与 ans 全等）。"

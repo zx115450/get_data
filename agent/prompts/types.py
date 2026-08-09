@@ -103,6 +103,9 @@ TYPE_ARRAY = """【数组 / 序列题型模块】
 优先 testlib：vector + rnd.next(L,R)；落在 long long 内的大范围用 long long + rnd.next(-1000000000LL, 1000000000LL)。
 【超 long long】元素/权值上界超出 64 位有符号整数时：禁止 long long/__int128 采样；
   用十进制字符串构造（rnd.next(\"[1-9][0-9]{L-1}\") 等），cout/printf 直接打串；validator 用 readToken。
+【k 位小数 / 实数字段】题面或 special_constraints 要求一位/k 位小数时：在 [lo·10^k, hi·10^k] 整数域
+  rnd.next，再按缩放打印（可含非整数，如 1.5）；禁止对该字段只用 %d / 纯 int 采样。
+  validator：readDouble（或 readStrictDouble）；勿因 readDouble 能读整数就只生成整数。
 排列：rnd.perm(n)（0..n-1，按题面 +1）。
 可选 generator.h 函数（不是类）：
   rand_vector(…) 随机数组；

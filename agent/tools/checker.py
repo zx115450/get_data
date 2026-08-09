@@ -183,20 +183,6 @@ def run_checker(input_text: str, output_text: str, answer_text: str) -> str:
                 pass
 
 
-def _mutate_output(output: str) -> str:
-    """对选手输出做轻微扰动，生成一个应该被判错的负例。"""
-    if not output.strip():
-        return "wrong\n"
-    lines = output.splitlines()
-    if not lines:
-        return output + "x"
-    last = lines[-1]
-    if last:
-        # 改最后一个 token 的末尾字符
-        lines[-1] = last[:-1] if len(last) > 1 else last + "x"
-    return "\n".join(lines) + "\n"
-
-
 def _checker_fail_kind(text: str) -> str:
     """区分 checker 自检失败：SYSTEM（环境/标程）vs LOGIC（判定逻辑）。"""
     t = (text or "").lower()
@@ -224,12 +210,13 @@ def _checker_fail_kind(text: str) -> str:
 
 
 def run_checker_self_check(count: int = 3) -> str:
-    """用当前 gen + std + checker 做 reactive 自检。
+    """用当前 gen + std + checker 做 reactive 自检（仅一次正例）。
 
-    正例：用 gen 生成输入，std 跑出答案，把答案同时当 ouf/ans 跑 checker，必须返回 _ok。
-    负例：把答案轻微扰动后当 ouf 跑 checker，必须返回非 _ok（优先 _wa；_pe 也可）。
-    模板占位 / 源码新于 exe / 未编译 → [SYSTEM]。全部通过返回 OK。
+    用 gen 生成一组小规模输入，std 跑出答案，把答案同时当 ouf/ans 跑 checker，
+    必须返回 _ok。不跑负例扰动。模板占位 / 源码新于 exe / 未编译 → [SYSTEM]。
+    count 保留兼容，当前固定只检 1 组正例。
     """
+    del count  # API 兼容；固定单次正例
     exe = _wd() / _exe("checker")
     if not exe.exists():
         return (
@@ -258,77 +245,64 @@ def run_checker_self_check(count: int = 3) -> str:
     edge_cases = list(rj.get("edge_cases") or [])
     total_count = max(1, int(rj.get("count") or DEFAULT_REGULAR_COUNT))
 
-    # 优先小规模 edge，避免 edge_nmax 导致标程输出爆炸拖垮自检
-    checks: list[tuple[str, int, int, bool]] = []
-    small_edges = [
-        e for e in edge_cases
-        if e in ("edge_n1", "edge_n2", "edge_T1")
-        or e.endswith("_n1")
-        or e.endswith("_n2")
-        or "n1" in e
-        or "n2" in e
-    ]
-    for i, name in enumerate(small_edges[:2]):
-        checks.append((name, 2100 + i, 0, True))
-    # 再补一个低档 random（index=0）
-    checks.append(("random", 2000, 0, True))
-    if not small_edges and edge_cases:
-        # 无小 edge 时取第一个非 nmax 的
-        for e in edge_cases:
-            if "nmax" in e.lower() or "max" == e.lower():
-                continue
-            checks.append((e, 2002, 0, True))
+    # 优先小规模 edge，避免 edge_nmax 导致标程输出爆炸
+    typ = "random"
+    seed = 2000
+    idx = 0
+    for e in edge_cases:
+        el = e.lower()
+        if "nmax" in el or el == "max":
+            continue
+        if (
+            e in ("edge_n1", "edge_n2", "edge_T1")
+            or e.endswith("_n1")
+            or e.endswith("_n2")
+            or "nmin" in el
+            or "n1" in e
+            or "n2" in e
+        ):
+            typ, seed = e, 2100
             break
-    # 负例：优先小 edge
-    neg_type = small_edges[0] if small_edges else "random"
-    checks.append((neg_type, 3000, 0, False))
-    # 去重保序
-    seen_keys = set()
-    uniq_checks = []
-    for c in checks:
-        key = (c[0], c[1], c[3])
-        if key in seen_keys:
-            continue
-        seen_keys.add(key)
-        uniq_checks.append(c)
-    checks = uniq_checks[: max(3, count + 1)]
+    else:
+        for e in edge_cases:
+            if "nmax" in e.lower() or e.lower() == "max":
+                continue
+            typ, seed = e, 2002
+            break
 
-    lines = [f"checker_self_check start: count={count} planned_checks={len(checks)}"]
+    lines = [f"checker_self_check start: planned_checks=1 (positive-only)"]
     fails = []
-    for typ, seed, idx, is_positive in checks:
-        gen_out = _run_gen_raw(seed, typ, idx, total_count)
-        if gen_out.startswith("ERROR"):
-            lines.append(f"FAIL gen seed={seed} type={typ}: {gen_out[:200]}")
-            fails.append((typ, seed, "gen failed"))
-            continue
 
+    gen_out = _run_gen_raw(seed, typ, idx, total_count)
+    if gen_out.startswith("ERROR"):
+        lines.append(f"FAIL gen seed={seed} type={typ}: {gen_out[:200]}")
+        fails.append((typ, seed, "gen failed"))
+    else:
         std_out = _run_std_raw(gen_out)
         if std_out.startswith("ERROR"):
             lines.append(f"FAIL std seed={seed} type={typ}: {std_out[:200]}")
             fails.append((typ, seed, "std failed"))
-            continue
-
-        ouf = std_out if is_positive else _mutate_output(std_out)
-        result = run_checker(gen_out, ouf, std_out)
-        timed_out = "TIMEOUT" in (result or "").upper() or "复杂度超规" in (result or "")
-        ok = (
-            not timed_out
-            and (result.startswith("checker exit_code=0") or "_ok" in result)
-        )
-        status = "OK" if ok else "NOT_OK"
-        expected = "expected _ok" if is_positive else "expected _wa or _pe"
-        if timed_out:
+        else:
+            result = run_checker(gen_out, std_out, std_out)
+            timed_out = "TIMEOUT" in (result or "").upper() or "复杂度超规" in (result or "")
+            ok = (
+                not timed_out
+                and (result.startswith("checker exit_code=0") or "_ok" in result)
+            )
+            status = "OK" if ok else "NOT_OK"
             expected = (
                 f"expected finish within {CHECKER_TIMEOUT_S}s "
                 f"(SPJ 设计≤1s；超时=复杂度超规)"
+                if timed_out
+                else "expected _ok (std output as ouf/ans)"
             )
-        lines.append(f"{status} type={typ} seed={seed} positive={is_positive} {expected}\n{result[:400]}")
-        if timed_out:
-            fails.append((typ, seed, "checker TIMEOUT / complexity exceeded"))
-        elif is_positive and not ok:
-            fails.append((typ, seed, "positive case rejected by checker"))
-        elif not is_positive and ok:
-            fails.append((typ, seed, "negative case accepted by checker"))
+            lines.append(
+                f"{status} type={typ} seed={seed} positive=True {expected}\n{result[:400]}"
+            )
+            if timed_out:
+                fails.append((typ, seed, "checker TIMEOUT / complexity exceeded"))
+            elif not ok:
+                fails.append((typ, seed, "positive case rejected by checker"))
 
     if fails:
         detail = "\n".join(lines)

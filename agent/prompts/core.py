@@ -106,8 +106,11 @@ RANGE_CONTRACT = """range.json 必须含：
   名字原样作为 gen --type，须与 gen 分支字符串逐字符一致。
   仅当 constraints 含 T（或 t）时才写 edge_Tmax（可选 big_T_small_n）；
   【不要写 edge_T1】T=1 已被 edge_nmax / 攻 n 覆盖；无多测禁止写 edge_Tmax。
-- special_constraints: 字符串数组，列出题面里所有「特殊结构约束」（如 DAG、连通、二分图、哈密顿、欧拉、平面图、竞赛图、树等）。
-  没有特殊约束时写空数组 []。每条用简短中文描述，如 "图是 DAG"、"图必须存在哈密顿路径"、"图连通"。
+- special_constraints: 字符串数组，列出题面里所有须由生成器遵守的约束，含两类：
+  (A) 特殊结构约束（如 DAG、连通、二分图、哈密顿、欧拉、平面图、竞赛图、树等）；
+  (B) 数值形态约束（如「成绩/学分可为一位小数」「实数保留 k 位」「权值为两位小数」等）。
+  没有特殊约束时写空数组 []。每条用简短中文描述，如 "图是 DAG"、"图必须存在哈密顿路径"、
+  "s、c 为一位小数，范围分别 [0,100]、[1,10]"。
 可选：
 - special_samples_desc: 可选；有特殊样例意图时写非空字符串。无特殊样例时不要写该字段（禁止写 ""）
 - special_samples_count: 可省略（由系统按方案决定）；本阶段不要自行加减 count
@@ -118,9 +121,16 @@ RANGE_CONTRACT = """range.json 必须含：
 【提取 special_constraints 的方法】
 1. 仔细读题面，找出所有「保证」「约定」「满足...」「是 X 图」「存在...」等结构性质描述。
 2. 把每条性质提炼成一句简短中文，写进 special_constraints。
-3. 【与 edge 名额】special_constraints 应尽量在 edge_cases（总额仍 4～6）里各有一个对应边界名；
+3. 【数值形态 · 必扫】同步扫 input_desc / 题面 / 标程读入类型，查找「小数 / 一位小数 / 实数 /
+   double / float / 保留 x 位 / 精确到 0.1」等表述；标程对某字段用 double/float 且题面允许非整数时
+   也须收录。写成可执行约束：字段名 + 小数位数 + 范围
+   （例："s、c 为一位小数，范围分别 [0,100]、[1,10]"）。constraints 的 [min,max] 仍用整数上下界，
+   小数位数与采样粒度必须靠本条 special_constraints 传达，禁止只靠整数区间默认为整采样。
+4. 【与 edge 名额】结构类 special_constraints 应尽量在 edge_cases（总额仍 4～6）里各有一个对应边界名；
    约束过多时：合并同类或只保留最关键 2～3 条结构 edge，禁止为「一条约束一个 edge」而超过 6。
-4. special_constraints 不只是抄题面关键词：要判断它对生成器意味着什么。例如「求哈密顿路径数量」隐含「图必须存在哈密顿路径」，生成器要保证这一点。
+   数值形态类一般不单独占 edge 名额（约束全部分支的采样/打印方式），除非题面单独要求「全小数 / 全整数」边界。
+5. special_constraints 不只是抄题面关键词：要判断它对生成器意味着什么。例如「求哈密顿路径数量」隐含「图必须存在哈密顿路径」，生成器要保证这一点；
+   「可为一位小数」隐含 random/edge 必须能产出非整数（如 1.5），禁止全程只打整数。
 
 【特殊样例】
 若启用特殊样例（用户提示或自动挖掘）：
@@ -291,6 +301,11 @@ BASE_GEN_RULES_CORE = """gen.cpp 必须满足（testlib / ACM-generator 写法�
     禁止用 int/long long/__int128 存或 rnd.next 采样该值；必须按十进制字符串构造并输出
     （如 rnd.next(\"[1-9][0-9]{L-1}\") / 逐位 rnd.next('0','9')，注意无前导零、符号与题面一致）。
     validator 对这类字段用 readToken/readToken(pattern)，禁止 readLong。
+  - 【k 位小数 · 硬门禁】若 gen_plan / special_constraints / 题面要求某字段为 k 位小数（或「可为一位小数」等）：
+    必须按整数缩放采样再打印小数：在 [lo·10^k, hi·10^k] 上 rnd.next，再输出带小数点的十进制
+    （一位小数示例：tenths=rnd.next(10,100) → 打印 1.0～10.0；可用「整除 10^k 则打整数形式，否则打 k 位」）。
+    禁止对该浮点字段用 printf(\"%d\") / cout<<int / 纯 int 区间 rnd.next(lo,hi) 冒充（即使 validator
+    用 readDouble 也能过整数）；random 与各 edge 分支都必须能出现非整数（除非该 edge 名明确要求全整数）。
   - 有 sum_* 多测：必须按 MULTI_TEST「remain 拆分」实现；禁止 bA=大 且 bB=大 双顶格。
   - API 细节见同提示中的 generator.h 速查 / 题型模块；
     树/图类名必须 unweight:: / edge_weight:: 等前缀（禁止裸 Chain/Flower/Tree/Graph）；

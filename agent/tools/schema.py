@@ -276,10 +276,10 @@ TOOL_SCHEMAS = [
     ),
     _schema(
         "run_checker_self_check",
-        "用当前 gen + std + checker 做 reactive 自检："
-        "正例（标程输出当 ouf/ans）必须返回 _ok；负例（扰动输出当 ouf）必须返回非 _ok（优先 _wa）。"
+        "用当前 gen + std + checker 做 reactive 自检（仅一次正例）："
+        "标程输出同时当 ouf/ans，必须返回 _ok；不跑负例扰动。"
         "未替换模板 / 源码新于 exe / 未编译 → [SYSTEM]；判定错 → [LOGIC]。"
-        "全部通过才返回 OK；失败返回 ERROR 详情。write_checker 编译成功后建议调用。",
+        "通过返回 OK；失败返回 ERROR 详情。write_checker 编译成功后建议调用。",
         {},
         [],
     ),

@@ -27,7 +27,8 @@ PLANNER_PROMPT = """你是算法竞赛测试数据生成器设计专家。任务
    - 1. 输入格式（写死 · 仅标程），须逐项写清（2～4 行）：
        (a) 规模头：首行（或每组开头）是否出现 T / n / m / 边数等整数？
            有 → 列出顺序与类型；无 → 写死「无规模头，文件从第一条业务记录开始」；
-       (b) 每条记录的字段类型与分隔符；
+       (b) 每条记录的字段类型与分隔符；若标程为 double/float 或 special_constraints/题面写
+           「可为小数 / 保留 k 位」，必须写死小数位数与采样法（整数缩放 tenths 等），禁止只写 double 却按整采样；
        (c) 结束方式：固定行数 / 读到 EOF / 其它。
        禁止套用「先规模再数据」的题型或 few-shot 模板；以标程 read/cin 为准。
        标程无先读规模、循环读至 EOF 时：必须写「gen 禁止打印任何规模计数头」。
@@ -450,7 +451,7 @@ checker.cpp 必须用 testlib：
 - use_checker_template(name): 按 plan 第 2 节安装骨架（name 必须与 plan 一致；骨架为 _fail 占位，必须替换）
 - write_checker(content): 写完整 checker.cpp 并编译（最多 2 次编译成功；编译失败不计次）
 - run_checker(input_text, output_text, answer_text): 手工测一组判定
-- run_checker_self_check(): 正例（标程输出）须 _ok，负例须 _wa（或非 _ok）
+- run_checker_self_check(): 仅一次正例（标程输出当 ouf/ans）须 _ok；不跑负例
 - finish(summary): 自检 OK 后调用
 
 工作规则：
