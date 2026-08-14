@@ -125,6 +125,8 @@ TYPE_STRING = """【字符串题型模块】
   rand_string(n, \"[a-e]\") / rand_string(lo, hi, format)；
   rand_palindrome / rand_bracket_seq。
 【严禁】String(n,'a','z') 类。type 用 string 分支。
+【大整数按串】数值超出 long long / 位数很多时：按十进制数字串构造与校验（见公共规则「超 long long」）；
+  不要用 long long/__int128 采样该字段。
 
 【植入多个定长模式 / 保证含子串 · 硬门禁】
   题面要求至少含两个互不重叠定长模式（记长 LA、LB，如两段长度各为 3）时：

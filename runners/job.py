@@ -1,4 +1,20 @@
-"""单个任务的执行编排：薄壳，具体逻辑拆到 runners/ 下。"""
+"""单个任务的执行编排：薄壳，具体逻辑拆到 runners/ 下。
+
+单任务流水线（_run_job_impl）：
+  0) resume.try_resume — 同题复用；命中成功包则 short_circuit 直接结束
+  1) scaffold.compile_std + tools.set_context — 准备标程与工具目录
+  1.5) tools.prewarm_generator_headers — 校验 sandbox 头文件
+  2) agent.prepare_prompts → agent.run_gen_agent
+       Range(write_range) → 可选 SpecialDiscover → Planner → Coder
+       → fast 自检 / Fixer / Rewrite / full 门禁
+  3) 校验 range.json + gen/validator 产物
+  3.5) review.run_checker — 可选 special judge / builtin checker
+  4/5) batch.run_batch_and_pack — 常规出数；若启用特殊样例则
+       after_regular_hook → run_special_agent
+  异常：failure.write_failure_context 落盘，供同题续跑
+
+入口：run_job（包一层 try/except）；细节见 docs/llm-agent-pipeline.md
+"""
 import json
 import os
 from pathlib import Path

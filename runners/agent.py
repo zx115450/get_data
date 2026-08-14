@@ -792,8 +792,9 @@ def _build_coder_task(
         "5. 严格按 gen_plan 第 4/5/7 节：小中档多样、大档与打满上界的 edge ≤K；满规模≠满状态。"
         "若 plan 的 K 过大，大档仍按 ≤500 实现。\n"
         "6. validator 按 plan 第 6 节清单实现（校验输入，不校验答案）。\n"
-        "7. 对每种 edge_type 做 run_gen → run_validate → run_std 三连自检。\n"
-        "8. 最后调用 run_self_check()，通过后 finish。\n"
+        "7. 自检由系统在写入后自动/强制跑 run_self_check；"
+        "不要对每种 edge 手调 run_gen→run_validate→run_std。\n"
+        "8. 自检 OK 后 finish；若返回 FAIL，按日志改 write_*，勿空转手搓三连。\n"
         f"{special_note}{resume_failure_block}"
     )
 

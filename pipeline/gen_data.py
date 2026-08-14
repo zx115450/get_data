@@ -27,6 +27,130 @@ _DEFAULT_EXTREME_VARS = frozenset({
 })
 
 
+# constraints 规范形态：{"type": "int"|"long"|"double"|"string", "min": …, "max": …}
+# double 必填 decimals（小数位数，非负整数）。旧写法 [min,max] 视为 int，由 normalize 升级。
+CONSTRAINT_TYPES = frozenset({"int", "long", "double", "string"})
+_CONSTRAINT_TYPE_ALIASES = {
+    "int": "int",
+    "integer": "int",
+    "i32": "int",
+    "long": "long",
+    "int64": "long",
+    "ll": "long",
+    "longlong": "long",
+    "long_long": "long",
+    "double": "double",
+    "float": "double",
+    "real": "double",
+    "string": "string",
+    "str": "string",
+    "bigint": "string",
+    "biginteger": "string",
+    "bignum": "string",
+}
+_MAX_DECIMALS = 18
+
+
+def _is_int_like(x) -> bool:
+    return isinstance(x, int) and not isinstance(x, bool)
+
+
+def _is_number_like(x) -> bool:
+    if isinstance(x, bool):
+        return False
+    return isinstance(x, (int, float))
+
+
+def normalize_constraint_type(raw) -> str | None:
+    """别名 → 规范 type；无法识别返回 None。"""
+    if raw is None:
+        return None
+    key = str(raw).strip().lower().replace(" ", "_").replace("-", "_")
+    return _CONSTRAINT_TYPE_ALIASES.get(key)
+
+
+def parse_constraint_entry(value):
+    """解析单条 constraint，返回 (spec_dict|None, error|None)。
+
+    接受：
+      - [min, max] → 视为 int
+      - {"type", "min", "max"}；double 须 decimals
+    """
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        lo, hi = value[0], value[1]
+        if not (_is_int_like(lo) and _is_int_like(hi)):
+            return None, "旧写法 [min,max] 的两端必须是整数（请改用带 type 的对象）"
+        if lo > hi:
+            return None, f"min>max：[{lo}, {hi}]"
+        return {"type": "int", "min": int(lo), "max": int(hi)}, None
+
+    if not isinstance(value, dict):
+        return None, "必须是 [min,max] 或 {type,min,max[,decimals]}"
+
+    typ = normalize_constraint_type(value.get("type"))
+    if typ is None:
+        # 无 type 但有 min/max：默认 int（兼容半成品）
+        if "min" in value and "max" in value and value.get("type") in (None, ""):
+            typ = "int"
+        else:
+            return None, (
+                f"type 必须是 {sorted(CONSTRAINT_TYPES)} 之一"
+                f"（可用 float→double、int64→long、bigint→string），当前为 {value.get('type')!r}"
+            )
+
+    lo, hi = value.get("min"), value.get("max")
+    if typ in ("int", "long"):
+        if not (_is_int_like(lo) and _is_int_like(hi)):
+            return None, f"type={typ} 时 min/max 必须是整数，当前 min={lo!r} max={hi!r}"
+        lo_n, hi_n = int(lo), int(hi)
+    elif typ == "double":
+        if not (_is_number_like(lo) and _is_number_like(hi)):
+            return None, f"type=double 时 min/max 必须是数字，当前 min={lo!r} max={hi!r}"
+        lo_n, hi_n = float(lo), float(hi)
+        # 整值用 int 写出，避免 1.0 噪音；非整保持 float
+        if _is_int_like(lo) or (isinstance(lo, float) and lo.is_integer()):
+            lo_n = int(lo)
+        if _is_int_like(hi) or (isinstance(hi, float) and hi.is_integer()):
+            hi_n = int(hi)
+    else:  # string：min/max 表示长度（或大整数位数）
+        if not (_is_int_like(lo) and _is_int_like(hi)):
+            return None, f"type=string 时 min/max 为长度下/上界且须为整数，当前 min={lo!r} max={hi!r}"
+        lo_n, hi_n = int(lo), int(hi)
+        if lo_n < 0:
+            return None, f"type=string 时 min（长度）不能为负，当前 {lo_n}"
+
+    if lo_n > hi_n:
+        return None, f"min>max：min={lo_n} max={hi_n}"
+
+    spec: dict = {"type": typ, "min": lo_n, "max": hi_n}
+    if typ == "double":
+        dec = value.get("decimals", value.get("decimal_places", value.get("precision")))
+        if dec is None:
+            return None, "type=double 必须声明 decimals（小数位数，非负整数）"
+        if not _is_int_like(dec) or int(dec) < 0 or int(dec) > _MAX_DECIMALS:
+            return None, (
+                f"decimals 须为 0..{_MAX_DECIMALS} 的整数，当前为 {dec!r}"
+            )
+        spec["decimals"] = int(dec)
+    return spec, None
+
+
+def constraint_bounds(value) -> tuple | None:
+    """取出 (min, max)；无法解析返回 None。"""
+    spec, err = parse_constraint_entry(value)
+    if err or not spec:
+        return None
+    return spec["min"], spec["max"]
+
+
+def constraint_type_of(value) -> str | None:
+    """取出规范 type；无法解析返回 None。"""
+    spec, err = parse_constraint_entry(value)
+    if err or not spec:
+        return None
+    return spec.get("type")
+
+
 def suggest_edge_prefixed_extreme(name: str, constraints=None) -> str | None:
     """若 edge 名像约束极值却无 edge_ 前缀，返回建议名（如 k_min → edge_k_min）；否则 None。
 
@@ -89,7 +213,7 @@ def validate_range_json(rj) -> list:
 
     要求字段：
       - count: 正整数
-      - constraints: dict（各变量 -> [min, max]）
+      - constraints: dict（各变量 -> {type,min,max[,decimals]}；兼容旧 [min,max]）
       - edge_cases: 字符串列表（每个是 gen.py --type 能接受的取值）
     可选字段：
       - std_cmd（后端会强制注入）
@@ -109,13 +233,15 @@ def validate_range_json(rj) -> list:
 
     cons = rj.get("constraints")
     if not isinstance(cons, dict) or not cons:
-        errs.append("constraints 必须是非空对象（各变量名 -> [min,max]）")
+        errs.append(
+            "constraints 必须是非空对象（变量名 -> "
+            "{type,min,max}；double 须 decimals；兼容旧 [min,max]）"
+        )
     elif isinstance(cons, dict):
         for k, v in cons.items():
-            if (not isinstance(v, list) or len(v) != 2
-                    or not all(isinstance(x, int) for x in v)
-                    or v[0] > v[1]):
-                errs.append(f"constraints['{k}'] 必须是 [min,max] 且 min<=max，当前为 {v!r}")
+            spec, err = parse_constraint_entry(v)
+            if err:
+                errs.append(f"constraints['{k}'] {err}，当前为 {v!r}")
 
     ec = rj.get("edge_cases")
     if ec is None:
@@ -256,6 +382,7 @@ def normalize_range_json(rj: dict) -> dict:
     若启用特殊样例（special_samples_desc 非空），确保 count 至少为 special_samples_count + 1。
     无多测 T 时剔除 edge_T1 / edge_Tmax 等仅多测边界。
     缺省补 time_limit_ms=5000、memory_limit_mb=1024。
+    constraints：旧 [min,max] 与半成品对象升级为 {type,min,max[,decimals]}。
     """
     if not isinstance(rj, dict):
         return rj
@@ -277,6 +404,15 @@ def normalize_range_json(rj: dict) -> dict:
                 seen.add(e)
                 cleaned.append(e)
         rj["edge_cases"] = cleaned
+
+    # constraints：升级为带 type 的对象；无法解析的条目原样保留，交给 validate 报错
+    cons = rj.get("constraints")
+    if isinstance(cons, dict) and cons:
+        new_cons = {}
+        for k, v in cons.items():
+            spec, err = parse_constraint_entry(v)
+            new_cons[k] = spec if spec and not err else v
+        rj["constraints"] = new_cons
 
     # 时限 / 内存：缺省或非法时用默认 5s / 1024MB
     tl = rj.get("time_limit_ms")

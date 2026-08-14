@@ -27,12 +27,20 @@ def _constraint_lo(constraints: dict | None, keys: tuple[str, ...] = ("n", "N", 
     """从 constraints 取规模下界（优先 n / S / |S|）。"""
     if not isinstance(constraints, dict):
         return None
+    from pipeline.gen_data import constraint_bounds
+
     lower = {str(k).lower(): k for k in constraints}
     for want in keys:
         raw_key = lower.get(want.lower())
         if raw_key is None:
             continue
         v = constraints[raw_key]
+        bounds = constraint_bounds(v)
+        if bounds is not None:
+            try:
+                return int(bounds[0])
+            except (TypeError, ValueError):
+                continue
         if isinstance(v, (list, tuple)) and len(v) >= 1:
             try:
                 return int(v[0])

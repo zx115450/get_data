@@ -64,8 +64,8 @@ def cmd_gen(problem: str, out: str, zip_path: str, max_steps: int, verbose: bool
     task = (
         f"请为下面的算法题生成测试数据。数据范围见 range.json（已用 read_range 读取）：\n"
         f"{json.dumps(range_json, ensure_ascii=False, indent=2)}\n\n"
-        f"按 System Prompt 里的 CLI 契约写出 gen.py 和 validate.py，"
-        f"对每种 edge_type 各试跑一个 seed 自检，全部通过后调 finish。"
+        f"按 System Prompt 里的 CLI 契约写出 gen.py 和 validate.py；"
+        f"自检走 run_self_check（勿对每种 edge 手搓三连），通过后 finish。"
     )
 
     print("=== Agent: 写 gen.py + validate.py ===")
@@ -198,7 +198,7 @@ def main():
         cmd_clean_jobs(args.keep_days, args.max_keep, args.dry_run)
     elif args.cmd == "check-config":
         cmd_check_config()
-    elif args.cmd == "analyze-traces":
+    elif args. cmd == "analyze-traces":
         cmd_analyze_traces(args.jobs_dirs, args.top, args.as_json)
 
 

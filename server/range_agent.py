@@ -28,7 +28,8 @@ RANGE_ONLY_PROMPT = """你是出题数据规划助手。任务：根据题面与
 range.json 必须含：
 - problem_type: 题型标识符（与题面/标程匹配的英文枚举，见 task 里的可选项与分类原则）
 - count: 正整数；count ≥ max(15, 3^k)，k=小中大轴数（三维即 ≥27；不要写「建议≥30」）
-- constraints: 对象，变量名 -> [min, max]（整数）
+- constraints: 对象，变量名 -> {"type":"int"|"long"|"double"|"string","min":…,"max":…}
+  double 必须另写 decimals（小数位数）；禁止只写 [min,max] 不声明 type
 - edge_cases: 字符串数组（边界类型名，禁止含 "random"；总额 4～6）
   【命名】约束极值统一 edge_ 前缀：edge_nmin / edge_nmax / edge_k_min / edge_m_min / edge_Tmax；
   禁止裸写 k_min / nmax / Tmax（易导致 gen 写成 edge_k_min 与 range 不一致）。
@@ -36,6 +37,7 @@ range.json 必须含：
   最终名字会原样作为 gen --type；Coder 必须逐字符一致，禁止自行加/删 edge_。
 - special_constraints: 字符串数组，列出题面里所有「特殊结构约束」（如 DAG、连通、二分图、哈密顿、欧拉、平面图、竞赛图、树等）。
   没有特殊约束时写空数组 []。每条用简短中文描述，如 "图是 DAG"、"图必须存在哈密顿路径"、"图连通"。
+  小数位数写在 constraints.*.decimals，不要只写在 special_constraints。
 可选（建议填写；未写时系统默认 time_limit_ms=5000、memory_limit_mb=1024）：
 - time_limit_ms: 正整数（毫秒），标程时限；默认 5000
 - memory_limit_mb: 正整数（MB）；默认 1024
@@ -49,7 +51,8 @@ range.json 必须含：
 4. special_constraints 不只是抄题面关键词：要判断它对生成器意味着什么。
    例如「求哈密顿路径数量」隐含「图必须存在哈密顿路径」，生成器要保证这一点，
    否则标程答案无意义——这种隐含约束也要写进 special_constraints。
-
+5. 【数值类型】整数用 type int/long；超 long long 大整数用 type string（min/max=位数）；
+   小数/实数用 type double 且必须 decimals=k。
 规则：
 1. 只调用 write_range，不要写 gen/validator，不要编造测例正文。
 2. edge_cases 要覆盖最小/最大规模 + 关键结构边界，总数 4～6（不要超过 6）。
@@ -118,6 +121,34 @@ _TYPE_EDGE_HINTS = {
     ],
 }
 
+# 仅冷门/易混名加半行释义；常见 edge_n1/chain/star 等不加，避免占 token、诱发全抄。
+_EDGE_NAME_GLOSS = {
+    "flower_chain": "花+链拼接",
+    "caterpillar": "去叶后成链",
+    "broom": "柄+帚头",
+    "balanced_binary": "尽量平衡的二叉树",
+    "all_heavy": "重量均偏大（如 >W/2）",
+    "all_light": "重量均很小可全装",
+    "edge_11": "1×1 矩阵",
+    "single_max_case": "T=1 且该组压满规模",
+    "pattern_at_start": "题面模式串在开头",
+    "pattern_at_end": "题面模式串在结尾",
+    "no_match": "模式无匹配",
+    "long_run": "同一字符长连续段",
+    "point_queries": "点询 l=r",
+    "full_range": "整段询 [1,n]",
+    "dense": "边数接近 m 上界",
+    "heavy_weights": "边权取上界附近",
+    "repeat_ask": "重复问同一下标",
+    "same_x": "多点同 x",
+}
+
+
+def _format_edge_hint(name: str) -> str:
+    gloss = _EDGE_NAME_GLOSS.get(name)
+    return f"{name}（{gloss}）" if gloss else name
+
+
 _TYPE_HINT_HEADER = {
     "array": "数组/序列题：建议 edge_cases 覆盖以下边界（按需挑选，不要全抄）",
     "tree": "树题：建议 edge_cases 覆盖以下边界（按需挑选，不要全抄）。生成优先用 generator.h 的 Tree/Chain/Flower",
@@ -161,7 +192,7 @@ def _build_type_hint_block(problem_type: str | list[str]) -> str:
             continue
         header = _TYPE_HINT_HEADER.get(typ, "")
         examples = _TYPE_EDGE_HINTS[typ]
-        joined = ", ".join(examples)
+        joined = ", ".join(_format_edge_hint(e) for e in examples)
         blocks.append(
             f"【题型 edge_cases 建议（{typ}）】\n"
             f"{header}：\n{joined}\n"
@@ -183,7 +214,8 @@ def _build_all_type_hints_block() -> str:
     lines = ["\n\n【各题型 edge_cases 建议（先选 problem_type，再按该行挑选，勿全抄）】"]
     for typ, examples in _TYPE_EDGE_HINTS.items():
         header = _TYPE_HINT_HEADER.get(typ, typ)
-        lines.append(f"- {typ}: {header} → {', '.join(examples)}")
+        joined = ", ".join(_format_edge_hint(e) for e in examples)
+        lines.append(f"- {typ}: {header} → {joined}")
     lines.append(
         "最终 edge_cases 必须与题面/标程一致；有特殊结构约束时额外加对应边界。"
         "无多测 T（constraints 无 T/t）时禁止写 edge_Tmax/edge_T1；"
@@ -225,7 +257,7 @@ def _build_special_samples_block(
 RANGE_TOOL_SCHEMAS = [
     _schema(
         "write_range",
-        "写入 range.json。content 为完整 JSON：problem_type、count、constraints、edge_cases（不要含 random）。",
+        "写入 range.json。content 为完整 JSON：problem_type、count、constraints（含 type/decimals）、edge_cases（不要含 random）。",
         {"content": {"type": "string", "description": "range.json 完整 JSON 字符串"}},
         ["content"],
     ),

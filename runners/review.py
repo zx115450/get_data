@@ -27,8 +27,8 @@ CHECKER_PLAN_FILE = "checker_plan.md"
 CHECKER_TOOL_SCHEMAS = [
     s for s in tools.TOOL_SCHEMAS
     if s["function"]["name"] in {
-        "write_checker", "use_checker_template", "read_file",
-        "run_checker", "run_checker_self_check", "finish",
+        "write_checker", "use_builtin_checker", "use_checker_template",
+        "read_file", "run_checker", "run_checker_self_check", "finish",
     }
 ]
 

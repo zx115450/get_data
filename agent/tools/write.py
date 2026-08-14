@@ -67,9 +67,11 @@ def write_range(content: str) -> str:
         return f"ERROR: range.json 不是合法 JSON: {e}"
     if isinstance(data, dict):
         from pipeline.gen_data import normalize_range_json, validate_range_json
-        errs = validate_range_json(normalize_range_json(dict(data)))
+        data = normalize_range_json(dict(data))
+        errs = validate_range_json(data)
         if errs:
             return "ERROR: range.json 校验失败:\n- " + "\n- ".join(errs)
+        content = json.dumps(data, ensure_ascii=False, indent=2)
     p = _wd() / "range.json"
     p.write_text(content, encoding="utf-8")
     return f"OK: wrote range.json ({len(content)} chars)"

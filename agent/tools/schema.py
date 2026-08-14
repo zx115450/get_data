@@ -6,7 +6,7 @@ from .checker import (
     use_checker_template,
     write_checker,
 )
-from .context import CHECKER_TIMEOUT_S
+from .context import BUILTIN_CHECKER_HELP, CHECKER_TIMEOUT_S
 from .run import (
     read_range,
     run_gen,
@@ -83,7 +83,9 @@ TOOL_SCHEMAS = [
     ),
     _schema(
         "write_range",
-        "把数据范围写到 range.json。content 为合法 JSON：count 由你自定且不得小于 15；constraints；edge_cases（不要含 random；含 edge_n1/edge_nmax 等最小最大边界）。",
+        "把数据范围写到 range.json。content 为合法 JSON：count 由你自定且不得小于 15；"
+        "constraints（每变量须 type；double 须 decimals）；"
+        "edge_cases（不要含 random；含 edge_n1/edge_nmax 等最小最大边界）。",
         {"content": {"type": "string", "description": "range.json 的完整 JSON 字符串"}},
         ["content"],
     ),
@@ -195,13 +197,16 @@ TOOL_SCHEMAS = [
     ),
     _schema(
         "use_builtin_checker",
-        "安装并编译内置 testlib checker 为 checker(.exe)。"
-        "name=lcmp(按行比 token) / wcmp(按词) / rcmp4|rcmp6|rcmp9(浮点精度) / yesno(Yes/No)。"
-        "答案唯一的常规题优先用这个，不要手写 checker。",
+        "安装并编译内置 testlib checker 为 checker(.exe)。答案唯一的常规题优先用这个，不要手写 checker。\n"
+        + BUILTIN_CHECKER_HELP.strip(),
         {
             "name": {
                 "type": "string",
-                "description": "lcmp | wcmp | rcmp4 | rcmp6 | rcmp9 | yesno",
+                "description": (
+                    "lcmp=按行·严格行结构 | wcmp=按token·忽略换行(唯一答案首选) | "
+                    "rcmp4=浮点EPS=1e-4 | rcmp6=浮点EPS=1e-6 | rcmp9=浮点EPS=1e-9 | "
+                    "yesno=大小写不敏感Yes/No"
+                ),
             },
         },
         ["name"],

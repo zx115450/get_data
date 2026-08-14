@@ -588,16 +588,20 @@ class App:
 
         cons_frm = ttk.Labelframe(panes, text="变量约束 constraints", padding=4)
         panes.add(cons_frm, weight=1)
-        cols = ("name", "lo", "hi")
+        cols = ("name", "type", "lo", "hi", "decimals")
         self.cons_tree = ttk.Treeview(
             cons_frm, columns=cols, show="headings", height=4, bootstyle="info",
         )
         self.cons_tree.heading("name", text="变量")
+        self.cons_tree.heading("type", text="类型")
         self.cons_tree.heading("lo", text="最小值")
         self.cons_tree.heading("hi", text="最大值")
-        self.cons_tree.column("name", width=120)
-        self.cons_tree.column("lo", width=140)
-        self.cons_tree.column("hi", width=140)
+        self.cons_tree.heading("decimals", text="小数位")
+        self.cons_tree.column("name", width=90)
+        self.cons_tree.column("type", width=70)
+        self.cons_tree.column("lo", width=110)
+        self.cons_tree.column("hi", width=110)
+        self.cons_tree.column("decimals", width=60)
         self.cons_tree.pack(side="left", fill="both", expand=True, padx=2, pady=2)
         cons_scroll = ttk.Scrollbar(cons_frm, orient="vertical", command=self.cons_tree.yview)
         cons_scroll.pack(side="right", fill="y")
@@ -1189,8 +1193,8 @@ class App:
                 "time": (130, True),
             })
         if hasattr(self, "cons_tree"):
-            col_w = max(80, min(160, cw // 6))
-            for c in ("name", "lo", "hi"):
+            col_w = max(60, min(120, cw // 8))
+            for c in ("name", "type", "lo", "hi", "decimals"):
                 try:
                     self.cons_tree.column(c, width=col_w)
                 except tk.TclError:
@@ -2026,8 +2030,16 @@ class App:
         for i in self.cons_tree.get_children():
             self.cons_tree.delete(i)
         for name, bounds in self.range_data["constraints"].items():
-            lo, hi = bounds[0], bounds[1] if isinstance(bounds, (list, tuple)) and len(bounds) >= 2 else ("?", "?")
-            self.cons_tree.insert("", "end", values=(name, lo, hi))
+            typ, lo, hi, dec = "int", "?", "?", ""
+            if isinstance(bounds, dict):
+                typ = str(bounds.get("type") or "int")
+                lo = bounds.get("min", "?")
+                hi = bounds.get("max", "?")
+                if typ == "double" and bounds.get("decimals") is not None:
+                    dec = bounds.get("decimals")
+            elif isinstance(bounds, (list, tuple)) and len(bounds) >= 2:
+                lo, hi = bounds[0], bounds[1]
+            self.cons_tree.insert("", "end", values=(name, typ, lo, hi, dec))
         self._refresh_edge_list_ui(self.range_data["edge_cases"])
         self._refresh_scheme_tree()
         self._update_total_count_label()
@@ -2074,9 +2086,32 @@ class App:
         special_count = self._selected_special_count()
         cons = {}
         for iid in self.cons_tree.get_children():
-            name, lo, hi = self.cons_tree.item(iid, "values")
+            vals = self.cons_tree.item(iid, "values")
+            if len(vals) >= 5:
+                name, typ, lo, hi, dec = vals[0], vals[1], vals[2], vals[3], vals[4]
+            elif len(vals) >= 3:
+                name, lo, hi = vals[0], vals[1], vals[2]
+                typ, dec = "int", ""
+            else:
+                continue
+            typ_s = str(typ or "int").strip().lower() or "int"
             try:
-                cons[str(name)] = [int(lo), int(hi)]
+                if typ_s == "double":
+                    lo_n = float(lo)
+                    hi_n = float(hi)
+                    if float(lo_n).is_integer():
+                        lo_n = int(lo_n)
+                    if float(hi_n).is_integer():
+                        hi_n = int(hi_n)
+                    entry = {"type": "double", "min": lo_n, "max": hi_n}
+                    try:
+                        entry["decimals"] = int(str(dec).strip() or "0")
+                    except (TypeError, ValueError):
+                        entry["decimals"] = 0
+                    cons[str(name)] = entry
+                else:
+                    entry = {"type": typ_s, "min": int(lo), "max": int(hi)}
+                    cons[str(name)] = entry
             except (TypeError, ValueError):
                 continue
         edges = self._collect_edges_from_ui()

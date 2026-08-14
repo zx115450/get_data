@@ -61,27 +61,53 @@ def looks_like_unique_token_answer(
     return True
 
 
+_BUILTIN_CHECKER_ALT = r"lcmp|wcmp|rcmp4|rcmp6|rcmp9|yesno"
+# Markdown/引号包裹：`rcmp6` / 'wcmp' / "lcmp"
+_BUILTIN_NAME_TOKEN = rf"[`'\"]*(?:{_BUILTIN_CHECKER_ALT})[`'\"]*"
+
+
 def parse_builtin_checker_from_plan(plan_text: str) -> str | None:
-    """从 checker_plan 解析「应使用内置 checker: wcmp」等。"""
+    """从 checker_plan 解析「应使用内置 checker: wcmp」等。
+
+    容忍 Markdown 反引号、中英文冒号、换行，以及「模板选型」与名称不在同一行。
+    """
     text = plan_text or ""
-    m = re.search(
-        r"应使用内置\s*checker\s*[:：]\s*(lcmp|wcmp|rcmp4|rcmp6|rcmp9|yesno)",
-        text,
-        re.I,
+    patterns = (
+        # 应使用内置 checker: `rcmp6`
+        rf"应使用内置\s*checker\s*[:：]\s*({_BUILTIN_NAME_TOKEN})",
+        # 使用内置：wcmp / 使用内置 checker rcmp6
+        rf"使用内置\s*(?:checker\s*)?[:：]?\s*({_BUILTIN_NAME_TOKEN})",
+        # 内置 checker: lcmp
+        rf"内置\s*checker\s*[:：]\s*({_BUILTIN_NAME_TOKEN})",
+        # builtin checker: rcmp6 / builtin=wcmp
+        rf"builtin\s*(?:checker\s*)?[:：=]\s*({_BUILTIN_NAME_TOKEN})",
     )
-    if m:
-        return m.group(1).lower()
-    m2 = re.search(
-        r"使用内置\s*[:：]?\s*(lcmp|wcmp|rcmp4|rcmp6|rcmp9|yesno)",
-        text,
-        re.I,
-    )
-    if m2:
-        return m2.group(1).lower()
-    for name in ("lcmp", "wcmp", "rcmp4", "rcmp6", "rcmp9", "yesno"):
-        if re.search(rf"(?i)(?:模板|选型|builtin).{{0,40}}\b{name}\b", text):
-            if re.search(r"无需自定义|使用内置|内置 checker|应使用内置", text, re.I):
+    for pat in patterns:
+        m = re.search(pat, text, re.I)
+        if m:
+            name = re.sub(r"[`'\"]+", "", m.group(1)).strip().lower()
+            if name in ("lcmp", "wcmp", "rcmp4", "rcmp6", "rcmp9", "yesno"):
                 return name
+
+    # 后备：文中有「内置/无需自定义」信号，且 选型/模板 附近（可跨行）出现内置名
+    if not re.search(
+        r"无需自定义|使用内置|内置\s*checker|应使用内置|\bbuiltin\b",
+        text,
+        re.I,
+    ):
+        return None
+    for name in ("lcmp", "wcmp", "rcmp4", "rcmp6", "rcmp9", "yesno"):
+        # (?s) 让 . 跨行：## 2. 模板选型\n应使用内置 checker: `rcmp6`
+        if re.search(
+            rf"(?is)(?:模板|选型|builtin).{{0,80}}[`'\"]*\b{name}\b",
+            text,
+        ):
+            return name
+        if re.search(
+            rf"(?is)(?:应使用内置|使用内置|内置\s*checker).{{0,60}}[`'\"]*\b{name}\b",
+            text,
+        ):
+            return name
     return None
 
 
@@ -101,8 +127,9 @@ def build_checker_planner_user(
         "判定语义与状态转移必须来自题面；标程只用于核对读写格式，禁止把标程算法写进第 6 节"
         "（多项式「验证是否合法」步骤除外）。\n"
         "【唯一答案】若每组只需比对少数整数/词且答案唯一：第 1 节写"
-        "「应使用内置 checker: wcmp」（或 lcmp），第 2 节写同名，并写明无需自定义；"
-        "禁止为唯一最优值重写 Dijkstra/DP。\n"
+        "「应使用内置 checker: wcmp」（不关心换行、默认首选；答案按行组织且行结构有意义→lcmp），第 2 节写同名，并写明无需自定义；"
+        "禁止为唯一最优值重写 Dijkstra/DP。"
+        "浮点题按题面误差选：rcmp4(EPS=1e-4)/rcmp6(EPS=1e-6)/rcmp9(EPS=1e-9)；Yes/No 二选一用 yesno(大小写不敏感)。\n"
         "【SPJ】只校验答案合法性，不校验输出格式；勿把空白/换行/_pe 当核心条件。\n"
         "【复杂度硬规范】设计 ≤1s / 运行超时 2s；首选 O(N)~O(N log N)；"
         "禁止指数 MITM、N≥5000 的 O(N^2)、满数据不可行子集和；"
@@ -190,7 +217,9 @@ def build_checker_coder_task(
         "\n要求：\n"
         "1. 先 read_file('checker_plan.md') 一次；状态转移不清时可再读 "
         "statement.txt / statement_simplified.txt。\n"
-        "2. 按 plan 第 2 节装模板，再严格按第 6 节「实现思路」步骤 write_checker"
+        "2. 若 plan 声明内置 checker（wcmp/lcmp/rcmp4/rcmp6/rcmp9/yesno）："
+        "只调 use_builtin_checker(name) → 自检 → finish，禁止 write_checker 手写等价比对；"
+        "否则按 plan 第 2 节装模板，再严格按第 6 节「实现思路」步骤 write_checker"
         "（每步最多一次；最多 2 次编译成功；编译失败不计次）。\n"
         "3. 【规格优先级】plan 第 4/5/6/7 节为主；保底/激活等与题面冲突时服从题面；"
         "禁止用标程覆盖判定逻辑。\n"

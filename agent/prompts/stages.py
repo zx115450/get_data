@@ -314,6 +314,14 @@ CHECKER_TEMPLATES_HELP = """可选模板（按输出类型选择，plan 必须�
 - tree_parent: 树父节点/边集验证
 """
 
+# 与 agent.tools.context.BUILTIN_CHECKER_HELP 同源；Planner 额外提醒勿把内置名当模板
+from agent.tools.context import BUILTIN_CHECKER_HELP as _BUILTIN_CHECKER_HELP_CORE
+
+CHECKER_BUILTIN_HELP = (
+    _BUILTIN_CHECKER_HELP_CORE.strip()
+    + "\n选内置时第 2 节写同名即可；多解/构造勿把内置名当下方自定义模板。\n"
+)
+
 CHECKER_TESTLIB_API = """【硬约束 · 只用真实 testlib API · 禁止幻觉函数】
 允许（InStream / 全局）：
   registerTestlibCmd；inf/ouf/ans 的 readInt/readLong/readDouble/readToken/readString/
@@ -395,10 +403,14 @@ CHECKER_PLANNER_PROMPT = """你是 Special Judge 设计专家。任务：为给�
 """ + CHECKER_TESTLIB_API + """
 """ + CHECKER_PLANNER_SOURCE_PRIORITY + """
 """ + CHECKER_SEMANTICS_RULES + """
+""" + CHECKER_BUILTIN_HELP + """
 要求：
 1. 只输出 Markdown 计划正文，不要调用任何工具，不要写完整代码文件，不要解释。
 2. 【篇幅】全文目标约 1000～1500 字，硬上限 2000 字。用短句/子弹；禁止复述题面；禁止粘贴完整函数体（可用「DFS 判连通」这类一句思路，不要写大段伪代码）。
-3. 若只需 lcmp/wcmp/rcmp/yesno 等内置比较（含唯一答案整数/词比对）：在第 1 节写明「应使用内置 checker: <名>」，并说明无需自定义；其余节可极简。唯一最优值禁止自定义 Dijkstra/DP。
+3. 若只需内置比较（见上方含义）：在第 1 节写明「应使用内置 checker: <名>」
+   （唯一整数/词、不关心换行→wcmp；答案按行组织且行结构有意义→lcmp；
+    浮点EPS=1e-4→rcmp4、EPS=1e-6→rcmp6、EPS=1e-9→rcmp9；Yes/No→yesno），
+   并说明无需自定义；其余节可极简。唯一最优值禁止自定义 Dijkstra/DP。
 4. 必须含以下 7 个小节（标题用「## 1. …」或「1. …」），决策必须写死、可照做：
    - 1. 判定类型：写死一类——构造验证 / 最优值比对 / 唯一答案比对 / 其他（一句话）。
    - 2. 模板选型：写死一个模板名（见下方列表）；唯一答案优先 wcmp；不确定用 construct_verify。
@@ -448,7 +460,8 @@ checker.cpp 必须用 testlib：
 可用工具：
 - read_file(path): 首轮只读 checker_plan.md；plan 状态转移不清时可再读 statement.txt /
   statement_simplified.txt（语义兜底）；需要时读模板安装后的 checker.cpp
-- use_checker_template(name): 按 plan 第 2 节安装骨架（name 必须与 plan 一致；骨架为 _fail 占位，必须替换）
+- use_builtin_checker(name): plan 写明「应使用内置 checker: wcmp/rcmp6/…」时优先调用，装完自检后 finish；禁止再手写等价比对
+- use_checker_template(name): 仅自定义 SPJ 时按 plan 第 2 节装骨架（骨架为 _fail 占位，必须替换）
 - write_checker(content): 写完整 checker.cpp 并编译（最多 2 次编译成功；编译失败不计次）
 - run_checker(input_text, output_text, answer_text): 手工测一组判定
 - run_checker_self_check(): 仅一次正例（标程输出当 ouf/ans）须 _ok；不跑负例
@@ -457,7 +470,9 @@ checker.cpp 必须用 testlib：
 工作规则：
 1. 第一步只 read_file("checker_plan.md") 一次。
 2. 【规格优先级】见上方「资料优先级 · Coder」；禁止用标程算法覆盖 plan/题面。
-3. 按 plan 第 2 节 use_checker_template，再按第 6 节步骤 write_checker（每步最多一次）。
+3. 【内置优先】若 plan 第 1/2/6 节声明内置（wcmp/lcmp/rcmp4/rcmp6/rcmp9/yesno）：
+   只调 use_builtin_checker(name) → run_checker_self_check → finish；禁止 write_checker 手搓浮点/token 比对。
+   否则：按 plan 第 2 节 use_checker_template，再按第 6 节步骤 write_checker（每步最多一次）。
 4. 多解/构造：只按 plan 验 ouf 合法性；勿对 ans/ouf 字符串全等（除非第 5 节明确要求）。
 5. 题意模拟：严格按 plan 第 6 节分支；若 plan 笔误与题面保底/激活冲突，按题面分支写。
    禁止无条件 `if (cur < k) cur = k` 或全程 `cur = max(cur, k)`。
@@ -465,7 +480,7 @@ checker.cpp 必须用 testlib：
 7. 【复杂度】严格按 plan 第 6 节「复杂度预算」实现；禁止改用更慢算法（MITM/指数/大 N 的 N^2）。
 8. 【硬门禁】每步最多一次 write_checker；编译成功后系统会自动 run_checker_self_check。
    禁止未自检连续 write_checker。整阶段最多 2 次编译成功的 write_checker（首版 + 逻辑修正一轮）；
-   编译失败不计入次数，应据报错修源码再写。
+   编译失败不计入次数，应据报错修源码再写。use_builtin_checker 不计 write_checker 次数。
 9. 自检 FAIL [LOGIC] → 只允许再 write_checker 一轮（优先按题面修模拟语义，禁止改成与 ans 全等）；
    自检 FAIL [SYSTEM] → 不要改 checker，再跑自检或 finish。自检 OK → finish。只写 checker.cpp。
 10. 若编译报 isNumber / undeclared / void 转 bool（如 !readEoln）：改用 readInt/readLine，

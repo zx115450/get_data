@@ -24,6 +24,7 @@ from .checker import (
 )
 from .context import (
     BUILTIN_CHECKERS,
+    BUILTIN_CHECKER_HELP,
     CHECKER_SRC_DIR,
     CHECKER_TEMPLATE_DIR,
     CHECKER_TEMPLATES,
@@ -74,6 +75,7 @@ from .write import (
 
 __all__ = [
     "BUILTIN_CHECKERS",
+    "BUILTIN_CHECKER_HELP",
     "CHECKER_SRC_DIR",
     "CHECKER_TEMPLATE_DIR",
     "CHECKER_TEMPLATES",

@@ -12,7 +12,16 @@ def adaptive_steps(range_json: dict | None, problem_type: str | list[str] | None
         return base
     constraints = range_json.get("constraints") or {}
     max_val = 1
+    from pipeline.gen_data import constraint_bounds
+
     for v in constraints.values():
+        bounds = constraint_bounds(v)
+        if bounds is not None:
+            try:
+                max_val = max(max_val, int(bounds[1]))
+            except (ValueError, TypeError):
+                pass
+            continue
         if isinstance(v, (list, tuple)) and len(v) >= 2:
             try:
                 max_val = max(max_val, int(v[1]))

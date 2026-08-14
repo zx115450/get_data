@@ -55,7 +55,9 @@ _TYPE_KEYWORDS = {
     "graph": ["图", "graph", "连通块", "最短路", "最短路径", "环", "mst",
               "二分图", "网络流", "邻接", "割点", "桥", "dijkstra", "bfs 图"],
     "string": ["字符串", "string", "子串", "子序列", "模式", "回文",
-               "kmp", "trie", "后缀", "hash 串", "匹配"],
+               "kmp", "trie", "后缀", "hash 串", "匹配",
+               "高精度", "大整数", "超大整数", "big integer", "bigint", "bignum",
+               "数位", "很长的数", "十进制串"],
     "number_theory": ["gcd", "lcm", "素数", "质数", "同余", "数论", "约数",
                       "整除", "欧拉", "费马", "逆元", "模意义"],
     "array": ["数组", "序列", "求和", "区间", "排序", "前缀和",
@@ -86,6 +88,7 @@ _STD_CODE_KEYWORDS = {
     "string": [
         "string", "substr", "substring", "kmp", "trie", "suffix", "prefix",
         "palindrome", "hash", "rolling hash", "z-function", "manacher",
+        "bigint", "bignum", "biginteger", "digits", "to_string",
     ],
     "number_theory": [
         "gcd", "lcm", "prime", "sieve", "mod", "inverse", "phi", "factor",
@@ -170,11 +173,18 @@ PROBLEM_TYPE_RANGE_HINT = (
     "2. 输入主体是一般图（连通性、最短路、DAG、二分图、网络流等）"
     "→ graph 或 weighted_graph。\n"
     "3. 以 gcd/素数/同余/欧拉函数/组合数等数论对象为主 → number_theory。"
-    "不要仅因答案需要取模（mod/%）就判为 number_theory。\n"
-    "4. 字符串/模式匹配 → string；几何点集/凸包 → geometry；"
+    "不要仅因答案需要取模（mod/%）就判为 number_theory。"
+    "若数论对象本身是超 long long 大整数，仍应同时带上 string（见下条）。\n"
+    "4. 字符串/模式匹配 → string。"
+    "【大整数 → 偏向 string】题面整数范围超出 64 位有符号"
+    "（|x| > 约 9·10^18，或上界如 10^100 / 10^1000），"
+    "或明确「位数很多 / 高精度 / 大整数按串读入」时："
+    "problem_type 应含 string（可与 number_theory、dp 等并存，如大整数数论、数位 DP）；"
+    "禁止只写 array/number_theory 却按 long long 建模。"
+    "几何点集/凸包 → geometry；"
     "多测 T+sum → multi_test；区间数据结构查询 → range_query；"
     "DP/背包 → dp；二维网格 → matrix；交互题 → interactive。\n"
-    "5. 其余序列/数组题 → array。\n"
+    "5. 其余序列/数组题 → array（元素均在 long long 内时才用整数采样）。\n"
     "可同时写多个类型：如输入是「多测的树链剖分」可写 [\"tree\", \"multi_test\"]；"
     "「区间 DP」可写 [\"dp\", \"range_query\"]。"
     "系统会把这几个题型的提示词约束合并后交给 Coder。\n"
