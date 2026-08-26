@@ -243,7 +243,7 @@ def run(
     # 门禁状态：快速自检是否已通过（通过后禁止再写）
     check_ok = False
     checker_check_ok = False
-    # range-only：首次 write_range 成功后自动结束，避免模型反复改写空转
+    # range-only：write_range 成功后自动结束；失败可在后续步骤重写（每步最多一次）
     range_only = _is_range_only_schemas(schemas)
     range_done = False
     # 同一 Agent 轮次内已成功读过的路径，禁止重复 read_file（如两次 gen_plan.md）
@@ -324,8 +324,9 @@ def run(
         # 如果一轮里出现 write_gen / write_validate / write_checker / use_builtin_checker，并行编译以节省时间
         results = [None] * len(actions)
         writer_indices = {}
-        # checker：同一步若出现多次 write_checker，只执行第一次
+        # checker / range：同一步若出现多次写入，只执行第一次
         checker_write_seen = False
+        range_write_seen = False
         for idx, act in enumerate(actions):
             # 门禁：自检通过后禁止写代码（即使模型仍塞了 write_*）
             if write_check_discipline and check_ok and act.name in _WRITE_CODE_TOOLS:
@@ -352,6 +353,19 @@ def run(
                 continue
             if act.name == "write_checker":
                 checker_write_seen = True
+            if (
+                range_only
+                and act.name == "write_range"
+                and range_write_seen
+            ):
+                results[idx] = (
+                    "ERROR: 本步已有一次 write_range，禁止同轮连写。"
+                    "若本次/上一调用返回 ERROR（缺 content / JSON 非法 / 校验失败），"
+                    "请在下一轮再 write_range 整份修正；成功后系统会自动结束。"
+                )
+                continue
+            if act.name == "write_range":
+                range_write_seen = True
             if range_only and range_done and act.name == "write_range":
                 results[idx] = (
                     "ERROR: range.json 已写好，禁止再次 write_range。"
@@ -511,6 +525,12 @@ def run(
                     tool_counts["write_checker"] = max(
                         0, tool_counts.get("write_checker", 1) - 1
                     )
+            elif act.name == "write_range" and isinstance(result, str) and result.startswith("ERROR"):
+                # 缺 content / JSON 非法 / 校验失败：不占额度，下一轮可再写
+                if tool_limits and "write_range" in tool_counts:
+                    tool_counts["write_range"] = max(
+                        0, tool_counts.get("write_range", 1) - 1
+                    )
             elif act.name == "write_gen" and isinstance(result, str) and result.startswith("ERROR"):
                 skip_recompile.add("gen")
             elif act.name == "write_special_gen" and isinstance(result, str) and result.startswith("ERROR"):
@@ -548,28 +568,47 @@ def run(
 
         # write_* 缺 content / 参数截断 / 截断恢复：立刻强提醒，避免空转
         missing_content = any(
-            act.name in _WRITE_CODE_TOOLS
+            act.name in _WRITE_CODE_TOOLS | {"write_range"}
             and isinstance(results[i], str)
             and (
                 "缺少必填参数 content" in results[i]
                 or "参数不完整" in results[i]
                 or "参数疑似截断" in results[i]
                 or "JSON 解析失败" in results[i]
+                or "不是合法 JSON" in results[i]
+                or "range.json 校验失败" in results[i]
                 or "来自截断 JSON 恢复" in results[i]
             )
             for i, act in enumerate(actions)
         )
         if missing_content:
             follow = (
-                "【硬错误 · content 书写】上一轮 write_* 的 content 不完整"
-                "（空参数、工具 JSON 被截断、或 recovered 残缺源码）。"
-                "下一轮必须重新调用同一个 write_*，arguments 形如 "
-                '{"content":"#include ... 完整可编译源码到 main 结尾 }"}；'
-                "宜短而全，避免再次截断。"
-                "若磁盘已有旧版：先 read_file(\"gen.cpp\") / validator.cpp，再整份写出。"
-                "禁止再次空调用；禁止 __OMITTED_SOURCE__ /「其余不变」摘要。"
-                "同时对照题面+标程+range 写全 edge_cases 分支与 opt 参数。"
+                "【硬错误 · 上一轮写入失败】请在下一轮再调用一次 write_* 整份修正（本步禁止连写）。"
             )
+            if any(
+                act.name == "write_range"
+                and isinstance(results[i], str)
+                and results[i].startswith("ERROR")
+                for i, act in enumerate(actions)
+            ):
+                follow = (
+                    "【硬错误 · write_range 失败】content 必须是完整合法 range.json。"
+                    "下一轮再调用一次 write_range（arguments 只能是 "
+                    '{"content":"{\\"count\\":15,\\"constraints\\":...,\\"edge_cases\\":[...]}"}'
+                    "）；禁止空调用、禁止同轮连写。"
+                    "校验失败则按 ERROR 逐条改完再写。无已有 range 时禁止 finish「无需重写」。"
+                )
+            else:
+                follow = (
+                    "【硬错误 · content 书写】上一轮 write_* 的 content 不完整"
+                    "（空参数、工具 JSON 被截断、或 recovered 残缺源码）。"
+                    "下一轮必须重新调用同一个 write_*，arguments 形如 "
+                    '{"content":"#include ... 完整可编译源码到 main 结尾 }"}；'
+                    "宜短而全，避免再次截断。"
+                    "若磁盘已有旧版：先 read_file(\"gen.cpp\") / validator.cpp，再整份写出。"
+                    "禁止再次空调用；禁止 __OMITTED_SOURCE__ /「其余不变」摘要。"
+                    "同时对照题面+标程+range 写全 edge_cases 分支与 opt 参数。"
+                )
             messages.append({"role": "user", "content": follow})
             if on_event:
                 on_event(step, "nudge", {"reason": "missing_write_content"}, follow[:120])
@@ -611,12 +650,36 @@ def run(
                         "gen 与 validator 都编译成功后才会自动快速自检。"
                     )
                 else:
-                    follow = (
-                        "【系统自检前置检查未通过】尚未自动跑 run_self_check。\n"
-                        f"{prep_msg}\n\n"
-                        "请先补齐缺失的 write_gen / write_validate（可同轮并行写出），"
-                        "两者都编译成功后系统才会自动快速自检。不要在产物不齐时反复空写。"
-                    )
+                    # 按磁盘产物点名：避免「补齐 write_gen/validate」被理解成再刷已成功侧
+                    from agent.tools.context import _exe, _wd
+
+                    gen_ok = (_wd() / _exe("gen")).is_file()
+                    val_ok = (_wd() / _exe("validator")).is_file()
+                    if gen_ok and not val_ok:
+                        follow = (
+                            "【系统自检前置检查未通过】尚未自动跑 run_self_check。\n"
+                            f"{prep_msg}\n\n"
+                            "【硬】gen 已编译通过，只缺 validator。\n"
+                            "下一轮必须调用 write_validate(完整源码)；"
+                            "禁止再 write_gen / 微调 gen / read_file(gen.cpp)。\n"
+                            "validator 须含 #include \"testlib.h\" + registerValidation + main，"
+                            "禁止摘要/「已写入」冒充源码。"
+                        )
+                    elif val_ok and not gen_ok:
+                        follow = (
+                            "【系统自检前置检查未通过】尚未自动跑 run_self_check。\n"
+                            f"{prep_msg}\n\n"
+                            "【硬】validator 已编译通过，只缺 gen。\n"
+                            "下一轮必须调用 write_gen(完整源码)；禁止再 write_validate。"
+                        )
+                    else:
+                        follow = (
+                            "【系统自检前置检查未通过】尚未自动跑 run_self_check。\n"
+                            f"{prep_msg}\n\n"
+                            "请先补齐缺失侧：缺 gen 则 write_gen，缺 validator 则 write_validate"
+                            "（可同轮并行）；两者都编译成功后系统才会自动快速自检。"
+                            "禁止在已成功的一侧反复空写。"
+                        )
                 messages.append({"role": "user", "content": follow})
                 if verbose:
                     print(f"[step {step}] skip auto self_check: {prep_msg}")

@@ -1,14 +1,16 @@
 {
   "count": 18,
   "constraints": {
-    "m": [
-      0,
-      250000
-    ],
-    "word_len": [
-      1,
-      10
-    ]
+    "m": {
+      "type": "int",
+      "min": 0,
+      "max": 250000
+    },
+    "word_len": {
+      "type": "int",
+      "min": 1,
+      "max": 10
+    }
   },
   "edge_cases": [
     "edge_m_min",

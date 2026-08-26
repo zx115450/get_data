@@ -85,6 +85,59 @@ class TestRangeOnly:
         assert "range.json" in out
 
 
+    def test_write_range_retry_after_error(self, mock_chat, monkeypatch):
+        n = {"i": 0}
+
+        def _dispatch(name, args):
+            n["i"] += 1
+            if n["i"] == 1:
+                return "ERROR: range.json 校验失败:\n- count too small"
+            return "OK: wrote range.json"
+
+        monkeypatch.setattr(core.tools, "dispatch", _dispatch)
+        monkeypatch.setattr("agent.tools.dispatch", _dispatch)
+        mock_chat(
+            [_act("write_range", {"content": "{}"}, "t1")],
+            [_act("write_range", {"content": '{"count":15}'}, "t2")],
+        )
+        out = core.run(
+            "写 range",
+            max_steps=5,
+            verbose=False,
+            system_prompt="sys",
+            tool_schemas=[_tool_schema("write_range"), _finish_schema()],
+        )
+        assert "range.json" in out
+        assert n["i"] == 2
+
+    def test_write_range_same_step_only_once(self, mock_chat, monkeypatch):
+        n = {"i": 0}
+
+        def _dispatch(name, args):
+            n["i"] += 1
+            return "OK: wrote range.json"
+
+        monkeypatch.setattr(core.tools, "dispatch", _dispatch)
+        monkeypatch.setattr("agent.tools.dispatch", _dispatch)
+        events = []
+        mock_chat([
+            _act("write_range", {"content": '{"count":15}'}, "t1"),
+            _act("write_range", {"content": '{"count":20}'}, "t2"),
+        ])
+        out = core.run(
+            "写 range",
+            max_steps=5,
+            verbose=False,
+            system_prompt="sys",
+            tool_schemas=[_tool_schema("write_range"), _finish_schema()],
+            on_event=lambda *a: events.append(a),
+        )
+        assert "range.json" in out
+        assert n["i"] == 1
+        blocked = [e for e in events if e[1] == "write_range" and isinstance(e[3], str) and "同轮连写" in e[3]]
+        assert blocked
+
+
 class TestStageSwitch:
     def test_switch_updates_prompt_and_schemas(self):
         messages = [{"role": "system", "content": "RANGE"}]

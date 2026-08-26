@@ -85,7 +85,8 @@ TOOL_SCHEMAS = [
         "write_range",
         "把数据范围写到 range.json。content 为合法 JSON：count 由你自定且不得小于 15；"
         "constraints（每变量须 type；double 须 decimals）；"
-        "edge_cases（不要含 random；含 edge_n1/edge_nmax 等最小最大边界）。",
+        "edge_cases（不要含 random；含 edge_n1/edge_nmax 等最小最大边界）。"
+        "每步最多一次 write_range；校验/JSON 失败可在下一轮整份重写。",
         {"content": {"type": "string", "description": "range.json 的完整 JSON 字符串"}},
         ["content"],
     ),
@@ -94,12 +95,16 @@ TOOL_SCHEMAS = [
         "把【完整】生成器 C++ 源码写到工作目录 gen.cpp 并 g++ 编译。"
         "【content 硬约束】arguments 必须含 content=从 #include 到 main 结尾 } 的完整源码；"
         "禁止空调用、省略 content、半截文件、__OMITTED_SOURCE__；宜短而全，避免 JSON 截断（recovered/missing_content）。"
+        "include/namespace 必须成对：只用 testlib.h+using namespace std，"
+        "或只用 generator.h+using namespace generator::all（禁止混用）。"
         "树/图/几何题优先 #include \"generator.h\" + using namespace generator::all；"
         "树/图必须先 t.gen()，再 cout << t，或 for (auto &e : t.edges())；"
         "get_edges() / Tree::shuffle() / 访问 _edges 不存在，写错会编译失败。"
         "仍须 registerGen；seed/type/index/count 必须在 type 分支前全部 opt<>() 消费"
         "（type 必须 string type=opt<string>(\"type\",\"random\")，禁止 opt<int>(\"type\")/type==0；"
         "禁止只在 random 里读，否则 edge_* 报 unused key）。"
+        "constraints 每个 opt 一行标量：int/long long/double/string；"
+        "opt<vector<…>>/opt<pair<…>> 无特化，必在链接期报 undefined reference（vector 容器自己构造）。"
         "random 分支用 --index/--count 分层取规模。"
         "禁止 std::shuffle(...,rnd)；禁止枚举 O(n^2) 边池。"
         "实现须对照题面+标程+range（多测 T、edge_cases 分支、约束变量全部 opt）。",
@@ -161,6 +166,7 @@ TOOL_SCHEMAS = [
         "把【完整】校验器 C++ 源码写到工作目录 validator.cpp 并 g++ 编译。"
         "【content 硬约束】必须传完整源码字符串；禁止空调用、半截、摘要；宜短而全，避免工具参数截断。"
         "读入顺序须与标程一致。registerValidation 后 inf.strict=false；连续 read*；"
+        "无规模头读至 EOF 须 while (!inf.seekEof())（禁止 while (!inf.eof())）；"
         "收尾必须 skipBlanks()+readEof()（禁止裸 readEof）；"
         "只验范围与结构（ensuref），不验空格/换行格式；以编译/运行通过为准。",
         {
@@ -169,6 +175,7 @@ TOOL_SCHEMAS = [
                 "description": (
                     "【必填·完整上下文】完整 validator.cpp 全文（含 main 结尾 }），"
                     "不能为空/截断/摘要。需 registerValidation + inf.strict=false + read*；"
+                    "读至 EOF 用 while (!inf.seekEof())，禁止 while (!inf.eof())；"
                     "结尾 inf.skipBlanks(); inf.readEof(); 有结构约束时加 ensuref；"
                     "禁止为格式写 readSpace/readEoln。"
                 ),
@@ -359,6 +366,15 @@ def normalize_tool_args(name: str, args: dict | None) -> tuple[dict, str | None]
                 f" 另：工具参数 JSON 解析失败（常见于 content 过长被截断），预览={raw_preview!r}。"
                 "请缩短实现后重新提交【完整】content（一次写全，勿半截）。"
             )
+        if name == "write_range":
+            hint = (
+                "ERROR: write_range 缺少必填参数 content（完整 range.json 正文）。"
+                "禁止空调用。请立即再调用一次，arguments 只能是 "
+                '{"content":"{\\"count\\":15,\\"constraints\\":{...},\\"edge_cases\\":[...]}"}。'
+                "校验失败则按 ERROR 修正后再 write_range；每步最多一次。"
+            )
+            if parse_failed:
+                hint += f" 另：参数 JSON 解析失败，预览={raw_preview!r}。"
         if name == "write_file" and not raw.get("path"):
             hint += " write_file 还需要 path。"
         return raw, hint

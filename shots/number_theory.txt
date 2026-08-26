@@ -54,13 +54,13 @@ validator.cpp:
 #include "testlib.h"
 using namespace std;
 int main(int argc, char* argv[]) {
-    registerValidation();
-    int n = inf.readInt(1, 100000, "n"); inf.readEoln();
+    registerValidation(argc, argv);
+    inf.strict = false;  // 不验空白格式
+    int n = inf.readInt(1, 100000, "n");
     for (int i = 0; i < n; i++) {
         inf.readLong(1, 1000000000LL, "ai");
-        if (i + 1 < n) inf.readSpace();
     }
-    inf.readEoln();
+    inf.skipBlanks();
     inf.readEof();
     return 0;
 }

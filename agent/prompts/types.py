@@ -75,7 +75,8 @@ TYPE_GRAPH = """【图题型模块 — graph / weighted_graph】
 【多测】标程先读 T：首行必须是 T；仅此时可写 edge_Tmax（可选 big_T_small_n）；禁 edge_T1。
 【n=1】禁自环 → m=0（可空）；允许自环 → (1,1,w)。采样须有尝试上限。
 【完全图】控制 n 使边数 ≤ m 上界。空边集/空文件按约束允许。
-【复杂度】遵守 gen_plan 第 4/7 节分层：小中档可多样，大档与满边上界 ≤K；满边/满询问 ≠ 唯一顶点/唯一键拉满。
+【复杂度】遵守 gen_plan 第 4/7 节分层：小中档可多样，大档与满边上界 ≤K；满边/满询问 ≠ 唯一顶点/唯一键/唯一标签拉满。
+大档：有效状态（点标签、权值种类等）须 pool≤K 复用；禁止规模循环内每次新宽域采样。
 
 图性质以题面为准；validator 校验同题面（u/v 用 readInt(1,n)）。
 """
@@ -104,7 +105,8 @@ TYPE_ARRAY = """【数组 / 序列题型模块】
 【超 long long】元素/权值上界超出 64 位有符号整数时：禁止 long long/__int128 采样；
   用十进制字符串构造（rnd.next(\"[1-9][0-9]{L-1}\") 等），cout/printf 直接打串；validator 用 readToken。
 【k 位小数 / 实数字段】题面或 special_constraints 要求一位/k 位小数时：在 [lo·10^k, hi·10^k] 整数域
-  rnd.next，再按缩放打印（可含非整数，如 1.5）；禁止对该字段只用 %d / 纯 int 采样。
+  用两参数 rnd.next 再按缩放打印（可含非整数，如 1.5）；禁止 rnd.next(lo,hi,k) 第三参；
+  禁止对该字段只用 %d / 只打整数冒充 decimals。
   validator：readDouble（或 readStrictDouble）；勿因 readDouble 能读整数就只生成整数。
 排列：rnd.perm(n)（0..n-1，按题面 +1）。
 可选 generator.h 函数（不是类）：
@@ -115,7 +117,8 @@ TYPE_ARRAY = """【数组 / 序列题型模块】
 
 validator：长度、元素范围（≤long long 用 readLong；更大用 readToken/pattern）、单调/互异等题面约束。
 常见 edge：edge_n1, edge_nmax, all_equal, descending, all_negative, all_max_value, two_values, monotone, alternating。
-- 大档：数值种类 ≤ K，用有限域复用凑满规模；禁止满 n 且每个元素全新大随机。
+- 大档：数值种类 ≤ K，用有限域复用凑满规模；禁止满 n 且每个元素全新大随机（循环内 rnd 满值域上界）。
+  正例：先 vector/数组 pool(K)，再 a[i]=pool[rnd.next(0,K-1)]。
 """
 
 TYPE_STRING = """【字符串题型模块】
@@ -157,6 +160,8 @@ validator：读 S 必须 readToken / readToken(\"[a-z]{…}\")；禁止 readInt(
   再 ensuref 字符集、长度、子串/前后缀/周期等。
 【定长串】满长度用 L - 已用长度补齐；禁止「块长 + 手写填充个数」口算导致 ≠L。
 常见 edge：edge_n1, edge_nmax, all_same, pattern_at_start/end, no_match, long_run, two_chars。
+- 大档：若「不同串/token」是有效状态（离散化/字典/自动机），种类 ≤K：先建 token pool，循环内复用；
+  禁止规模循环内每次 rnd.next(\"[a-z]{L,R}\") 使唯一状态≈规模。
 """
 
 TYPE_PERMUTATION = """【排列题型模块】

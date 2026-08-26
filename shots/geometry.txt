@@ -65,13 +65,14 @@ validator.cpp:
 #include "testlib.h"
 using namespace std;
 int main(int argc, char* argv[]) {
-    registerValidation();
+    registerValidation(argc, argv);
+    inf.strict = false;  // 不验空白格式
     int n = inf.readInt(3, 1000, "n");
-    inf.readEoln();
     for (int i = 0; i < n; i++) {
-        inf.readInt(-1000000, 1000000, "x"); inf.readSpace();
-        inf.readInt(-1000000, 1000000, "y"); inf.readEoln();
+        inf.readInt(-1000000, 1000000, "x");
+        inf.readInt(-1000000, 1000000, "y");
     }
+    inf.skipBlanks();
     inf.readEof();
     return 0;
 }

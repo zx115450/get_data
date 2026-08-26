@@ -280,6 +280,12 @@ def _triple_check(
                 f' 【疑似缺分支】gen 对 type={typ} 输出为空；'
                 f'请确认含 type == "{typ}"（与 range.edge_cases 逐字符一致）'
             )
+        elif raw.strip() and "Unexpected end of file" in val:
+            # 有输出仍 EOF：多为 while (!inf.eof()) 撞行末 \n，而非 gen 少字段
+            extra = (
+                " 【疑似 validator 读至 EOF 误用 eof()】"
+                "若行号≈记录数+1：改 while (!inf.seekEof())，勿改 gen 删换行"
+            )
         return f"FAIL type={typ} seed={seed} validate: {val}{extra}", "", ""
     if _is_special_type(typ):
         if not (_wd() / _exe("check_special")).is_file():
@@ -298,7 +304,16 @@ def _triple_check(
     )
     if rc != 0:
         if rc == 124:
-            return f"FAIL type={typ} seed={seed}: std TIMEOUT after {std_timeout}s", "", ""
+            extra = ""
+            if typ == "random" and (int(index) // 3) % 3 == 2:
+                extra = (
+                    " 【疑似大档缺有限域】random 大档请先建 pool[K] 再采样"
+                    "（禁止规模循环内每次新 token/宽值域）；勿只加时限。"
+                )
+            return (
+                f"FAIL type={typ} seed={seed}: std TIMEOUT after {std_timeout}s"
+                f"{extra}"
+            ), "", ""
         if rc == EXIT_MEMORY:
             return f"FAIL type={typ} seed={seed}: std MEMORY_LIMIT ({mem_mb} MB)", "", ""
         if is_stack_overflow(rc):

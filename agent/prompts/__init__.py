@@ -27,6 +27,7 @@ from .core import (
     PERF,
     RANGE_CONTRACT,
     RANGE_ONLY_CORE,
+    RND_NEXT_API_CARD,
     RULES,
     SCALE,
     TOOLS_FULL,

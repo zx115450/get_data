@@ -44,19 +44,19 @@ validator.cpp:
 #include "testlib.h"
 using namespace std;
 int main(int argc, char* argv[]) {
-    registerValidation();
-    int n = inf.readInt(1, 100000, "n"); inf.readSpace();
-    int q = inf.readInt(1, 100000, "q"); inf.readEoln();
+    registerValidation(argc, argv);
+    inf.strict = false;  // 不验空白格式
+    int n = inf.readInt(1, 100000, "n");
+    int q = inf.readInt(1, 100000, "q");
     for (int i = 0; i < n; i++) {
         inf.readInt(1, 1000000000, "ai");
-        if (i + 1 < n) inf.readSpace();
     }
-    inf.readEoln();
     for (int i = 0; i < q; i++) {
-        int op = inf.readInt(1, 1, "op"); inf.readSpace();
-        inf.readInt(1, n, "i"); inf.readEoln();
+        int op = inf.readInt(1, 1, "op");
+        inf.readInt(1, n, "i");
         ensuref(op == 1, "only query op=1 in this offline sample");
     }
+    inf.skipBlanks();
     inf.readEof();
     return 0;
 }

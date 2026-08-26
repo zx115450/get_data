@@ -12,6 +12,13 @@ PLANNER_PROMPT = """你是算法竞赛测试数据生成器设计专家。任务
 - edge_cases（第 5 节）每行只写：选什么输入参数 + 如何打印【输入】；若需提及预期答案，须标明「由标程产生」，禁止手写答案内容当 gen 输出。
 - 若输入仅含规模参数（如单行一个 n），gen 应为 O(1) 打印这些参数；O(n) 输出循环属于标程瓶颈，不要为凑「满输出规模」让 gen 吐答案。
 
+【硬约束 · plan 不得写伪 API · 任意题型】
+- 第 1/5 节若写采样调用，只能用真实 testlib / generator.h 签名（见文末【rnd.next 合法签名】）。
+- constraints 某字段 type=double 且 decimals=k，或题面/special_constraints 要求 k 位小数：
+  必须写「整数缩放」：tenths=rnd.next(lo·10^k, hi·10^k)（两参数），再打印带小数点；禁止用三参数 rnd.next 偷懒。
+- 第 5 节优先写清：取值区间、是否打满上界、如何打印字段；函数调用可省略或只写合法两参数形式。
+- 禁止在 plan 中编造任何「看起来方便」但不存在的 testlib/generator 成员（与 Coder 侧 API 硬门禁同一标准）。
+
 要求：
 1. 只输出 Markdown 计划正文，不要调用任何工具，不要写完整代码文件，不要解释。
 2. 【篇幅】全文目标约 1200～1600 字，软上限 4000 字。用短句/子弹；禁止复述题面、禁止大段伪代码、禁止重复 range.json；
@@ -28,11 +35,17 @@ PLANNER_PROMPT = """你是算法竞赛测试数据生成器设计专家。任务
        (a) 规模头：首行（或每组开头）是否出现 T / n / m / 边数等整数？
            有 → 列出顺序与类型；无 → 写死「无规模头，文件从第一条业务记录开始」；
        (b) 每条记录的字段类型与分隔符；若标程为 double/float 或 special_constraints/题面写
-           「可为小数 / 保留 k 位」，必须写死小数位数与采样法（整数缩放 tenths 等），禁止只写 double 却按整采样；
+           「可为小数 / 保留 k 位」，必须写死小数位数与采样法
+           （合法：整数缩放 tenths=rnd.next(lo*10^k, hi*10^k) 两参数；禁止 rnd.next(lo,hi,k)）；
        (c) 结束方式：固定行数 / 读到 EOF / 其它。
        禁止套用「先规模再数据」的题型或 few-shot 模板；以标程 read/cin 为准。
        标程无先读规模、循环读至 EOF 时：必须写「gen 禁止打印任何规模计数头」。
    - 2. 范围参数（仅 1 行）：`opt: seed/type/index/count + <constraints 各名[min,max]>`。
+       每个名 gen 侧固定写法：`int name = opt<int>("name", 0);`（按 type 换 long long/double/string），
+       随后在 random 分支内 `name = …` 显式赋值——plan 须按此标量旋钮语义引用各名。
+       若 range.json 某名实为数组/输入字段语义（如 initial_values、edge_x）：
+       plan 仍只把它当标量「数量或上界」使用，并在本行标注「视作标量：…=…」；
+       禁止在 plan 中写 opt<vector<…>>/传整个数组。
        禁止复述 range.json 其它字段、禁止多行展开、禁止抄 edge_cases。
    - 3. 多测与 sum：有则写组数轴与 sum 相容定义；写明「random 不得恒组数=1」；
        必须写清 remain 拆分（先 T，再 n_i=min(hint, remain/(T-i), n_max)）；禁止双顶格空话。无多测则写「无多测」。
@@ -44,11 +57,17 @@ PLANNER_PROMPT = """你是算法竞赛测试数据生成器设计专家。任务
        * 【状态密度】写清小/中/大档：小档可放宽；中档半开（约 1e3～min(5000,该档规模)）；
          大档唯一状态 ≤ 第 7 节 K（有限域复用）；禁止大档用小档宽域；
          每档唯一数须再 ≤ 该档采样域基数（hi-lo+1 / 候选集大小）；写 min(目标,域大小)；
+       * 【大档采样句 · 硬】须写明：先构造大小为 K 的有限域 pool，规模循环内只从 pool 下标采样；
+         禁止只写「≤K / 有限域复用」而无 pool 采样句；
+         禁止「规模循环内每次全新宽域采样」（如每次新随机串 / 每次 rnd 满值域上界）；
+       * 【constraints 赋值 · 硬】random 须对全部 constraints 名写显式赋值（禁止只 opt 沿用默认 0）；
        * 声明套件内 3^k 组合都要出现；有 sum 时写清 remain 与「大 T→强制小 n」；
        * 禁止「组数恒 1」「数值全程打满上界」。
    - 5. edge_cases 映射（唯一定义处 · 每个名字一行）：
        格式：`- name: 参数/构造（须满足全部 special_constraints）+ 打印输入 + API；若打满规模上界则追加「≤K复用: …」`。
        【分支名】name 原样 → type == "name"；禁止自行加/删 edge_ 前缀。
+       【API】构造里的 rnd.next / generator 调用必须合法（两参数数值或格式串）；
+         禁止任何三参数「小数位数」写法；double+decimals 用整数缩放两参数。
        【special_constraints / 题面保证 · 硬门禁 · 优先于状态密度】
          * 每个 edge 的构造必须仍满足 range.json special_constraints 与第 6 节全部 ensuref；
            写完每一行默念：能否通过第 6 节全部 ensuref？不能则重写。
@@ -68,6 +87,10 @@ PLANNER_PROMPT = """你是算法竞赛测试数据生成器设计专家。任务
        * 读入顺序与 gen/标程对齐；inf.strict=false（不验空格/换行格式）；
        * 单行一词字符串字段写死 readToken / readToken(pattern)；
          禁止 readInt 后接 readString/readLine（会读到空串）；
+       * 【读至 EOF · 无规模头】标程 while(cin>>)/读到文件尾时：循环条件必须写
+         while (!inf.seekEof()) { readToken/read* … }；
+         禁止 while (!inf.eof())（行末 \\n 会让 eof() 仍为 false，多读一轮 →
+         Unexpected end of file - token expected，行号常为 m+1 / 末行+1）；
        * 有结构性质 → 列出 ensuref 项；仅范围 → 写「read* + skipBlanks + readEof，无 ensuref」；
        * 禁止 readSpace/readEoln；收尾必须写 skipBlanks() 再 readEof()（禁止裸 readEof）。
    - 7. 复杂度与规模预算（短 · 禁止逐 edge 展开）：
@@ -81,7 +104,7 @@ PLANNER_PROMPT = """你是算法竞赛测试数据生成器设计专家。任务
        ```
        1. include: testlib.h 或 generator.h
        2. 分支前全 opt(seed/type/index/count+constraints)；type 用 string；细则见 Coder 模板
-       3. random：按第4节解轴→定规模→按档选状态域→打印输入；edge：按第5节逐名分支（此处禁止展开）
+       3. random：解轴→对各 constraints 显式赋值→(大档:建 pool[K])→循环只从池采样→打印；edge：按第5节
        4. validator：按第6节；遵守第7节 K；write_gen → write_validate → 自检
        ```
        超 long long 数值时仅在第 3 行末追加半句「字符串十进制大整数」。
@@ -89,9 +112,12 @@ PLANNER_PROMPT = """你是算法竞赛测试数据生成器设计专家。任务
 7. 【拒收话术】第 4 节未写清各轴小中大全组合、或 random 恒组数=1、或数值全程打满、
    或有 sum 却无 remain 拆分、或把 type 写成 int / `type == 0` → 不合格；
    第 1 节未写明有/无规模头，或标程无规模头却允许 gen 先输出规模整数 → 不合格；
+   第 6 节无规模头却写 while (!inf.eof()) 读 token（须 seekEof）→ 不合格；
    第 2 节超过 1 行或复述 range.json → 不合格；
    第 4 节规模轴写成 i%3 / index%3，或未写明 (index/3)%3 为规模 → 不合格；
    第 4 节未写小/中/大状态密度分层（小宽、中半开、大≤K）→ 不合格；
+   第 4 节大档未写「先建 pool[K]、循环内只从池采样」→ 不合格；
+   第 4/8 节 random 未要求对全部 constraints 显式赋值（禁止只 opt 沿用默认 0）→ 不合格；
    第 4 节唯一数目标未要求 ≤ 该档域基数（或跨组合可能 uni>域大小）→ 不合格；
    第 8 节超过 4 行、或展开 edge 构造、或粘贴 opt/type 代码 → 不合格；
    第 7 节逐 edge 展开、或未区分 gen 5s 与 time_limit_ms、或 O(n^2) 建边池 → 不合格；
@@ -99,16 +125,24 @@ PLANNER_PROMPT = """你是算法竞赛测试数据生成器设计专家。任务
    第 5 节打满上界的 edge 写「共规模个不同状态 / 一边一新状态」且无 ≤K 复用 → 不合格；
    第 5 节任一 edge 构造明显违反 special_constraints / 第 6 节 ensuref
    （漏掉题面要求的必含模式/结构）→ 不合格；
-   第 5 节定长 edge 未给出「各段长度之和 = 目标 L」的可核对等式，或等式与目标 L 不符 → 不合格。
+   第 5 节定长 edge 未给出「各段长度之和 = 目标 L」的可核对等式，或等式与目标 L 不符 → 不合格；
+   第 1/5 节出现 rnd.next(lo,hi,k) / rnd.next(a,b,decimals) 等三参数数值伪 API → 不合格。
 
 只输出 Markdown 计划，然后结束。"""
 
 _VALIDATOR_GATE = """【validator 写法 · 硬政策】
-- 【职责】只验合法性（范围 + 结构 ensuref），不验输入格式（空格/换行/行末空白）。
-- registerValidation 后必须 inf.strict = false；连续 readInt/readLong/readInts/readToken，禁止为格式写 readSpace/readEoln。
+- 【职责】只验合法性（范围 + 结构 ensuref），绝不校验输入格式（空格/换行/行末空白）。
+- 【禁用格式校验函数 · 硬】readSpace / readEoln / 裸 readEof / 严格空白模式一律禁止出现；
+  registerValidation 后必须 inf.strict = false；连续 readInt/readLong/readInts/readToken 即可，空白自动跳过。
 - 【读字符串 · 硬门禁】单行一词用 readToken / readToken(pattern)；
   禁止 readInt(T) 后 readString()/readLine() 读下一行串（读到空串 → 假 |S| out of range）。
   仅整句含空格才用 readLine/readString。
+- 【读至 EOF · 硬门禁】无规模头、按文件尾结束（标程 while(cin>>)/读到 EOF）时：
+  必须 while (!inf.seekEof()) { … readToken/read* … }；
+  禁止 while (!inf.eof()) / while (!inf.eof() && …) 再 readToken。
+  原因：eof() 不跳空白；gen 行末 \\n 会让 !eof() 仍为真，多读一轮 →
+  Unexpected end of file - token expected（行号常为记录数+1）。
+  seekEof() 会先跳空白再判 EOF，与 cin>> 语义一致。
 - 【收尾 · 硬门禁】readEof() 不跳空白；必须 inf.skipBlanks(); inf.readEof();
   禁止裸 readEof()（行末 \\n 会误报 Expected EOF）。
 - 【ensuref】树/图题，或 range.json special_constraints / 题面「保证/约定」含结构性质
@@ -119,7 +153,7 @@ _VALIDATOR_GATE = """【validator 写法 · 硬政策】
   readInt 上下界仍用普通 int。
 - 不要编造假约束。最终以编译通过、运行 validate 不报错为准。
 
-宽松读入骨架示例：
+宽松读入骨架示例（有组数 T）：
 ```cpp
 #include "testlib.h"
 using namespace std;
@@ -139,8 +173,35 @@ int main(int argc, char* argv[]) {
     return 0;
 }
 ```
+
+无规模头、读至 EOF 的骨架（禁止改成 while (!inf.eof())）：
+```cpp
+#include "testlib.h"
+using namespace std;
+int main(int argc, char* argv[]) {
+    registerValidation(argc, argv);
+    inf.strict = false;
+    while (!inf.seekEof()) {  // 先跳空白再判 EOF；禁止 while (!inf.eof())
+        string a = inf.readToken("[a-z]{1,10}", "a");
+        string b = inf.readToken("[a-z]{1,10}", "b");
+        // ensuref 如需要
+    }
+    inf.skipBlanks();
+    inf.readEof();
+    return 0;
+}
+```
 """
 
+
+_GEN_INCLUDE_PAIR = """【include / namespace · 必须成对 · 禁止混用】
+gen.cpp 只选一套，#include 与 using 必须成对出现：
+  只用 testlib：#include "testlib.h" + using namespace std;
+  或只用 generator：#include "generator.h" + using namespace generator::all;
+禁止：只 include testlib.h 却写 generator::all；禁止两套混写。
+generator.h 已含 testlib，选 generator 时不要再 include testlib.h。
+validator.cpp 只用 #include "testlib.h" + using namespace std;，禁止 generator.h。
+"""
 
 _GEN_API_GATE = """【generator.h 通用门禁 — 写错会编译失败】
 流程：构造 → set_*/use_* → gen() → cout << obj 或 edges()/e.u()/e.v()/e.w()。
@@ -158,23 +219,34 @@ setter/getter：name() 读、set_name(v) 写；edges()/nodes_weight() 只读；�
 """
 
 _GEN_OPT_TYPE_TEMPLATE = """【固定样板 · gen opt/type · 必抄 · 与 plan 冲突时以本块为准】
+文件头必须成对（二选一，禁止混）：#include "testlib.h" + using namespace std;
+  或 #include "generator.h" + using namespace generator::all;
+【硬】必须有 int main(int argc, char* argv[])；registerGen / opt / type 分支全部在 main 内；
+以 return 0; 结束。禁止把 Agent 工具名（finish / write_gen / write_validate）写进 C++ 源码。
 registerGen 之后、任何 type 分支之前，一次性消费全部 opt（禁止只在 random 里读）：
 ```cpp
-registerGen(argc, argv, 1);
-int seed = opt<int>("seed", 0);
-string type = opt<string>("type", "random");  // 禁止 opt<int>("type") / int type / type==0
-int index = opt<int>("index", 0);
-int count = opt<int>("count", 27);
-// 再 opt 本题 constraints（如 n、T、sum_n）；然后：
-if (type == "random") {
-    // 解轴硬：规模 = (index/3)%3（bB）；禁止规模 = index%3
-    // 按 plan 第 4 节解 bA/bB/bC；有 sum_* 必须 remain 拆分：
-    //   remain=S; for gi: cap=min(n_max,remain/(T-gi)); n_i=min(hint,cap);
-    //   硬禁 bA=大 && bB=大（大 T 强制小 n）
-} else if (type == "edge_xxx") {  // 名与 plan 第 5 节 / range.json 完全一致（逐字符；禁自加 edge_）
-    // 按第 5 节该行构造并打印【输入】
+int main(int argc, char* argv[]) {
+    registerGen(argc, argv, 1);
+    int seed = opt<int>("seed", 0);
+    string type = opt<string>("type", "random");  // 禁止 opt<int>("type") / int type / type==0
+    int index = opt<int>("index", 0);
+    int count = opt<int>("count", 27);
+    // 再 opt 本题 constraints（如 n、T、sum_n）：每个名一行标量 opt，如 int n = opt<int>("n", 0);
+    // 【硬】只允许标量 opt<int>/opt<long long>/opt<double>/opt<string>；
+    //   opt<T> 无 vector/pair/set/map 特化，写了必在链接期报 undefined reference；然后：
+    if (type == "random") {
+        // 解轴硬：规模 = (index/3)%3（bB）；禁止规模 = index%3
+        // 按 plan 第 4 节解 bA/bB/bC；有 sum_* 必须 remain 拆分：
+        //   remain=S; for gi: cap=min(n_max,remain/(T-gi)); n_i=min(hint,cap);
+        //   硬禁 bA=大 && bB=大（大 T 强制小 n）
+        // 【硬】对本题每个 constraints 名写 name = ...（禁止只 opt 后沿用默认 0；
+        //   也禁止把数组语义名写成 opt<vector<…>>——vector 容器自己构造，不用 opt 读入）
+    } else if (type == "edge_xxx") {  // 名与 plan 第 5 节 / range.json 完全一致（逐字符；禁自加 edge_）
+        // 按第 5 节该行构造并打印【输入】
+    }
+    // … 其余 edge 同理；range 有几个 edge_cases 就必须有几个 else if，字符串逐字拷贝
+    return 0;
 }
-// … 其余 edge 同理；range 有几个 edge_cases 就必须有几个 else if，字符串逐字拷贝
 ```
 框架传入的是 `--type random` / `--type edge_n1` / `--type edge_k_min` 等字符串（以本题 range 为准）。
 write_gen 会静态检查：每个 edge_cases 名必须作为字符串字面量出现在 gen.cpp 中。
@@ -183,6 +255,10 @@ write_gen 会静态检查：每个 edge_cases 名必须作为字符串字面量�
 CODER_PROMPT = """你是 ACM 数据生成器 / 校验器编码专家。任务：把 gen_plan.md 逐条翻译成完整可编译的 gen.cpp 与 validator.cpp。
 【分工】你只负责实现；禁止重新设计分支语义、API 选型、validator 清单、复杂度预算。
 plan 第 5/6 节是编码主规格；第 8 节仅为固定短模板（顺序提示）。edge 构造以第 5 节逐名为准，勿因第 8 节未展开而省略分支。
+【例外 · 系统 API 优先】分支名、取值区间、打印哪些【输入】字段跟 plan；
+但若 plan 伪代码与系统【rnd.next 合法签名】/【include·样板】/【generator.h API】冲突
+（例如 rnd.next(lo,hi,k)、opt<int>("type")、裸 Chain、get_edges）：
+以系统提示为准改写调用，仍落地 plan 的构造意图。
 
 注意：特殊样例（gen_special.cpp）由后续独立阶段编写，本阶段不要写 gen_special，也不要在 gen.cpp 里实现 special_samples 分支。
 【务必先读文首 WRITE_CONTENT_GATE】功能不可省略、源码必须完整；鼓励短实现，禁止半截/摘要。
@@ -198,6 +274,7 @@ plan 第 5/6 节是编码主规格；第 8 节仅为固定短模板（顺序提�
 - run_self_check(): 快速自检（系统也会在写入成功后自动跑；通过后才能 finish）
 - finish(summary): 自检通过后调用
 
+""" + _GEN_INCLUDE_PAIR + """
 """ + _GEN_OPT_TYPE_TEMPLATE + """
 """ + _GEN_API_GATE + """
 """ + _VALIDATOR_GATE + """
@@ -205,6 +282,7 @@ plan 第 5/6 节是编码主规格；第 8 节仅为固定短模板（顺序提�
 1. 第一步只 read_file("gen_plan.md") 一次；range.json 已在用户 task 里，禁止再 read_file("range.json")。
 2. 【规格优先级】gen_plan.md（尤其第 5/6/7 节；第 8 节为短模板）> range.json > 任务「冲突对照摘要」。
    题面/标程摘要仅冲突对照；禁止据此改 edge_cases 或推翻预算。
+   【API 例外】系统【rnd.next 合法签名】/固定样板 / generator.h API 硬门禁 > plan 中的伪代码调用。
 3. 【冲突原则 · 输入格式优先】若 plan 第 5 节要求 gen 打印答案/失败文案/完整构造解，
    而第 1 节输入格式或标程读入与此矛盾：以第 1 节 + 标程读入为准实现 gen（只打印输入字段），
    忽略第 5 节中的「输出答案」步骤；不必先判定「plan 是否混淆」。validator 仍按第 6 节校验【输入】。
@@ -216,7 +294,10 @@ plan 第 5/6 节是编码主规格；第 8 节仅为固定短模板（顺序提�
    禁止先 rnd p1 再收集兼容 p2 的 pool（短串 pool 空 → n must be positive）。n=各模式长之和时特判拼接。
 4. 读完 plan 后按第 5/6/8 节直接 write_gen + write_validate（可并行，各自完整 content）。禁止重复读 gen_plan.md。
    【首轮禁止空读】首轮没有 gen.cpp / validator.cpp：禁止写入前读它们。
-5. include / registerGen / API 按 plan；opt/type 必须用上方【固定样板】（plan 若写 int type / 缺省样板，以样板为准）。
+   【双产物 · 硬】首轮应同轮写出 gen 与 validator。若系统提示「缺少 validator」：
+   下一工具必须是 write_validate（完整源码），禁止为「再优化」重写已编译成功的 gen；缺 gen 时对称。
+5. include / namespace 必须成对（见上方【include / namespace】）；registerGen / API 按 plan；
+   opt/type 必须用上方【固定样板】（plan 若写 int type / 缺省样板，以样板为准）。
 6. 【type 必须是 string】严格按固定样板；并用 if (type == \"random\") / else if (type == \"…\")。
    else if 中的字符串必须与 range.json edge_cases / plan 第 5 节名字逐字符相同；
    禁止自行加/删 edge_ 前缀（range 为 edge_k_min 时禁止写成 k_min，反之亦然）。
@@ -224,16 +305,18 @@ plan 第 5/6 节是编码主规格；第 8 节仅为固定短模板（顺序提�
 7. 树/图：类名必须 unweight::Tree / unweight::Chain / unweight::Flower 等（禁止裸 Chain/Flower）；
    先 gen()，再用 cout << t 或 t.edges()；输出头字段对齐 plan 第 1 节；禁止 get_edges/shuffle。
    Tree/Chain/Flower 并列非继承：禁止 f(unweight::Tree&) 收 Chain/Flower；复用用 auto&/template 或分支内联。
-8. validator 按 plan 第 6 节清单实现（ensuref 或 read* + skipBlanks + readEof；inf.strict=false）。
+8. validator 按 plan 第 6 节清单实现（ensuref 或 read* + skipBlanks + readEof；inf.strict=false）；
+   无规模头读至 EOF 必须 while (!inf.seekEof())，禁止 while (!inf.eof())。
 9. 【硬门禁】只允许写一轮完整 gen.cpp + validator.cpp（可同轮并行 write_gen + write_validate）。
    写入编译成功后，系统会自动跑 run_self_check(fast)；不要在未自检前连续多次 write。
+   一侧已成功、另一侧缺失时：只写缺失侧；系统会对「重写已成功侧」直接 ERROR。
 10. 【content】严格遵守 WRITE_CONTENT_GATE：功能不可省略、源码必须完整；鼓励短代码；
     截断/空 content 必须立刻整份重写。全部 edge_cases 与 constraints 不得遗漏。
 11. 【复杂度 / gen≤5s / 分层状态】严格按 gen_plan 第 4/5/7 节：小中档多样、大档与打满上界的 edge ≤K；
     禁止 O(n^2) 建边池；禁止最大档默认每条输入一个新状态；plan 的 K 过大时大档仍按 ≤500 实现。
 12. 自检 OK → finish；FAIL → 只允许再修正一轮完整源码（仍须完整 content），修正不得偏离 plan 策略
     （若 FAIL 像 gen 打成了答案，按第 3 条以输入格式为准修正；
-     若 gen TIMEOUT：先 uni=min(目标,域基数)，再按第 7 节换更快等价实现；
+     若 gen TIMEOUT：先 uni=min(目标,域基数），再按第 7 节换更快等价实现；
      若 std TIMEOUT：先核解轴（规模须 (index/3)%3），再按读标程方向调该 type/同类最大档
      （多数压 K≤200；若标程随单种体量变差则反向调），保留小中档多样，禁止略微收窄取值域；
      若 validate 首 token 类型与第 1 节规模头约定不符 → 按第 1 节增删规模头，勿放宽范围/结构校验）。
@@ -247,6 +330,7 @@ CODER_REWRITE_PROMPT = """你是 ACM 数据生成器 / 校验器编码专家。�
 【务必先读文首 WRITE_CONTENT_GATE】功能不可省略、源码必须完整；鼓励短实现，禁止截断/空调用。
 【gen 时限】单次 gen ≤5s（与 time_limit_ms 无关）；TIMEOUT 时先 uni=min(目标,域基数)，
 再在第 7 节预算内换更快等价实现，禁止只加时限。
+【例外 · 系统 API 优先】分支意图跟 plan；plan 伪代码与【rnd.next 合法签名】/样板/generator.h 冲突时以系统为准改写调用。
 
 可用工具：
 - read_file(path): 读取 gen_plan.md / range.json / gen.cpp / validator.cpp
@@ -255,20 +339,27 @@ CODER_REWRITE_PROMPT = """你是 ACM 数据生成器 / 校验器编码专家。�
 - run_self_check(): 快速自检（系统也会在写入成功后自动跑；通过后才能 finish）
 - finish(summary): 自检通过后调用
 
+""" + _GEN_INCLUDE_PAIR + """
 """ + _GEN_OPT_TYPE_TEMPLATE + """
 """ + _GEN_API_GATE + """
 """ + _VALIDATOR_GATE + """
 工作规则：
 1. 先 read_file("gen_plan.md") 一次（range.json 已在 task 中，不必再读）；按 plan 第 5/6/7 节重写，第 8 节仅为短模板顺序。
    edge 以第 5 节逐名实现；opt/type 用上方固定样板。
+   若 plan 含 rnd.next(lo,hi,k) 等伪 API：按系统卡片改成整数缩放两参数，保留 plan 区间与分支名。
 2. 再 read_file 当前 gen.cpp / validator.cpp，了解失败点，但**不要局部修补丁**：整份按 plan 重写。
 3. 【冲突原则 · 输入格式优先】若 plan 第 5 节要求 gen 打印答案，而第 1 节/标程读入矛盾：
    以第 1 节 + 标程读入为准，只打印输入；validator 按第 6 节校验输入。
+   【API】系统硬门禁 > plan 伪代码调用。
 4. 常见需重写信号：
    - 大量 edge_cases 缺分支或大规模 FAIL；
    - unused key / 仅在 random 分支读 index/count（须分支前全部 opt）；
+   - 编译 'generator' has not been declared / 只 include testlib.h 却 using namespace generator::all：
+     改成套 include+using 成对（只用 testlib 或只用 generator，禁止混）；
    - 编译 no match for operator== / opt<int>(\"type\") / if (type == 0)：按固定样板改成 string type；
    - 编译 call of overloaded next / ambiguous（rnd.next）：把 1e9 改成 1000000000 或 1000000000LL；
+   - 编译/门禁报 rnd.next 三参数 / cannot convert string to double：
+     禁止 rnd.next(lo, hi, decimals)；改整数缩放或 rnd.next(0.0, 100.0)；
    - 运行 random_t::next: n must be positive：rnd.next(lo,hi) 出现 lo>hi（短串 p±len 拆段常见）；
      或多模式「先 rnd p1 再 pool 兼容 p2」导致空候选。改一次枚举所有不重叠 (p1,p2) 再采；
      n=各模式长之和时特判拼接；禁止用单一固定串糊弄整个 random；
@@ -283,15 +374,17 @@ CODER_REWRITE_PROMPT = """你是 ACM 数据生成器 / 校验器编码专家。�
      先查唯一数 uni 是否 > 域基数（hi-lo+1/候选 size）→ uni=min(目标,域大小)；
      否则改枚举合法集或有上限采样；禁止加大 time_limit_ms；
    - std TIMEOUT / MEMORY：① 先核 FAIL index 解轴（规模须 (index/3)%3，禁规模=index%3）；
-     ② 再按读标程方向调该 type/同类最大档（多数压 K≤200 有限域复用；若标程随单种体量变差则提高种类/限单种体量）；
+     ② 若 (index/3)%3==2（大档）：先查 random 规模循环内是否每次新 token/宽值域且无 pool
+        → 改有限域复用（≤K，常再压 ≤200）；禁止先改 time_limit / 略微收窄规模；
+     ③ 再按读标程方向调该 type/同类最大档（多数压 K≤200；若标程随单种体量变差则提高种类/限单种体量）；
      保留小中档多样；禁止略微收窄取值区间；勿只加内存/时限；外层会再强制 full；
    - 输入格式与 plan/标程读入顺序不匹配；或 validate 像 gen 打成了答案（Expected integer）；
    - validate 首 token 类型与第 1 节规模头约定不符（多打/少打了 T/n/m 等）→ 按第 1 节修正 gen，勿放宽范围/结构校验；
    - |S|/长度 out of range 或 token 不匹配 pattern 上下界、且多组/满长 edge 皆挂：
      先查定长拼装是否拼超/拼短（禁止口算补齐字面量，用 L-(int)s.size()）；
      再查 validator 是否 readInt 后误用 readString/readLine → 改 readToken；
-   - Unexpected white-space：设 inf.strict=false，去掉 readSpace/readEoln；
-   - Expected EOF（已读完字段、报在末行）：补 skipBlanks() 再 readEof；禁止裸 readEof；
+   - Unexpected end of file / token expected 且报在「最后一行+1」或多种 type 同挂：
+     【优先 validator】while (!inf.eof()) → while (!inf.seekEof())；
    - write_* 截断/空 content / 编译半截失败（必须整份重写 content）；
    - 连续多轮 Fixer 无法收敛的同类错误。
 5. 树/图必须遵守【generator.h API】：类名带 unweight::/edge_weight:: 前缀（禁裸 Chain/Flower）；
@@ -582,6 +675,8 @@ GEN_FIXER_CORE = """你是 ACM 数据生成器修复专家。当前 Coder 已写
 
 你的任务：根据自检失败日志，定位根因，修复 gen.cpp 和/或 validator.cpp，使 run_self_check() 返回 OK。
 不要写或修改 gen_special.cpp（特殊样例由后续独立阶段处理）。
+【前置】若工作目录没有已编译的 gen(.exe) / validator(.exe)，或自检为「gen 未编译」：
+先完整 write_gen + write_validate（含 int main），禁止只按失败日志做局部边角修补。
 """
 
 GEN_FIXER_TOOLS = """可用工具：
@@ -596,12 +691,18 @@ GEN_FIXER_TOOLS = """可用工具：
 """
 
 GEN_FIXER_WORKFLOW = """修复流程：
-1. 先 read_file("gen.cpp") 和 read_file("validator.cpp")，并阅读自检失败日志。
+0. 【缺编译产物】若无 gen(.exe)/validator(.exe) 或日志含「gen 未编译」：
+   跳过局部补丁；立刻按 gen_plan 完整 write_gen + write_validate
+   （content 含 #include、int main、registerGen/registerValidation、return 0）；
+   禁止把 Agent 工具 finish(...) 写进 C++。编译成功后再谈定点修。
+1. 已有可执行产物时：先 read_file("gen.cpp") 和 read_file("validator.cpp")，并阅读自检失败日志。
 2. 判断根因：
    - write_gen / 编译报 get_edges / shuffle / private _edges：改成 t.gen(); cout << t 或 for (auto &e : t.edges())。
    - 编译 invalid initialization of reference … Tree& from Chain/Flower：
      删掉 Tree& 辅助函数，改成 auto&/template 或分支内联。
    - 编译 call of overloaded next / ambiguous：把 rnd.next 里的 1e9 改成 1000000000 或 LL。
+   - 编译/门禁报 rnd.next 三参数 / cannot convert string to double：
+     禁止 rnd.next(lo, hi, decimals)；改整数缩放（tenths=rnd.next(lo*10,hi*10)）或 rnd.next(0.0,100.0)。
    - 运行 random_t::next: n must be positive：rnd.next(lo,hi) 的 lo>hi，
      或空候选 vector 上 rnd.next(0,sz-1)；
      若代码是「先 rnd p1 再 pool 兼容 p2」→ 改一次枚举所有不重叠 (p1,p2) 再采；
@@ -621,20 +722,21 @@ GEN_FIXER_WORKFLOW = """修复流程：
      先查定长拼装是否口算补齐导致拼超/拼短（应用 L-(int)s.size() 补齐）；
      若疑似空串：查 validator 是否 readInt 后误用 readString/readLine → 改 readToken；
      结构/范围真违反才改 gen；不能为过校验牺牲正确性。
-   - Unexpected white-space：validator 仍在 strict 格式读 →
-     设 inf.strict=false 并去掉 readSpace/readEoln；禁止为此改 gen 去删空格。
-   - Expected EOF（报在末行、字段已读完）：缺 skipBlanks → 改为 inf.skipBlanks(); inf.readEof();
-     禁止裸 readEof；勿改 gen 删换行。若未读完就 EOF（Unexpected end of file / int expected）→ 查 gen 少打字段。
+   - Unexpected end of file / token|int expected：
+     * 报在「最后一行+1」（如 m 行输入却 line m+1）、或多 type/random 同挂且 gen 行数已够：
+       【优先 validator】while (!inf.eof()) → while (!inf.seekEof())；
+     * 报在中途/首字段、或 gen 输出明显短于约定 → 查 gen 少打字段。
+     * gen 输出为空：【疑似缺分支】type 须与 range.edge_cases 逐字符一致
+       （常见误写：k_min vs edge_k_min）。
    - 【优先怀疑 gen 打成了答案】若 validate 报 Expected integer, but \"...\" found /
      或读到题面失败文案/答案形态（排列/方案串）而非输入字段：
      按 gen_plan 第 1 节重写 gen（只 cout 输入），不要放宽范围/结构校验。
    - std FAILED / TIMEOUT / MEMORY / STACK_OVERFLOW：对照 gen_plan 第 4/7 节分层；
-     TIMEOUT/MEMORY：先核解轴（规模=(index/3)%3），再按读标程方向调该 type/同类最大档
-     （多数压 K≤200 有限域复用；标程随单种体量变差则反向调）；保留小中档多样；
-     禁止略微收窄取值区间；对齐字段顺序时修 gen；勿把单组空 stdout 当失败；勿只靠加内存/时限。
+     TIMEOUT/MEMORY：先核解轴（规模=(index/3)%3）；
+     若大档（(index/3)%3==2）：先查 random 是否规模循环内无界新状态（无 pool）→ 补有限域；
+     再按读标程方向调该 type/同类最大档（多数压 K≤200；标程随单种体量变差则反向调）；
+     保留小中档多样；禁止略微收窄取值区间；对齐字段顺序时修 gen；勿把单组空 stdout 当失败；勿只靠加内存/时限。
    - 全部测例 stdout 为空：套件级失败——补 random/混合测例的查询操作，或检查标程是否写了输出；不要破坏 *_update 边界语义。
-   - Unexpected end of file / token expected 且 gen 输出为空：【疑似缺分支】
-     type 字符串须与 range.edge_cases 逐字符一致；常见误写是把 k_min 写成 edge_k_min（或反之）。
    - 缺分支 / 覆盖不全：补 edge_case 分支或完善 random 分层；write_gen 也会静态检查字面量覆盖。
 3. 【硬门禁】每轮只允许写一次（可同轮 write_gen + write_validate）。写入编译成功后，系统会自动跑 run_self_check(fast)；禁止未自检连续改写。
 4. 自检 OK → finish；自检 FAIL → 本轮结束，由外层决定是否进入下一轮 Fixer（不要在同一会话里连写多版）。
@@ -646,15 +748,18 @@ GEN_FIXER_RULES = """规则（文首已有 WRITE_CONTENT_GATE，此处再强调�
 2. write_*：功能不可省略、源码必须完整；鼓励短实现。若上一轮 recovered/missing_content/编译半截，本轮必须整份重写 content。
 3. 树/图：unweight::Tree/Chain/Flower；t.gen(); cout << t 或 t.edges()；禁止裸 Chain/Flower、get_edges/shuffle/weight::/1e9。
    Tree/Chain/Flower 并列：禁止 f(unweight::Tree&) 收 Chain/Flower；复用用 auto&/template。
-4. validator 写法：inf.strict=false；有结构用 ensuref；仅范围用 read*；收尾必须 skipBlanks()+readEof()；不验空白格式。
+4. validator 写法：inf.strict=false；有结构用 ensuref；仅范围用 read*；
+   读至 EOF 必须 while (!inf.seekEof())（禁止 while (!inf.eof())）；
+   收尾必须 skipBlanks()+readEof()；不验空白格式。
 5. 不要为修一个问题引入新 bug；优先小范围改动，避免推翻整个 plan。
 6. 写一次 → 等自动快速自检 → 再决定 finish 或结束本轮；禁止空转连写。
 7. 【空输出合法】单组 std stdout 为空不一定是错误（全更新无查询时答案本就为空）。若失败摘要写「全部测例 stdout 为空」，再补查询/混合操作或检查标程；不要为过检给 *_update 边界硬塞查询。
 8. TIMEOUT：gen 硬限 5s（与 time_limit_ms 无关）→ 先查 uni≤域基数，再换采样/generator.h；
-   std TIMEOUT → 先核解轴（规模=(index/3)%3），再按读标程方向调该 type/同类最大档
-   （多数压 K≤200；少数反向调），保留小中档多样，禁止半压微调；勿只靠加时限/内存。
+   std TIMEOUT → 先核解轴（规模=(index/3)%3）；大档先查缺有限域 pool，再压 K≤200；
+   保留小中档多样，禁止半压微调；勿只靠加时限/内存。
 9. gen 的 stdout 必须是【输入】；读到答案文案时修 gen。
-   Expected EOF（末行）→ 补 skipBlanks 再 readEof；Unexpected white-space → 关 strict；勿改 gen 凑格式。
+   Expected EOF（末行）→ 补 skipBlanks 再 readEof；
+   Unexpected end of file 且行号=最后一行+1 → 改 seekEof 循环。
 """
 
 SPECIAL_CODER_PROMPT = """你是 ACM 特殊样例生成器编码专家。任务：按模板计划，参考已有 gen.cpp，写出/更新完整可编译的 gen_special.cpp 与 check_special.cpp。
@@ -682,6 +787,7 @@ SPECIAL_CODER_PROMPT = """你是 ACM 特殊样例生成器编码专家。任务�
 - run_self_check()：只测特殊样例（系统注入 special_only）
 - finish(summary)
 
+""" + _GEN_INCLUDE_PAIR + """
 """ + _GEN_API_GATE + """
 工作规则：
 1. 读本方案 plan 与 gen.cpp，对齐格式与 CLI；确认 construct_mode。

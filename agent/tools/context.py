@@ -136,7 +136,7 @@ def _compile_cpp(
     work = cwd if cwd is not None else _wd()
     flags = _stack_link_flags(stack_bytes)
     cmd = (
-        f'g++ -O2 -std=c++17 {_include_flags()}{flags} '
+        f'g++ -std=c++17 -I{_SANDBOX.resolve().as_posix()}{flags} '
         f'{src_name} -o {_exe(out_base)}'
     )
     rc, out, err = safe_run(cmd, timeout=timeout, cwd=str(work))

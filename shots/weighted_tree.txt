@@ -48,14 +48,15 @@ using namespace std;
 const int MAXN = 100005; int par[MAXN];
 int find(int x){return par[x]==x?x:par[x]=find(par[x]);}
 int main(int argc, char* argv[]) {
-    registerValidation();
-    int n = inf.readInt(2, 100000, "n"); inf.readEoln();
+    registerValidation(argc, argv);
+    inf.strict = false;  // 不验空白格式
+    int n = inf.readInt(2, 100000, "n");
     for (int i = 1; i <= n; i++) par[i] = i;
     set<pair<int,int>> es;
     for (int i = 0; i < n - 1; i++) {
-        int u = inf.readInt(1, n, "u"); inf.readSpace();
-        int v = inf.readInt(1, n, "v"); inf.readSpace();
-        inf.readLong(1, 1000000000LL, "w"); inf.readEoln();
+        int u = inf.readInt(1, n, "u");
+        int v = inf.readInt(1, n, "v");
+        inf.readLong(1, 1000000000LL, "w");
         ensuref(u != v, "self loop");
         auto key = make_pair(min(u,v), max(u,v));
         ensuref(es.insert(key).second, "dup edge");
@@ -65,6 +66,7 @@ int main(int argc, char* argv[]) {
     }
     int r = find(1);
     for (int i = 2; i <= n; i++) ensuref(find(i) == r, "not connected");
+    inf.skipBlanks();
     inf.readEof();
     return 0;
 }

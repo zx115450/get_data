@@ -41,14 +41,16 @@ validator.cpp:
 #include "testlib.h"
 using namespace std;
 int main(int argc, char* argv[]) {
-    registerValidation();
-    int n = inf.readInt(1, 100, "n"); inf.readSpace();
-    int W = inf.readInt(1, 1000, "W"); inf.readEoln();
+    registerValidation(argc, argv);
+    inf.strict = false;  // 不验空白格式
+    int n = inf.readInt(1, 100, "n");
+    int W = inf.readInt(1, 1000, "W");
     for (int i = 0; i < n; i++) {
-        inf.readInt(1, 1000, "wi"); inf.readSpace();
-        inf.readInt(1, 1000, "vi"); inf.readEoln();
+        inf.readInt(1, 1000, "wi");
+        inf.readInt(1, 1000, "vi");
     }
     ensuref(n >= 1, "n>=1");
+    inf.skipBlanks();
     inf.readEof();
     return 0;
 }

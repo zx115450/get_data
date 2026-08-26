@@ -38,6 +38,8 @@ from .stages import (
     SPECIAL_CODER_PROMPT,
     SPECIAL_FIXER_PROMPT,
     _GEN_API_GATE,
+    _GEN_INCLUDE_PAIR,
+    _VALIDATOR_GATE,
 )
 from .types import _TYPE_MODULES
 
@@ -142,9 +144,10 @@ def build_range_prompt() -> str:
         "edge_cases 要覆盖最小/最大/典型边界；"
         "仅当 constraints 含 T/t 时才写 edge_Tmax（不要写 edge_T1）；无多测禁止写。",
         "只允许 write_range 与 finish；不要读文件。"
-        "无已有 range 或判定需重写时：write_range 成功后立刻 finish，不要重复 write_range。"
+        "无已有 range 或判定需重写时：write_range 成功后立刻 finish。"
         "判定可复用时：禁止 write_range，直接 finish。"
-        "看到 ERROR 要修正后再 write_range。",
+        "每步最多一次 write_range；ERROR（缺 content / JSON 非法 / 校验失败）则下一轮整份再写，可反复直到成功。"
+        "无已有文件时禁止 finish「无需重写」。",
         RULES,
     ])
 
@@ -152,8 +155,11 @@ def build_planner_prompt() -> str:
     """返回 Planner 阶段（单次纯文本）的 System Prompt。
 
     始终附带 SCALE + MULTI_TEST + PERF：小中大全组合、gen 5s 硬时限、以及 std 有效状态预算 K。
+    附带 RND_NEXT_API_CARD：避免第 5 节写出 rnd.next(lo,hi,decimals) 等伪 API。
     """
-    return "\n\n".join([PLANNER_PROMPT, SCALE, MULTI_TEST, PERF])
+    from .core import RND_NEXT_API_CARD
+
+    return "\n\n".join([PLANNER_PROMPT, RND_NEXT_API_CARD, SCALE, MULTI_TEST, PERF])
 
 def _with_type_modules(base_parts: list[str], problem_type: str | list[str] | None = None) -> str:
     """在通用规则后追加题型模块（tree/graph 等）。
@@ -231,7 +237,9 @@ def build_gen_fixer_prompt(problem_type: str | list[str] | None = None) -> str:
         [
             WRITE_CONTENT_GATE,
             GEN_FIXER_CORE,
+            _GEN_INCLUDE_PAIR,
             _GEN_API_GATE,
+            _VALIDATOR_GATE,
             GEN_FIXER_TOOLS,
             GEN_FIXER_WORKFLOW,
             GEN_FIXER_RULES,
@@ -252,7 +260,7 @@ def build_special_coder_prompt(problem_type: str | list[str] | None = None) -> s
 def build_special_fixer_prompt(problem_type: str | list[str] | None = None) -> str:
     """返回 Special Fixer 阶段的 System Prompt。"""
     return _with_type_modules(
-        [SPECIAL_FIXER_PROMPT, _GEN_API_GATE, BASE_GEN_RULES_CORE],
+        [SPECIAL_FIXER_PROMPT, _GEN_INCLUDE_PAIR, _GEN_API_GATE, BASE_GEN_RULES_CORE],
         problem_type,
     )
 

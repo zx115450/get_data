@@ -81,6 +81,108 @@ _CPP_STRING_LIT_RE = re.compile(
     r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\''
 )
 
+_RND_NEXT_CALL_RE = re.compile(r"\brnd\s*\.\s*next\s*\(", re.IGNORECASE)
+
+
+def _split_paren_args(src: str, open_idx: int) -> tuple[list[str], int] | None:
+    """从 src[open_idx]=='(' 起解析到匹配 ')'，按顶层逗号拆参数。
+
+    返回 (args, end_idx_after_close)；括号不匹配则 None。
+    """
+    if open_idx < 0 or open_idx >= len(src) or src[open_idx] != "(":
+        return None
+    args: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    i = open_idx
+    in_str = None
+    escape = False
+    while i < len(src):
+        ch = src[i]
+        if in_str:
+            buf.append(ch)
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == in_str:
+                in_str = None
+            i += 1
+            continue
+        if ch in ('"', "'"):
+            in_str = ch
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == "(":
+            depth += 1
+            if depth > 1:
+                buf.append(ch)
+            i += 1
+            continue
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                piece = "".join(buf).strip()
+                if piece or args:
+                    args.append(piece)
+                return args, i + 1
+            buf.append(ch)
+            i += 1
+            continue
+        elif ch == "," and depth == 1:
+            args.append("".join(buf).strip())
+            buf = []
+            i += 1
+            continue
+        if depth >= 1:
+            buf.append(ch)
+        i += 1
+    return None
+
+
+def _arg_looks_like_string_literal(arg: str) -> bool:
+    a = (arg or "").strip()
+    return len(a) >= 2 and a[0] in ('"', "'")
+
+
+def _check_rnd_next_misuse(content: str) -> str | None:
+    """拒写「三参数数值」rnd.next(lo, hi, decimals) 等幻觉 API。
+
+    允许首参为字符串字面量的格式串变参（rare）。返回 ERROR 文案或 None。
+    """
+    text = content or ""
+    bad: list[str] = []
+    for m in _RND_NEXT_CALL_RE.finditer(text):
+        open_idx = text.find("(", m.start())
+        if open_idx < 0:
+            continue
+        parsed = _split_paren_args(text, open_idx)
+        if not parsed:
+            continue
+        args, _ = parsed
+        if len(args) < 3:
+            continue
+        if _arg_looks_like_string_literal(args[0]):
+            continue
+        snippet = text[m.start() : parsed[1]].strip()
+        if len(snippet) > 80:
+            snippet = snippet[:77] + "..."
+        bad.append(snippet)
+    if not bad:
+        return None
+    samples = "\n".join(f"  - {s}" for s in bad[:5])
+    return (
+        f"ERROR: gen.cpp 使用了非法的 rnd.next 三参数数值调用（编译前静态门禁）。\n"
+        f"testlib 没有 rnd.next(lo, hi, decimals)；会落到 next(const char*,...) 返回 string。\n发现：\n"
+        f"{samples}"
+
+        f"\n改法：\n  - 整数区间：rnd.next(lo, hi)\n  - 连续浮点：rnd.next(0.0, 100.0)\n"
+        "  - k 位小数：tenths = rnd.next(lo*10^k, hi*10^k); 再打印 tenths/10^k\n"
+        "请修正后重新 write_gen。"
+    )
+
+
 
 def _cpp_string_literals(content: str) -> set[str]:
     """提取 C++ 源码中的普通字符串字面量内容（不含引号）。"""
@@ -159,19 +261,57 @@ def _check_gen_edge_case_literals(content: str) -> str | None:
     return "\n".join(lines)
 
 
+def _pair_artifact_idle_gate(writing: str) -> str | None:
+    """防止「一边已编译成功、另一边缺失」时反复重写已成功侧（空转）。
+
+    writing: \"gen\" | \"validator\"
+    - 已有 gen.exe、缺 validator.exe 时禁止再 write_gen
+    - 已有 validator.exe、缺 gen.exe 时禁止再 write_validate
+    两边都缺或两边都齐时不拦截（允许首轮/修复）。
+    """
+    wd = _wd()
+    gen_ok = (wd / _exe("gen")).is_file()
+    val_ok = (wd / _exe("validator")).is_file()
+    if writing == "gen" and gen_ok and not val_ok:
+        return (
+            "ERROR: gen 已编译通过，当前缺少 validator(.exe)。\n"
+            "禁止再 write_gen（空转）。下一轮必须 write_validate(完整源码)：\n"
+            '#include "testlib.h" + registerValidation + main + skipBlanks/readEof；'
+            "禁止摘要/「已写入」冒充源码。"
+        )
+    if writing == "validator" and val_ok and not gen_ok:
+        return (
+            "ERROR: validator 已编译通过，当前缺少 gen(.exe)。\n"
+            "禁止再 write_validate（空转）。下一轮必须 write_gen(完整源码)。"
+        )
+    return None
+
+
 def write_gen(content: str) -> str:
     """把生成器 C++ 源码写到 work_dir/gen.cpp，用 -I sandbox 编译成 gen(.exe)。"""
     ctx = get_context()
+    idle = _pair_artifact_idle_gate("gen")
+    if idle:
+        return idle
     if _looks_like_omitted_stub(content):
+        hint = ""
+        if (ctx.work_dir / _exe("gen")).is_file() and not (
+            ctx.work_dir / _exe("validator")
+        ).is_file():
+            hint = "（当前缺的是 validator：请改 write_validate，勿再交 gen 摘要。）"
         return (
             "ERROR: content 像是历史摘要，不是完整 gen.cpp。"
             "请重新输出完整 C++ 源码（#include \"testlib.h\" 或 \"generator.h\" + registerGen）。"
             "若需查看上一版，先 read_file(\"gen.cpp\")。"
+            f"{hint}"
         )
     gate = _check_gen_edge_case_literals(content)
     if gate:
         return gate
-    # 不再做其它代码层面的静态检查：缺失 registerGen / 错误 API 由编译器报错。
+    rnd_gate = _check_rnd_next_misuse(content)
+    if rnd_gate:
+        return rnd_gate
+    # 其余缺失 registerGen / 错误 API 仍由编译器报错。
     h = _content_hash(content)
     exe_path = ctx.work_dir / _exe("gen")
     if h == ctx.last_gen_hash and exe_path.exists():
@@ -198,7 +338,10 @@ def write_special_gen(content: str) -> str:
             "请重新输出完整 C++ 源码（#include \"testlib.h\" 或 \"generator.h\" + registerGen）。"
             "若需查看上一版，先 read_file(\"gen_special.cpp\")。"
         )
-    # 不再做代码层面的静态检查：缺失 registerGen / 错误 API 由编译器报错。
+    rnd_gate = _check_rnd_next_misuse(content)
+    if rnd_gate:
+        return rnd_gate
+    # 其余缺失 registerGen / 错误 API 仍由编译器报错。
     h = _content_hash(content)
     exe_path = ctx.work_dir / _exe("gen_special")
     if h == ctx.last_special_gen_hash and exe_path.exists():
@@ -256,13 +399,25 @@ def write_special_check(content: str) -> str:
 def write_validate(content: str) -> str:
     """把校验器 C++ 源码写到 work_dir/validator.cpp，用 -I sandbox 编译成 validator(.exe)。"""
     ctx = get_context()
+    idle = _pair_artifact_idle_gate("validator")
+    if idle:
+        return idle
     if _looks_like_omitted_stub(content):
+        hint = ""
+        if (ctx.work_dir / _exe("gen")).is_file() and not (
+            ctx.work_dir / _exe("validator")
+        ).is_file():
+            hint = (
+                "上一轮缺的是 validator：请输出完整 registerValidation 源码，"
+                "不要交摘要；gen 已 OK 无需再 write_gen。"
+            )
         return (
             "ERROR: content 像是历史摘要，不是完整 validator.cpp。"
             "请重新输出完整 C++ 源码（#include \"testlib.h\" + registerValidation）。"
             "若需查看上一版，先 read_file(\"validator.cpp\")。"
+            f"{hint}"
         )
-    # 不再做代码层面的静态检查：缺失 registerValidation / 缺 readEof 由编译运行报错。
+    # 其余缺失 registerValidation / 缺 readEof 由编译运行报错。
     h = _content_hash(content)
     exe_path = ctx.work_dir / _exe("validator")
     if h == ctx.last_val_hash and exe_path.exists():
@@ -280,4 +435,3 @@ def write_validate(content: str) -> str:
         f"OK: wrote & compiled validator "
         f"({len(content)} chars, stack={DEFAULT_STACK_MB}MB)"
     )
-

@@ -13,12 +13,15 @@ RANGE_ONLY_CORE = """你是出题数据规划助手。任务：根据题面与�
 不要写 gen/validator，不要编造测例正文。
 
 若 task 含【已有 range.json（待审核）】：
-1. 先判断其是否合理（constraints 是否覆盖题面规模变量且上下界正确、是否声明 type，
+1. 先判断其是否合理（constraints 是否覆盖题面规模变量且上下界正确、是否声明 type、
+   是否只含标量旋钮（无数组/输入字段名，见 RANGE_CONTRACT「constraints 只放标量旋钮」）、
    double 是否有 decimals；edge_cases 是否 4～6 个且贴合题面；
    problem_type 是否匹配；count 是否 ≥15 且足以覆盖小中大组合；多测 T/sum 是否一致；special_constraints 是否漏项）。
 2. 合理 → 不要调用 write_range，直接 finish(summary 开头写「复用:」并简述理由)。
 3. 不合理 → 调用 write_range 写出修正后的完整 JSON，再 finish(summary 开头写「重写:」并简述问题)。
 若无已有 range：直接 write_range 后 finish。
+write_range 每步最多一次；若返回 ERROR（缺 content / JSON 非法 / 校验失败），下一轮整份修正再写，可反复直到成功。
+无已有 range 时禁止 finish「无需重写」。
 """
 
 TOOLS_FULL = """可用工具：
@@ -106,6 +109,12 @@ RANGE_CONTRACT = """range.json 必须含：
   · int：32 位整数量级；long：64 位（long long）；string：长度下/上界（大整数按串时用 string，min/max=位数）
   · double：【必须】另写 "decimals": k（小数位数，非负整数，如一位小数 decimals=1）
   · 禁止只写 [min,max]；每条必须带 type（double 另写 decimals）
+  【constraints 只放标量旋钮 · 硬】每个名字都必须是 gen 可用
+    `int name = opt<int>("name", 0);`（或按 type 用 opt<long long>/opt<double>/opt<string>）消费的
+    单一数值/规模旋钮：规模（n/m/T）、长度上界、值域上界、模数等。
+    禁止把输入数据的字段名/数组名写进 constraints（如 initial_values、edge_x、edge_y、op_z、a、s）——
+    数组型输入只拆成「数量 + 值域上界」两个标量旋钮（如 n + val_max），不带数组本体。
+    gen 的 opt<T> 只存在标量特化；数组语义名会诱导 Coder 写 opt<vector<…>>（链接期 undefined reference）。
   例：
     "n": {"type":"int","min":1,"max":100000}
     "ai": {"type":"long","min":-1000000000,"max":1000000000}
@@ -255,12 +264,31 @@ PERF = """【性能硬约束 — 极重要 · Planner 与 Coder 均须遵守】
     先判断有效状态变少是变快还是变慢：多数题大档压种类；若标程随「单种状态体量」变差，
     应提高种类或限制单种体量，禁止盲目再压 K。
   - std TIMEOUT：① 先核对 FAIL 的 index 是否因解轴错误落入大档（规模须在 (index/3)%3）；是则先修解轴；
-    ② 再按读标程方向调 FAIL type/同类最大档（多数压到 K≤200 有限域复用；少数题按标程反向调）；
+    ② 大档优先查 random 是否缺有限域 pool（规模循环内每次新 token/宽值域）；
+    ③ 再按读标程方向调 FAIL type/同类最大档（多数压到 K≤200；少数题按标程反向调）；
     保留小中档多样；禁止略微收窄；禁止只加时限/内存。
 """
 
+RND_NEXT_API_CARD = """【rnd.next 合法签名 · 禁止自造第三参数 · 极重要】
+testlib 没有 rnd.next(lo, hi, decimals)！三参数数值调用会落到 next(const char*,...) 返回 string → 编译失败。
+合法（常用）：
+  - rnd.next(lo, hi)           → int / long long（两整数；须 lo≤hi；大范围写 1000000000LL）
+  - rnd.next(from, to)         → double（两 double，如 0.0, 100.0；连续浮点）
+  - rnd.next(\"[a-z]{n}\")      → string（格式串；仅当首参是字符串字面量时才可带额外格式参数）
+  - rnd.perm(n)                → 排列
+禁止：
+  - rnd.next(0, 100, 1) / rnd.next(lo, hi, k) 等「第三参当小数位数」——无此重载
+小数 decimals=k：整数缩放后再打印，例如一位小数：
+  tenths = rnd.next(lo*10, hi*10); 再输出 tenths/10.0（或整除打整数形式）
+write_gen 会静态拒写三参数数值 rnd.next。
+"""
+
 BASE_GEN_RULES_CORE = """gen.cpp 必须满足（testlib / ACM-generator 写法）：
-  - #include "testlib.h" 或 #include "generator.h"（后者已含 testlib，并额外提供数组/排列/树/图/几何便捷 API），main 里第一行 registerGen(argc, argv, 1)
+  - include / namespace 必须成对（禁止混用）：
+      只用 testlib：#include "testlib.h" + using namespace std;
+      或只用 generator：#include "generator.h" + using namespace generator::all;
+    generator.h 已含 testlib，选它时不要再 include testlib.h；
+    main 里第一行 registerGen(argc, argv, 1)
   - 框架每次都传 --seed/--type/--index/--count。必须在按 type 分支之前全部 opt 消费：
       int seed = opt<int>("seed");
       string type = opt<string>("type", "random");  // 必须是 string，禁止 opt<int>("type")
@@ -272,6 +300,7 @@ BASE_GEN_RULES_CORE = """gen.cpp 必须满足（testlib / ACM-generator 写法�
     某变量暂不用可 (void)x 或 [[maybe_unused]]，但 opt<>() 调用不能省。
   - --type 取值：字符串 "random"（默认分支）+ range.json edge_cases 里的每个名字
   - 用 rnd.next(l,r)/rnd.perm 或 generator::all 的 API 生成，保证可复现
+""" + RND_NEXT_API_CARD + """
   - 【rnd.next 区间 · 硬门禁】调用 rnd.next(lo, hi) 前必须 lo ≤ hi（含相等）；
     lo > hi → testlib 报 random_t::next: n must be positive / 崩溃。
     禁止用 p±len 推「左右段」却不检查上下界（短串尤易炸）。
@@ -292,6 +321,9 @@ BASE_GEN_RULES_CORE = """gen.cpp 必须满足（testlib / ACM-generator 写法�
   - 【写 gen 时必须携带完整上下文】见 WRITE_CONTENT_GATE：每个分支对照题面、标程、range；每个 edge_case 必须有 --type 分支。
   - 【空输入合法】若题面/约束允许空输入（如 m=0、EOF 空文件），对应 edge（如 edge_m0）可输出空 stdout；不要为了过框架检查硬塞一行假数据。
   - 【从 range.json 读取全部必要参数】task 中已给出 range.json，直接用其中的 constraints 对象里的所有变量名（如 n、m、a、b、k 等）。每个变量名必须在 gen.cpp 中通过 opt<T>("name") 注册并用于生成本组数据；固定参数 index、count、type 也必须注册。若某个变量名在算法里不需要直接使用，也须用 opt<T>(...) 消费掉，避免 testlib 报 "unused key" 错误。
+  - 【random · constraints 显式赋值 · 硬】opt 默认值不是构造赋值。type==\"random\" 内必须对
+    每个 constraints 名写至少一次 `name = ...`（按档 rnd.next/常量）；禁止只 opt 后沿用 0。
+    漏赋长度/种类等 → 空串/空白行。
   - 【规模头 · 硬】仅当 gen_plan 第 1 节明确「有规模头」时，才允许 stdout 先打印对应整数（T/n/m/边数等）。
     第 1 节为「无规模头 / EOF」时：第一个 token 必须已是业务字段；禁止先输出任何规模计数。
     opt 消费的 constraints（n/m/…）只用于决定生成多少、取什么范围，默认不打印到文件。
@@ -305,6 +337,9 @@ BASE_GEN_RULES_CORE = """gen.cpp 必须满足（testlib / ACM-generator 写法�
     * 若 plan 的 K>500 或与规模同阶：实现时仍按 K≤500 构造大档；
       TIMEOUT 且读标程确认应压种类时再将该最大档 ≤200；不必忠实错误大 K；小中档多样保留。
     禁止默认每条输入一个新状态；禁止「略收取值区间但仍可达上万种」冒充大档降密度。
+  - 【大档有限域 · 反模式】规模循环体内禁止每次新宽域状态：
+    如 rnd.next(\"[a-z]…\")、rnd.next(…,1e9) 等使唯一状态≈规模；
+    必须循环外建 pool[K]，循环内只按下标采样。edge 有池 ≠ random 可免。
   - 【定长拼装】目标长度 L 由前缀/循环块+补齐得到时：禁止口算补齐个数；
     先追加固定段，再按 L-(int)used 补齐（如 string(L-(int)s.size(), fill)）；拼完长度必须 == L。
   - 【超 long long · 用字符串构造】若题面/constraints 数值超出 64 位有符号整数
@@ -315,10 +350,14 @@ BASE_GEN_RULES_CORE = """gen.cpp 必须满足（testlib / ACM-generator 写法�
     validator 对这类字段用 readToken/readToken(pattern)，禁止 readLong。
   - 【k 位小数 · 硬门禁】若 constraints 某字段 type=double 且 decimals=k，
     或 gen_plan / special_constraints / 题面要求某字段为 k 位小数（或「可为一位小数」等）：
-    必须按整数缩放采样再打印小数：在 [lo·10^k, hi·10^k] 上 rnd.next，再输出带小数点的十进制
-    （一位小数示例：tenths=rnd.next(10,100) → 打印 1.0～10.0；可用「整除 10^k 则打整数形式，否则打 k 位」）。
-    禁止对该浮点字段用 printf(\"%d\") / cout<<int / 纯 int 区间 rnd.next(lo,hi) 冒充（即使 validator
-    用 readDouble 也能过整数）；random 与各 edge 分支都必须能出现非整数（除非该 edge 名明确要求全整数）。
+    【推荐合法写法】整数缩放 + 两参数 rnd.next：在 [lo·10^k, hi·10^k] 上
+    tenths=rnd.next(lo*10^k, hi*10^k)，再输出 tenths/10^k（或整除打整数形式、否则打 k 位）。
+    一位小数示例：tenths=rnd.next(10,100) → 打印 1.0～10.0。
+    【禁止误解】「禁止纯整数冒充 decimals」= 禁止全程只打印无小数点的整数、从不出现非整数；
+    不等于禁止两参数 rnd.next。两参数缩放后再打印小数 = 正确且推荐。
+    【严禁】rnd.next(lo, hi, k) / rnd.next(0, 100, 1) 把第三参当小数位数（无此 API；write_gen 会拒写）。
+    禁止对该浮点字段用 printf(\"%d\") / cout<<int 冒充（即使 validator 用 readDouble 也能过整数）；
+    random 与各 edge 分支都必须能出现非整数（除非该 edge 名明确要求全整数）。
     k 以 constraints.*.decimals 为准（与题面不一致时以题面为准并回写 range）。  - 有 sum_* 多测：必须按 MULTI_TEST「remain 拆分」实现；禁止 bA=大 且 bB=大 双顶格。
   - API 细节见同提示中的 generator.h 速查 / 题型模块；
     树/图类名必须 unweight:: / edge_weight:: 等前缀（禁止裸 Chain/Flower/Tree/Graph）；
@@ -327,22 +366,28 @@ BASE_GEN_RULES_CORE = """gen.cpp 必须满足（testlib / ACM-generator 写法�
 BASE_GEN_RULES = BASE_GEN_RULES_CORE
 
 BASE_VAL_RULES = """validator.cpp 写法（testlib）：
-  - 【职责 · 只验合法性 · 不验输入格式】校验取值范围与题面结构性质；
-    禁止把空格/换行/行末空白当作失败条件（与 SPJ「不验输出格式」同理）。
-  - 建议 #include "testlib.h"，main 里 registerValidation(argc, argv) 后立刻：
+  - 【职责 · 只验合法性 · 绝不校验格式】只校验取值范围与题面结构性质；
+    禁止把空格/换行/行末空白/多余空行当作失败条件（与 SPJ「不验输出格式」同理）。
+  - 【禁用格式校验函数 · 硬】readSpace / readEoln / 裸 readEof / 严格空白模式
+    一律禁止出现——validator 没有「格式」职责，写这些只会误报合法输入。
+  - #include "testlib.h"，main 里 registerValidation(argc, argv) 后立刻：
       inf.strict = false;  // 关闭严格空白；连续 read* 即可，空白自动跳过
-  - 用 inf.readInt(l, r) / readLong / readInts / readToken 按标程字段顺序读入；
-    禁止为「格式门禁」写 readSpace / readEoln。
+  - 用 inf.readInt(l, r) / readLong / readInts / readToken 按标程字段顺序连续读入；
+    同行多整数直接连续 readInt 或 readInts(k, lo, hi)，禁止插 readSpace / readEoln。
   - 【读字符串 · 硬门禁】单行一词（小写串 / 数字串 / token）必须用
       inf.readToken() 或 inf.readToken(\"[a-z]{L,R}\", \"S\")；
       禁止：readInt(T) / readInt(n) 之后立刻 readString()/readLine() 读下一行串。
       readString=readLine：只读【当前行剩余】到行末；T 独占一行时第一次会读到空串
       → 假报 |S| out of range / missing pattern，与 gen 无关。
       仅当字段本身含空格（整句文案）才用 readLine/readString。
+  - 【读至 EOF · 硬门禁】无规模头、标程 while(cin>>)/读到文件尾时：
+      必须 while (!inf.seekEof()) { read*... }；禁止 while (!inf.eof())。
+      eof() 不跳空白：行末 \\n 仍使 !eof() 为真，再读 token →
+      Unexpected end of file - token expected（常报在最后一行+1）。
+      有规模头/已知次数用 for，不要用 eof 探测；勿为此改 gen 删换行。
   - 【收尾 · 硬门禁】readEof() 不跳空白；strict=false 读完后指针常停在行末 \\n。
       必须：inf.skipBlanks(); inf.readEof();
       禁止：裸 inf.readEof();（合法输入也会 Expected EOF）。
-  - 同行多整数：直接连续 readInt，或 auto p = inf.readInts(k, lo, hi)；勿插 readSpace。
   - 【readLong 字面量 · 硬门禁】readLong 只有 ll/ull 重载；上下界用裸 int（含 1000000000）或 1e9
     → call of overloaded 'readLong(int, int)' is ambiguous。
     禁止：inf.readLong(1, 1000000000); / inf.readLong(1, 1e9);
@@ -352,9 +397,7 @@ BASE_VAL_RULES = """validator.cpp 写法（testlib）：
   - 【超 long long】题面数值超出 64 位有符号范围时，用 readToken / readToken(pattern) 读十进制串，
     禁止 readLong（会溢出/解析失败）；位数与前导零约束用 pattern 或 ensuref 校验。
   - 范围不符 / ensuref 失败会 quit 到 stderr。
-    Unexpected white-space → 设 inf.strict=false，去掉 readSpace/readEoln，勿改 gen。
-    Expected EOF（已读完全部字段、报在末行）→ 补 skipBlanks() 再 readEof；勿改 gen 删换行。
-    |S|/长度 out of range 且 gen 明显打了非空串 → 先查是否误用 readString，再查 gen。
+  - |S|/长度 out of range 且 gen 明显打了非空串 → 先查是否误用 readString（readInt 后读下一行串），再查 gen。
   - 【ensuref 政策】树/图题，或 range.json special_constraints / 题面「保证/约定」含结构性质
     → 必须 ensuref 校验（连通用并查集/BFS，禁止深递归 DFS）；
     仅有范围、无结构性质 → 只用 read* + skipBlanks + readEof，禁止编造 ensuref。

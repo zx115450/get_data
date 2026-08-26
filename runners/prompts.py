@@ -1,6 +1,8 @@
 """Agent task 构建器。"""
 import json
+import os
 import re
+from pathlib import Path
 
 from server.text_agent import simplify_text, beautify_text
 from utils.markup import to_plain_for_llm
@@ -8,6 +10,26 @@ from utils.markup import to_plain_for_llm
 
 CHECKER_PLAN_TARGET_CHARS = 1300
 CHECKER_PLAN_SOFT_MAX_CHARS = 2000
+
+
+def _artifact_exe_name(base: str) -> str:
+    """与 agent.tools.context._exe 对齐：Windows 带 .exe。"""
+    return base + (".exe" if os.name == "nt" else "")
+
+
+def missing_gen_validator_exes(job_dir: str | Path | None) -> list[str]:
+    """返回 job 目录中缺失的 gen/validator 可执行文件名（已带平台后缀）。"""
+    if not job_dir:
+        return []
+    d = Path(job_dir)
+    if not d.is_dir():
+        return [_artifact_exe_name("gen"), _artifact_exe_name("validator")]
+    missing: list[str] = []
+    for base in ("gen", "validator"):
+        name = _artifact_exe_name(base)
+        if not (d / name).exists():
+            missing.append(name)
+    return missing
 
 
 def _brief_text(text: str, head: int, tail: int, label: str) -> str:
@@ -320,8 +342,13 @@ def build_gen_fixer_task(
     self_check_result: str,
     attempt: int,
     max_attempts: int,
+    job_dir: str | Path | None = None,
 ) -> str:
-    """为 Gen Agent 自检失败后的 Fixer Agent 构造 task（精简版）。"""
+    """为 Gen Agent 自检失败后的 Fixer Agent 构造 task（精简版）。
+
+    job_dir 若提供：检测 gen/validator 可执行文件；缺失时改写为「先完整重写」指令，
+    避免在无编译产物时按自检日志修边角。
+    """
     # 题面可能很长，Fixer 阶段只保留关键信息摘要
     stmt_brief = (stmt_plain or "").strip()
     if len(stmt_brief) > 1200:
@@ -333,6 +360,49 @@ def build_gen_fixer_task(
 
     # 自检失败日志结构化：只保留前 N 个 FAIL 块
     error_log = _extract_failure_blocks(self_check_result, max_blocks=6, max_chars=1200)
+
+    missing = missing_gen_validator_exes(job_dir)
+    sc_lower = (self_check_result or "").lower()
+    needs_full_rewrite = bool(missing) or (
+        "未编译" in (self_check_result or "")
+        or "请先 write_gen" in (self_check_result or "")
+        or "gen 未编译" in sc_lower
+    )
+
+    if needs_full_rewrite:
+        missing_note = (
+            f"缺失可执行文件：{', '.join(missing)}。"
+            if missing
+            else "自检表明 gen/validator 尚未成功编译。"
+        )
+        parts = [
+            "【角色】Gen Fixer\n"
+            f"【前置条件 · 硬】{missing_note}"
+            "当前没有可运行的 gen/validator，按自检 FAIL 行「修边角」无效。\n"
+            "【目标】先产出可编译的完整 gen.cpp 与 validator.cpp，再跑通 run_self_check()。\n"
+            "【约束】只写 gen.cpp / validator.cpp；禁止修改 gen_special.cpp、range.json、checker.cpp、标程；"
+            "write_gen / write_validate 必须传【完整 content】（从 #include 到 main 结尾 }）；"
+            "禁止空调用、半截、__OMITTED_SOURCE__；宜短而全。"
+            "源码必须含 int main(int argc, char* argv[])；"
+            "禁止把 Agent 工具 finish(...)/write_gen/write_validate 写进 C++（用 return 0;）。"
+            "特殊样例由后续 SpecialCoder 处理，本阶段忽略 special_samples。",
+            f"\n【题面摘要】\n{stmt_brief}",
+            f"\n【数据范围摘要】\n{range_brief}",
+            f"\n【range.json】\n```json\n{json.dumps(range_json, ensure_ascii=False, indent=2)}```",
+            f"\n【自检失败摘要（仅供参考，本轮优先整份重写）】\n```\n{error_log}\n```",
+            "\n【动作 · 本轮必须】\n"
+            "1. 可读 read_file(\"gen_plan.md\") 一次对齐规格；"
+            "盘上若有残缺 gen.cpp 可参考，但不要局部补丁。\n"
+            "2. 立刻 write_gen(完整源码) + write_validate(完整源码)（可并行）：\n"
+            "   - gen：#include \"testlib.h\"（或 generator.h）+ "
+            "int main(int argc, char* argv[]) { registerGen(...); opt...; type 分支; return 0; }\n"
+            "   - validator：#include \"testlib.h\" + registerValidation + "
+            "读入校验 + skipBlanks + readEof。\n"
+            "3. 覆盖 range.edge_cases 全部分支与 constraints 的 opt；编译失败则整份重写修正。\n"
+            "4. 编译成功后若自检仍 FAIL，再按失败摘要定点修；通过后 finish(summary)。\n"
+            f"这是第 {attempt}/{max_attempts} 轮自动修复；若本轮仍失败，将回退基线并中止本阶段。",
+        ]
+        return "\n".join(parts)
 
     parts = [
         "【角色】Gen Fixer\n"
@@ -353,7 +423,7 @@ def build_gen_fixer_task(
         "再优化算法（无上限拒绝采样→改枚举合法集）；"
         "validate FAILED → 先看 stderr："
         "Expected EOF（报在末行）→ validator 补 skipBlanks() 再 readEof（禁止裸 readEof）；"
-        "Unexpected white-space → 设 inf.strict=false 并去掉 readSpace/readEoln；"
+        "Unexpected white-space → 说明 validator 还在做格式校验，去掉 readSpace/readEoln 并 inf.strict=false；"
         "random_t::next n must be positive → rnd.next(lo,hi) 的 lo>hi，改枚举合法位再采；"
         "范围/结构失败则优先修 gen；std FAILED → 对齐字段顺序/降低规模。\n"
         "   unused key seed/type/index/count → 在 type 分支前补齐全部 opt<>()。\n"

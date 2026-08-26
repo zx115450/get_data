@@ -61,8 +61,9 @@ range.json 必须含：
    无多测（EOF 读入 / 单组）禁止写 edge_Tmax / edge_T1。
 3. edge_cases 优先占位：edge_n1/edge_nmax，其余名额给 special_constraints 的核心结构（可合并同类）。
    约束变量的最小/最大边界名必须带 edge_ 前缀（edge_k_min，禁止 k_min）。
-4. write_range 成功后立刻 finish，不要重复 write_range。
-5. 看到 ERROR 要修正后再 write_range。
+4. write_range 每步最多一次；成功后立刻 finish（系统也会自动结束），不要同轮连写。
+5. 若 write_range 返回 ERROR（缺 content / JSON 非法 / 校验失败）：下一轮按 ERROR 整份修正再 write_range，可反复直到成功。
+6. 无已有 range 时禁止 finish「无需重写」，必须先成功写出文件。
 """
 
 
@@ -340,17 +341,17 @@ def propose_range_json(
         f"constraints 覆盖题面中的规模变量（如 n、T、m）。"
         f"edge_cases 总数 4～6：优先 edge_n1/edge_nmax，其余给 special_constraints 关键结构（可合并，勿超 6）。"
         f"约束极值名须带 edge_ 前缀（edge_k_min，禁止 k_min）；结构名可无前缀。"
-        f"写完 write_range 后 finish。"
+        f"写完 write_range 后 finish。write_range 每步最多一次；"
+        f"若返回 ERROR 则下一轮整份修正再写，可反复直到成功。"
         f"务必填写 special_constraints 字段（即使为空数组也要写）。\n"
         f"务必填写 problem_type：一个或多个与题面一致的英文标识符（如 tree / tree,multi_test / [tree,multi_test]）。\n"
     )
     summary = agent_run(
         task,
-        max_steps=4,
+        max_steps=6,
         verbose=False,
         system_prompt=RANGE_ONLY_PROMPT,
         tool_schemas=RANGE_TOOL_SCHEMAS,
-        tool_limits={"write_range": 1},
     )
     path = work / "range.json"
     if not path.exists():

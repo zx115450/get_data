@@ -10,7 +10,12 @@ from agent.llm import chat_text
 from storage import job_store
 from knowledge.few_shots import get_few_shot_rag
 from runners.adaptive import adaptive_steps
-from runners.prompts import build_coder_rewrite_task, build_gen_fixer_task, build_std_block
+from runners.prompts import (
+    build_coder_rewrite_task,
+    build_gen_fixer_task,
+    build_std_block,
+    missing_gen_validator_exes,
+)
 from runners.snapshot import (
     has_gen_val_at_resume,
     restore_good_snapshot,
@@ -226,6 +231,8 @@ def _run_range_only_agent(
         f"edge_cases 总数 4～6：优先 edge_n1/edge_nmax，其余给 special_constraints 关键结构（可合并，勿超 6）。"
         f"约束极值名须带 edge_ 前缀（edge_k_min，禁止 k_min）；结构名可无前缀。"
         f"{action_line}"
+        f"write_range 每步最多一次；若返回 ERROR（缺 content / JSON 非法 / 校验失败），下一轮整份修正再写，可反复直到成功。"
+        f"无已有文件时禁止 finish「无需重写」。"
         f"务必填写 special_constraints 字段（即使为空数组也要写）。\n"
         f"务必填写 problem_type：一个或多个与题面一致的英文标识符（如 tree / tree,multi_test / [tree,multi_test]）。\n"
     )
@@ -233,12 +240,11 @@ def _run_range_only_agent(
     job_store.add_progress(job, progress_label)
     summary = agent_run(
         range_task,
-        max_steps=4,
+        max_steps=6,
         verbose=False,
         on_event=on_event,
         system_prompt=prompts.build_range_prompt(),
         tool_schemas=RANGE_TOOL_SCHEMAS,
-        tool_limits={"write_range": 1},
     )
     job_store.add_progress(job, f"【Range】结束: {summary}")
 
@@ -739,9 +745,9 @@ def _build_coder_task(
         )
     conflict_block = "\n".join(conflict_parts)
 
-    skeleton = ""
     from knowledge.few_shots import normalize_problem_types
-    if set(normalize_problem_types(eff_type)) & {"tree", "weighted_tree", "graph", "weighted_graph"}:
+    types = set(normalize_problem_types(eff_type))
+    if types & {"tree", "weighted_tree", "graph", "weighted_graph"}:
         skeleton = (
             "\n【最短可编骨架 · 树/图 · 必遵守】\n"
             '#include "generator.h"\n'
@@ -761,7 +767,25 @@ def _build_coder_task(
             "禁止 weight:: / set_weight_limit / 1e9\n"
             '  if (type == "random") { /* ... */ }\n'
             '  else if (type == "edge_xxx") { /* 与 range 同名 */ }\n'
-            "  return 0;\n"
+            "  return 0;  // 禁止在源码写 finish(...); finish 是 Agent 工具\n"
+            "}\n"
+        )
+    else:
+        # 非树图题也强制带 main，避免模型照抄「无 main」样板片段导致全局 registerGen
+        skeleton = (
+            "\n【最短可编骨架 · 必遵守】\n"
+            '#include "testlib.h"\n'
+            "using namespace std;\n"
+            "int main(int argc, char* argv[]) {\n"
+            "  registerGen(argc, argv, 1);\n"
+            '  int seed = opt<int>("seed", 0);\n'
+            '  string type = opt<string>("type", "random");  // 禁止 opt<int>("type")\n'
+            '  int index = opt<int>("index", 0), count = opt<int>("count", 27);\n'
+            "  // 再 opt 全部 constraints（名与 range.json 一致）\n"
+            '  if (type == "random") { /* 按 plan 第 4 节分层构造并打印【输入】 */ }\n'
+            '  else if (type == "edge_xxx") { /* 与 range.edge_cases 逐字符同名 */ }\n'
+            "  // … range 有几个 edge_cases 就几个 else if\n"
+            "  return 0;  // 禁止在源码写 finish(...); finish 是 Agent 工具\n"
             "}\n"
         )
 
@@ -770,10 +794,16 @@ def _build_coder_task(
         "【分工】你只负责实现；禁止重新设计 edge_cases / API / 预算；"
         "按第 5/6 节落地，第 8 节仅为短模板顺序提示。\n"
         "【冲突原则】若 plan 第 5 节与第 1 节输入格式或标程读入矛盾"
-        "（例如要求 gen 打印答案/失败文案/排列），以第 1 节 + 标程读入为准，只打印输入。\n\n"
+        "（例如要求 gen 打印答案/失败文案/排列），以第 1 节 + 标程读入为准，只打印输入。\n"
+        "【冲突原则 · 系统 API】若 plan 伪代码与系统【rnd.next 合法签名】/固定样板/generator.h API 冲突"
+        "（如 rnd.next(lo,hi,k)、opt<int>(\"type\")、裸 Chain）：以系统为准改写调用，"
+        "仍按 plan 的分支名、取值区间与【输入】字段落地。\n\n"
         "【content 书写 · 必读】write_gen / write_validate 的 arguments 必须含完整 content"
         "（从 #include 到 main 结尾 }）；禁止空调用、半截、摘要；宜短而全，防止 JSON 截断"
         "（出现 recovered / missing_content 须立刻整份重写）。\n"
+        "【硬】gen.cpp 必须含 int main(int argc, char* argv[])；"
+        "registerGen / opt / type 分支均在 main 内；以 return 0; 结束；"
+        "禁止把 finish/write_gen/write_validate 等 Agent 工具名写进 C++。\n"
         f"{skeleton}\n"
         f"【range.json】\n```json\n{json.dumps(range_json, ensure_ascii=False, indent=2)}```\n\n"
         f"{conflict_block}\n\n"
@@ -781,8 +811,11 @@ def _build_coder_task(
         "1. 只 read_file('gen_plan.md') 一次；range.json 已在上方，禁止再读。\n"
         "2. 首轮勿读 gen.cpp / validator.cpp；读完 plan 后直接 write_gen + write_validate"
         "（各自带完整 content，可并行）。\n"
+        "   【双产物】若系统提示缺 validator：下一调用必须 write_validate，禁止再 write_gen；"
+        "缺 gen 时对称。一侧已成功勿反复空写。\n"
         "3. 【规格优先级】gen_plan.md 第 5/6/7 节（第 8 节为短模板）> range.json > 上方冲突对照摘要；"
-        "但「gen 只打印输入」高于错误的答案输出步骤；API 另遵守系统【generator.h API】硬约束。\n"
+        "但「gen 只打印输入」高于错误的答案输出步骤；"
+        "系统【rnd.next 合法签名】/固定样板/generator.h API 高于 plan 中的伪代码调用。\n"
         "4. 覆盖 plan/range 中全部 edge_cases 分支与 constraints 变量 opt"
         "（seed/index/count/type + 全部约束名）。\n"
         "   【type 硬约束】必须 `string type = opt<string>(\"type\", \"random\")`，"
@@ -1199,6 +1232,7 @@ def run_gen_agent(
                 retry_task = build_gen_fixer_task(
                     stmt_plain, range_plain, range_json or {},
                     self_check_result, attempt, 2,
+                    job_dir=job_dir,
                 )
                 retry_summary = agent_run(
                     retry_task,
@@ -1299,10 +1333,22 @@ def run_gen_agent(
             )
             break
 
-        job_store.add_progress(job, f"【Fixer】第 {attempt}/{max_fixer_attempts} 轮：根据自检失败日志修复")
+        missing_exes = missing_gen_validator_exes(job_dir)
+        if missing_exes or "未编译" in (self_check_result or ""):
+            job_store.add_progress(
+                job,
+                f"【Fixer】第 {attempt}/{max_fixer_attempts} 轮："
+                f"缺少 {', '.join(missing_exes) or '已编译产物'}，"
+                "指令改为先完整 write_gen + write_validate",
+            )
+        else:
+            job_store.add_progress(
+                job, f"【Fixer】第 {attempt}/{max_fixer_attempts} 轮：根据自检失败日志修复"
+            )
         fixer_task = build_gen_fixer_task(
             stmt_plain, range_plain, range_json or {},
             self_check_result, attempt, max_fixer_attempts,
+            job_dir=job_dir,
         )
         fixer_summary = agent_run(
             fixer_task,

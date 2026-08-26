@@ -104,16 +104,18 @@ validator.cpp:
 #include "testlib.h"
 using namespace std;
 int main(int argc, char* argv[]) {
-    registerValidation();
-    int n = inf.readInt(1, 1000, "n"); inf.readSpace();
-    int m = inf.readInt(0, 3000, "m"); inf.readEoln();
+    registerValidation(argc, argv);
+    inf.strict = false;  // 不验空白格式
+    int n = inf.readInt(1, 1000, "n");
+    int m = inf.readInt(0, 3000, "m");
     set<pair<int,int>> es;
     for (int i = 0; i < m; i++) {
-        int u = inf.readInt(1, n, "u"); inf.readSpace();
-        int v = inf.readInt(1, n, "v"); inf.readEoln();
+        int u = inf.readInt(1, n, "u");
+        int v = inf.readInt(1, n, "v");
         ensuref(u != v, "self loop %d", u);
         ensuref(es.insert(make_pair(min(u, v), max(u, v))).second, "duplicate edge %d %d", u, v);
     }
+    inf.skipBlanks();
     inf.readEof();
     return 0;
 }

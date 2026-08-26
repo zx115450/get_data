@@ -62,14 +62,13 @@ validator.cpp:
 #include "testlib.h"
 using namespace std;
 int main(int argc, char* argv[]) {
-    registerValidation();
+    registerValidation(argc, argv);
+    inf.strict = false;  // 不验空白格式
     int n = inf.readInt(1, 100000, "n");
-    inf.readEoln();
     for (int i = 0; i < n; i++) {
         inf.readLong(-1000000000LL, 1000000000LL, "ai");
-        if (i + 1 < n) inf.readSpace();
     }
-    inf.readEoln();
+    inf.skipBlanks();
     inf.readEof();
     return 0;
 }
@@ -144,14 +143,14 @@ const int MAXN = 100005;
 int par[MAXN];
 int find(int x) { return par[x] == x ? x : par[x] = find(par[x]); }
 int main(int argc, char* argv[]) {
-    registerValidation();
+    registerValidation(argc, argv);
+    inf.strict = false;  // 不验空白格式
     int n = inf.readInt(2, 100000, "n");
-    inf.readEoln();
     for (int i = 1; i <= n; i++) par[i] = i;
     set<pair<int,int>> es;
     for (int i = 0; i < n - 1; i++) {
-        int u = inf.readInt(1, n, "u"); inf.readSpace();
-        int v = inf.readInt(1, n, "v"); inf.readEoln();
+        int u = inf.readInt(1, n, "u");
+        int v = inf.readInt(1, n, "v");
         ensuref(u != v, "self loop at %d", u);
         auto key = make_pair(min(u, v), max(u, v));
         ensuref(es.insert(key).second, "duplicate edge %d %d", u, v);
@@ -161,6 +160,7 @@ int main(int argc, char* argv[]) {
     }
     int root = find(1);
     for (int i = 2; i <= n; i++) ensuref(find(i) == root, "not connected");
+    inf.skipBlanks();
     inf.readEof();
     return 0;
 }
@@ -288,16 +288,18 @@ validator.cpp:
 #include "testlib.h"
 using namespace std;
 int main(int argc, char* argv[]) {
-    registerValidation();
-    int n = inf.readInt(1, 1000, "n"); inf.readSpace();
-    int m = inf.readInt(0, 3000, "m"); inf.readEoln();
+    registerValidation(argc, argv);
+    inf.strict = false;  // 不验空白格式
+    int n = inf.readInt(1, 1000, "n");
+    int m = inf.readInt(0, 3000, "m");
     set<pair<int,int>> es;
     for (int i = 0; i < m; i++) {
-        int u = inf.readInt(1, n, "u"); inf.readSpace();
-        int v = inf.readInt(1, n, "v"); inf.readEoln();
+        int u = inf.readInt(1, n, "u");
+        int v = inf.readInt(1, n, "v");
         ensuref(u != v, "self loop %d", u);
         ensuref(es.insert(make_pair(min(u, v), max(u, v))).second, "duplicate edge %d %d", u, v);
     }
+    inf.skipBlanks();
     inf.readEof();
     return 0;
 }
@@ -366,12 +368,14 @@ validator.cpp:
 #include "testlib.h"
 using namespace std;
 int main(int argc, char* argv[]) {
-    registerValidation();
-    int n = inf.readInt(1, 1000, "n"); inf.readEoln();
-    string s = inf.readToken("[a-z]+", "s"); inf.readEoln();
-    string p = inf.readToken("[a-z]+", "p"); inf.readEoln();
+    registerValidation(argc, argv);
+    inf.strict = false;  // 不验空白格式
+    int n = inf.readInt(1, 1000, "n");
+    string s = inf.readToken("[a-z]+", "s");
+    string p = inf.readToken("[a-z]+", "p");
     ensuref((int)s.size() == n, "|s|=%d != n=%d", (int)s.size(), n);
     ensuref((int)p.size() >= 1 && (int)p.size() <= n, "p len out of range");
+    inf.skipBlanks();
     inf.readEof();
     return 0;
 }
@@ -435,13 +439,13 @@ validator.cpp:
 #include "testlib.h"
 using namespace std;
 int main(int argc, char* argv[]) {
-    registerValidation();
-    int n = inf.readInt(1, 100000, "n"); inf.readEoln();
+    registerValidation(argc, argv);
+    inf.strict = false;  // 不验空白格式
+    int n = inf.readInt(1, 100000, "n");
     for (int i = 0; i < n; i++) {
         inf.readLong(1, 1000000000LL, "ai");
-        if (i + 1 < n) inf.readSpace();
     }
-    inf.readEoln();
+    inf.skipBlanks();
     inf.readEof();
     return 0;
 }
@@ -517,13 +521,14 @@ validator.cpp:
 #include "testlib.h"
 using namespace std;
 int main(int argc, char* argv[]) {
-    registerValidation();
+    registerValidation(argc, argv);
+    inf.strict = false;  // 不验空白格式
     int n = inf.readInt(3, 1000, "n");
-    inf.readEoln();
     for (int i = 0; i < n; i++) {
-        inf.readInt(-1000000, 1000000, "x"); inf.readSpace();
-        inf.readInt(-1000000, 1000000, "y"); inf.readEoln();
+        inf.readInt(-1000000, 1000000, "x");
+        inf.readInt(-1000000, 1000000, "y");
     }
+    inf.skipBlanks();
     inf.readEof();
     return 0;
 }
@@ -624,19 +629,19 @@ validator.cpp:
 #include "testlib.h"
 using namespace std;
 int main(int argc, char* argv[]) {
-    registerValidation();
-    int T = inf.readInt(1, 1000, "T"); inf.readEoln();
+    registerValidation(argc, argv);
+    inf.strict = false;  // 不验空白格式
+    int T = inf.readInt(1, 1000, "T");
     long long sum = 0;
     for (int t = 0; t < T; t++) {
-        int n = inf.readInt(1, 100000, "n"); inf.readEoln();
+        int n = inf.readInt(1, 100000, "n");
         sum += n;
         ensuref(sum <= 100000, "sum n = %lld exceeds 100000", sum);
         for (int i = 0; i < n; i++) {
             inf.readLong(-1000000000LL, 1000000000LL, "ai");
-            if (i + 1 < n) inf.readSpace();
         }
-        inf.readEoln();
     }
+    inf.skipBlanks();
     inf.readEof();
     return 0;
 }
@@ -688,14 +693,16 @@ validator.cpp:
 #include "testlib.h"
 using namespace std;
 int main(int argc, char* argv[]) {
-    registerValidation();
-    int n = inf.readInt(1, 100, "n"); inf.readSpace();
-    int W = inf.readInt(1, 1000, "W"); inf.readEoln();
+    registerValidation(argc, argv);
+    inf.strict = false;  // 不验空白格式
+    int n = inf.readInt(1, 100, "n");
+    int W = inf.readInt(1, 1000, "W");
     for (int i = 0; i < n; i++) {
-        inf.readInt(1, 1000, "wi"); inf.readSpace();
-        inf.readInt(1, 1000, "vi"); inf.readEoln();
+        inf.readInt(1, 1000, "wi");
+        inf.readInt(1, 1000, "vi");
     }
     ensuref(n >= 1, "n>=1");
+    inf.skipBlanks();
     inf.readEof();
     return 0;
 }
@@ -751,17 +758,17 @@ validator.cpp:
 #include "testlib.h"
 using namespace std;
 int main(int argc, char* argv[]) {
-    registerValidation();
-    int n = inf.readInt(1, 200, "n"); inf.readSpace();
-    int m = inf.readInt(1, 200, "m"); inf.readEoln();
+    registerValidation(argc, argv);
+    inf.strict = false;  // 不验空白格式
+    int n = inf.readInt(1, 200, "n");
+    int m = inf.readInt(1, 200, "m");
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < m; j++) {
             inf.readLong(-1000000000LL, 1000000000LL, "aij");
-            if (j + 1 < m) inf.readSpace();
         }
-        inf.readEoln();
     }
     ensuref(n * m >= 1, "nonempty");
+    inf.skipBlanks();
     inf.readEof();
     return 0;
 }
@@ -814,19 +821,19 @@ validator.cpp:
 #include "testlib.h"
 using namespace std;
 int main(int argc, char* argv[]) {
-    registerValidation();
-    int n = inf.readInt(1, 100000, "n"); inf.readSpace();
-    int q = inf.readInt(1, 100000, "q"); inf.readEoln();
+    registerValidation(argc, argv);
+    inf.strict = false;  // 不验空白格式
+    int n = inf.readInt(1, 100000, "n");
+    int q = inf.readInt(1, 100000, "q");
     for (int i = 0; i < n; i++) {
         inf.readLong(-1000000000LL, 1000000000LL, "ai");
-        if (i + 1 < n) inf.readSpace();
     }
-    inf.readEoln();
     for (int i = 0; i < q; i++) {
-        int l = inf.readInt(1, n, "l"); inf.readSpace();
-        int r = inf.readInt(l, n, "r"); inf.readEoln();
+        int l = inf.readInt(1, n, "l");
+        int r = inf.readInt(l, n, "r");
         ensuref(l <= r, "l<=r");
     }
+    inf.skipBlanks();
     inf.readEof();
     return 0;
 }
@@ -884,14 +891,15 @@ using namespace std;
 const int MAXN = 100005; int par[MAXN];
 int find(int x){return par[x]==x?x:par[x]=find(par[x]);}
 int main(int argc, char* argv[]) {
-    registerValidation();
-    int n = inf.readInt(2, 100000, "n"); inf.readEoln();
+    registerValidation(argc, argv);
+    inf.strict = false;  // 不验空白格式
+    int n = inf.readInt(2, 100000, "n");
     for (int i = 1; i <= n; i++) par[i] = i;
     set<pair<int,int>> es;
     for (int i = 0; i < n - 1; i++) {
-        int u = inf.readInt(1, n, "u"); inf.readSpace();
-        int v = inf.readInt(1, n, "v"); inf.readSpace();
-        inf.readLong(1, 1000000000LL, "w"); inf.readEoln();
+        int u = inf.readInt(1, n, "u");
+        int v = inf.readInt(1, n, "v");
+        inf.readLong(1, 1000000000LL, "w");
         ensuref(u != v, "self loop");
         auto key = make_pair(min(u,v), max(u,v));
         ensuref(es.insert(key).second, "dup edge");
@@ -901,6 +909,7 @@ int main(int argc, char* argv[]) {
     }
     int r = find(1);
     for (int i = 2; i <= n; i++) ensuref(find(i) == r, "not connected");
+    inf.skipBlanks();
     inf.readEof();
     return 0;
 }
@@ -983,17 +992,19 @@ validator.cpp:
 #include "testlib.h"
 using namespace std;
 int main(int argc, char* argv[]) {
-    registerValidation();
-    int n = inf.readInt(1, 1000, "n"); inf.readSpace();
-    int m = inf.readInt(0, 3000, "m"); inf.readEoln();
+    registerValidation(argc, argv);
+    inf.strict = false;  // 不验空白格式
+    int n = inf.readInt(1, 1000, "n");
+    int m = inf.readInt(0, 3000, "m");
     set<pair<int,int>> es;
     for (int i = 0; i < m; i++) {
-        int u = inf.readInt(1, n, "u"); inf.readSpace();
-        int v = inf.readInt(1, n, "v"); inf.readSpace();
-        inf.readLong(1, 1000000000LL, "w"); inf.readEoln();
+        int u = inf.readInt(1, n, "u");
+        int v = inf.readInt(1, n, "v");
+        inf.readLong(1, 1000000000LL, "w");
         ensuref(u != v, "self loop");
         ensuref(es.insert({min(u,v), max(u,v)}).second, "dup");
     }
+    inf.skipBlanks();
     inf.readEof();
     return 0;
 }
@@ -1047,19 +1058,19 @@ validator.cpp:
 #include "testlib.h"
 using namespace std;
 int main(int argc, char* argv[]) {
-    registerValidation();
-    int n = inf.readInt(1, 100000, "n"); inf.readSpace();
-    int q = inf.readInt(1, 100000, "q"); inf.readEoln();
+    registerValidation(argc, argv);
+    inf.strict = false;  // 不验空白格式
+    int n = inf.readInt(1, 100000, "n");
+    int q = inf.readInt(1, 100000, "q");
     for (int i = 0; i < n; i++) {
         inf.readInt(1, 1000000000, "ai");
-        if (i + 1 < n) inf.readSpace();
     }
-    inf.readEoln();
     for (int i = 0; i < q; i++) {
-        int op = inf.readInt(1, 1, "op"); inf.readSpace();
-        inf.readInt(1, n, "i"); inf.readEoln();
+        int op = inf.readInt(1, 1, "op");
+        inf.readInt(1, n, "i");
         ensuref(op == 1, "only query op=1 in this offline sample");
     }
+    inf.skipBlanks();
     inf.readEof();
     return 0;
 }
